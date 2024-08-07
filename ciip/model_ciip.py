@@ -6,7 +6,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from model import ModifiedResNet, S1Transformer, S2Transformer
+from model import ModifiedResNet#, S1Transformer, S2Transformer
 # VisionTransformer
 
 
@@ -24,11 +24,13 @@ class CIIP(nn.Module):
                  s1_layers: Union[Tuple[int, int, int, int], int],
                  s1_width: int,
                  s1_patch_size: int,
+                 s1_bands: int,
                  # s2
                  s2_resolution: int,
                  s2_layers: Union[Tuple[int, int, int, int], int],
                  s2_width: int,
                  s2_patch_size: int,
+                 s2_bands: int,
                 #  # text
                 #  context_length: int,
                 #  vocab_size: int,
@@ -44,16 +46,17 @@ class CIIP(nn.Module):
         ## Create s1 encoder model
         if isinstance(s1_layers, (tuple, list)):
             s1_heads = s1_width * 32 // 64
-            self.s1 = ModifiedResNet(
+            self.encoder_s1 = ModifiedResNet(
                 layers=s1_layers,
                 output_dim=embed_dim,
                 heads=s1_heads,
+                num_bands=s1_bands,
                 input_resolution=s1_resolution,
                 width=s1_width
             )
         else:
             s1_heads = s1_width // 64
-            self.s1 = S1Transformer(
+            self.encoder_s1 = S1Transformer(
                 input_resolution=s1_resolution,
                 patch_size=s1_patch_size,
                 width=s1_width,
@@ -65,16 +68,17 @@ class CIIP(nn.Module):
         ## Same for s2
         if isinstance(s2_layers, (tuple, list)):
             s2_heads = s2_width * 32 // 64
-            self.s2 = ModifiedResNet(  ## adapt this to s2
+            self.encoder_s2 = ModifiedResNet(  ## adapt this to s2
                 layers=s2_layers,
                 output_dim=embed_dim,
                 heads=s2_heads,
+                num_bands=s2_bands,
                 input_resolution=s2_resolution,
                 width=s2_width
             )
         else:
             s2_heads = s2_width // 64
-            self.s2 = S2Transformer(
+            self.encoder_s2 = S2Transformer(
                 input_resolution=s2_resolution,
                 patch_size=s2_patch_size,
                 width=s2_width,
@@ -97,7 +101,7 @@ class CIIP(nn.Module):
         # self.ln_final = LayerNorm(transformer_width)
 
         # self.text_projection = nn.Parameter(torch.empty(transformer_width, embed_dim))
-        # self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
         self.initialize_parameters()
 
@@ -105,29 +109,29 @@ class CIIP(nn.Module):
         # nn.init.normal_(self.token_embedding.weight, std=0.02)
         # nn.init.normal_(self.positional_embedding, std=0.01)
 
-        if isinstance(self.s1, ModifiedResNet):
-            if self.s1.attnpool is not None:
-                std = self.s1.attnpool.c_proj.in_features ** -0.5
-                nn.init.normal_(self.s1.attnpool.q_proj.weight, std=std)
-                nn.init.normal_(self.s1.attnpool.k_proj.weight, std=std)
-                nn.init.normal_(self.s1.attnpool.v_proj.weight, std=std)
-                nn.init.normal_(self.s1.attnpool.c_proj.weight, std=std)
+        if isinstance(self.encoder_s1, ModifiedResNet):
+            if self.encoder_s1.attnpool is not None:
+                std = self.encoder_s1.attnpool.c_proj.in_features ** -0.5
+                nn.init.normal_(self.encoder_s1.attnpool.q_proj.weight, std=std)
+                nn.init.normal_(self.encoder_s1.attnpool.k_proj.weight, std=std)
+                nn.init.normal_(self.encoder_s1.attnpool.v_proj.weight, std=std)
+                nn.init.normal_(self.encoder_s1.attnpool.c_proj.weight, std=std)
 
-            for resnet_block in [self.s1.layer1, self.s1.layer2, self.s1.layer3, self.s1.layer4]:
+            for resnet_block in [self.encoder_s1.layer1, self.encoder_s1.layer2, self.encoder_s1.layer3, self.encoder_s1.layer4]:
                 for name, param in resnet_block.named_parameters():
                     if name.endswith("bn3.weight"):
                         nn.init.zeros_(param)
 
         ## Same For s2 Modality
-        if isinstance(self.s2, ModifiedResNet):
-            if self.s2.attnpool is not None:
-                std = self.s2.attnpool.c_proj.in_features ** -0.5
-                nn.init.normal_(self.s2.attnpool.q_proj.weight, std=std)
-                nn.init.normal_(self.s2.attnpool.k_proj.weight, std=std)
-                nn.init.normal_(self.s2.attnpool.v_proj.weight, std=std)
-                nn.init.normal_(self.s2.attnpool.c_proj.weight, std=std)
+        if isinstance(self.encoder_s2, ModifiedResNet):
+            if self.encoder_s2.attnpool is not None:
+                std = self.encoder_s2.attnpool.c_proj.in_features ** -0.5
+                nn.init.normal_(self.encoder_s2.attnpool.q_proj.weight, std=std)
+                nn.init.normal_(self.encoder_s2.attnpool.k_proj.weight, std=std)
+                nn.init.normal_(self.encoder_s2.attnpool.v_proj.weight, std=std)
+                nn.init.normal_(self.encoder_s2.attnpool.c_proj.weight, std=std)
 
-            for resnet_block in [self.s2.layer1, self.s2.layer2, self.s2.layer3, self.s2.layer4]:
+            for resnet_block in [self.encoder_s2.layer1, self.encoder_s2.layer2, self.encoder_s2.layer3, self.encoder_s2.layer4]:
                 for name, param in resnet_block.named_parameters():
                     if name.endswith("bn3.weight"):
                         nn.init.zeros_(param)
@@ -154,11 +158,11 @@ class CIIP(nn.Module):
 
     @property
     def dtype_s1(self):
-        return self.s1.conv1.weight.dtype
+        return self.encoder_s1.conv1.weight.dtype
     
     @property
     def dtype_s2(self):
-        return self.s2.conv1.weight.dtype
+        return self.encoder_s2.conv1.weight.dtype
 
     def encode_s1(self, s1):
         return self.encoder_s1(s1.type(self.dtype_s1))
@@ -267,17 +271,49 @@ def build_model(state_dict: dict):
     # transformer_heads = transformer_width // 64
     # transformer_layers = len(set(k.split(".")[2] for k in state_dict if k.startswith("transformer.resblocks")))
 
-    ## TODO: change this line
+    # ## TODO: change this line
+    # model = CIIP(
+    #     embed_dim,
+    #     image_resolution, vision_layers, vision_width, vision_patch_size,
+    #     context_length, vocab_size, transformer_width, transformer_heads, transformer_layers
+    # )
+
+    # for key in ["input_resolution"]: # ?
+    #     if key in state_dict:
+    #         del state_dict[key]
+
+    # convert_weights(model)
+    # model.load_state_dict(state_dict)
+    # return model.eval()
+
+if __name__ =="__main__":
+    
+    s1_resolution = 224
+    s1_bands = 3
+
+    s2_resolution = 224
+    s2_bands = 12
+
+    batch_size = 8
     model = CIIP(
-        embed_dim,
-        image_resolution, vision_layers, vision_width, vision_patch_size,
-        context_length, vocab_size, transformer_width, transformer_heads, transformer_layers
+        embed_dim=512,
+        s1_resolution=s1_resolution,
+        s1_layers=(3, 4, 6, 3), #Resnet-34
+        s1_width=512,
+        s1_patch_size=16,
+        s1_bands=s1_bands,
+        s2_resolution=s2_resolution,
+        s2_layers=(3, 4, 6, 3), #Resnet-34
+        s2_width=512,
+        s2_patch_size=16,
+        s2_bands=s2_bands,
     )
 
-    for key in ["input_resolution"]: # ?
-        if key in state_dict:
-            del state_dict[key]
 
-    convert_weights(model)
-    model.load_state_dict(state_dict)
-    return model.eval()
+    s1 = torch.randn(batch_size, s1_bands, s1_resolution, s1_resolution)
+    s2 = torch.randn(batch_size, s2_bands, s2_resolution, s2_resolution)
+
+    # print(model)
+
+    logits_per_s1, logits_per_s2 = model(s1, s2)
+    print(logits_per_s1.shape, logits_per_s2.shape)
