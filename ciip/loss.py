@@ -63,7 +63,7 @@ def gather_features(
     return all_image_features1, all_image_features2
 
 
-class ClipLoss(nn.Module):
+class CiipLoss(nn.Module):
 
     def __init__(
             self,
