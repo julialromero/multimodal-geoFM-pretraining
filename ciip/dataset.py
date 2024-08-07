@@ -27,6 +27,7 @@ from torch.utils.data import Dataset, DataLoader, SubsetRandomSampler, IterableD
 from torch.utils.data.distributed import DistributedSampler
 from webdataset.filters import _shuffle
 from webdataset.tariterators import base_plus_ext, url_opener, tar_file_expander, valid_sample
+import rasterio
 
 try:
     import horovod.torch as hvd
@@ -38,7 +39,7 @@ except ImportError:
 
 
 class S12Dataset(Dataset):
-    def __init__(self, root, transforms, img1_key, img2_key, label_key, sep="\t"):
+    def __init__(self, root):
         self.root = root
         self.num_locations = None
         self.length = None
@@ -47,7 +48,7 @@ class S12Dataset(Dataset):
 
 
         s1_dir = os.path.join(self.root, 's1')
-        s2_dir = os.path.join(self.root, 's2-l2a')
+        s2_dir = os.path.join(self.root, 's2c')
 
 
         s1_samples = os.listdir(s1_dir)
@@ -106,6 +107,9 @@ class S12Dataset(Dataset):
         path_to_s1_season = os.path.join(path_to_s1, s1_season_folders[season_idx])
         path_to_s2_season = os.path.join(path_to_s1, s2_season_folders[season_idx])
 
+        print(f'Path to s1: {path_to_s1_season}')
+        print(f'Path to s2: {path_to_s2_season}')
+
         ### load and stack s1 images
         vh_path = os.path.join(path_to_s1_season, 'VH.tif')
         vv_path = os.path.join(path_to_s1_season, 'VV.tif')
@@ -121,6 +125,7 @@ class S12Dataset(Dataset):
         s1_composite_image = np.stack((vh_image, vv_image, vv_image / vh_image), axis=-1)
                 
         
+        ### load and stack s2 images
         # Use Blue (B2), Green (B3), and Red (B4) bands for Sentinel-2 RGB composite
         # band_paths = [os.path.join(path_to_s2_season, f'B{band}.tif') for band in [2, 3, 4]]
         # stack every S2 band instead of just RGB
@@ -152,11 +157,11 @@ class S12Dataset(Dataset):
         
         return location_idx, season_idx
 
-    def read_raster_image(image_path):
+    def read_raster_image(self, image_path):
         with rasterio.open(image_path) as src:
             return src.read(1), src.profile
 
-    def normalize_image(image):
+    def normalize_image(self, image):
         """Normalize image data to the range [0, 1]"""
         image_min, image_max = np.min(image), np.max(image)
         return (image - image_min) / (image_max - image_min)
