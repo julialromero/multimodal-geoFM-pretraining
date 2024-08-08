@@ -5,8 +5,8 @@ from torch.cuda.amp import GradScaler
 import os
 import sys
 
-
-from test_data import get_dummy_dataloader
+from data import get_data
+# from test_data import get_dummy_dataloader
 # from ..loss import ClipLoss
 from train import train_one_epoch
 
@@ -32,35 +32,14 @@ dummy_model = CIIP(
     s2_bands=12,
 )
 
-# class DummyModel(nn.Module):
-#     def __init__(self, feature_dim=512):
-#         super(DummyModel, self).__init__()
-#         self.encoder1 = nn.Sequential(
-#             nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1),
-#             nn.ReLU(),
-#             nn.Flatten(),
-#             nn.Linear(64 * 32 * 32, feature_dim),
-#             nn.ReLU()
-#         )
-#         self.encoder2 = nn.Sequential(
-#             nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1),
-#             nn.ReLU(),
-#             nn.Flatten(),
-#             nn.Linear(64 * 32 * 32, feature_dim),
-#             nn.ReLU()
-#         )
-#         self.logit_scale = nn.Parameter(torch.ones([]) * torch.log(torch.tensor(1 / 0.07)))
-
-#     def forward(self, x1, x2):
-#         f1 = self.encoder1(x1)
-#         f2 = self.encoder2(x2)
-#         return {"s1_features": f1, "s2_features": f2, "logit_scale": self.logit_scale}
-
-
 
 def main():
     # Hyperparameters and arguments
     class Args:
+        root = 'data/'
+        dataset_type = 'ssl4eo'
+        train_data = True
+        val_data = False
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         precision = 'fp16' if torch.cuda.is_available() else 'fp32'
         accum_freq = 1
@@ -77,6 +56,8 @@ def main():
         rank = 0
         batch_size = 2
         horovod = False
+        distributed = False
+        workers = 0
 
     args = Args()
 
@@ -94,8 +75,7 @@ def main():
     print(f"Total number of parameters in encoder1: {count_parameters_encoder1}")
     print(f"Total number of parameters in encoder2: {count_parameters_encoder2}")
 
-    print(model)
-
+    # print(model)
 
     loss_fn = CiipLoss()
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
@@ -103,14 +83,18 @@ def main():
     scheduler = lambda step: None  # Dummy scheduler for testing
 
     # Initialize data loader
-    dataloader = get_dummy_dataloader(batch_size=args.batch_size)
-    data = {'train': type('dummy', (object,), {'dataloader': dataloader, 'set_epoch': lambda x: None})}
+    data_info = get_data(args, (None, None))
+    # data_in = data_info['train']
+    
+    # print(f'DATALOADER NUM EPOCHS: {data_in.num_epochs}')
+    # data = {'train': type('ssl4eo', (object,), {'dataloader': dataloader, 'set_epoch': lambda x: None})}
     
     # Initialize tensorboard writer
+    
     tb_writer = None
 
     # Train for one epoch
-    train_one_epoch(model, data, loss_fn, 0, optimizer, scaler, scheduler, None, args, tb_writer)
+    train_one_epoch(model, data_info, loss_fn, 0, optimizer, scaler, scheduler, None, args, tb_writer)
 
 if __name__ == "__main__":
     main()

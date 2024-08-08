@@ -6,8 +6,8 @@ import os
 # import random
 # import sys
 # import braceexpand
-# from dataclasses import dataclass
-# from multiprocessing import Value
+from dataclasses import dataclass
+from multiprocessing import Value
 import rasterio
 
 import numpy as np
@@ -143,12 +143,16 @@ class SSL4EODataset(Dataset):
 
 
 def get_ssl4eo_dataset(args, is_train, transforms):
-    input_filename = args.train_data if is_train else args.val_data
-    assert input_filename
+    root = args.root
+    # train_data if is_train else args.val_data
+    assert root
+    default_bands = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+
+
     dataset = SSL4EODataset(
-        input_filename, # root file path
+        root, # root file path
         transforms=transforms, # transforms
-        s2_bands=args.s2_bands # from config file
+        s2_bands=args.s2_bands if hasattr(args, 's2_bands') else default_bands  # from config file
     )
     num_samples = len(dataset)
     sampler = DistributedSampler(dataset) if args.distributed and is_train else None
@@ -192,28 +196,28 @@ def get_ssl4eo_dataset(args, is_train, transforms):
 #         return images, texts
 
 
-# class SharedEpoch:
-#     def __init__(self, epoch: int = 0):
-#         self.shared_epoch = Value('i', epoch)
+class SharedEpoch:
+    def __init__(self, epoch: int = 0):
+        self.shared_epoch = Value('i', epoch)
 
-#     def set_value(self, epoch):
-#         self.shared_epoch.value = epoch
+    def set_value(self, epoch):
+        self.shared_epoch.value = epoch
 
-#     def get_value(self):
-#         return self.shared_epoch.value
+    def get_value(self):
+        return self.shared_epoch.value
 
 
-# @dataclass
-# class DataInfo:
-#     dataloader: DataLoader
-#     sampler: DistributedSampler = None
-#     shared_epoch: SharedEpoch = None
+@dataclass
+class DataInfo:
+    dataloader: DataLoader
+    sampler: DistributedSampler = None
+    shared_epoch: SharedEpoch = None
 
-#     def set_epoch(self, epoch):
-#         if self.shared_epoch is not None:
-#             self.shared_epoch.set_value(epoch)
-#         if self.sampler is not None and isinstance(self.sampler, DistributedSampler):
-#             self.sampler.set_epoch(epoch)
+    def set_epoch(self, epoch):
+        if self.shared_epoch is not None:
+            self.shared_epoch.set_value(epoch)
+        if self.sampler is not None and isinstance(self.sampler, DistributedSampler):
+            self.sampler.set_epoch(epoch)
 
 
 # def expand_urls(urls, weights=None):
