@@ -45,6 +45,7 @@ class CIIP(nn.Module):
 
         ## Create s1 encoder model
         if isinstance(s1_layers, (tuple, list)):
+            print("Using ResNet for S1")
             s1_heads = s1_width * 32 // 64
             self.encoder_s1 = ModifiedResNet(
                 layers=s1_layers,
@@ -67,6 +68,7 @@ class CIIP(nn.Module):
 
         ## Same for s2
         if isinstance(s2_layers, (tuple, list)):
+            print("Using ResNet for S2")
             s2_heads = s2_width * 32 // 64
             self.encoder_s2 = ModifiedResNet(  ## adapt this to s2
                 layers=s2_layers,
@@ -104,6 +106,9 @@ class CIIP(nn.Module):
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
         self.initialize_parameters()
+
+        print("Final - S1 Encoder Parameters: ", self.count_parameters_encoder1())
+        print("Final - S2 Encoder Parameters: ", self.count_parameters_encoder2())
 
     def initialize_parameters(self):
         # nn.init.normal_(self.token_embedding.weight, std=0.02)
@@ -206,7 +211,16 @@ class CIIP(nn.Module):
             "logit_scale": logit_scale
             }
 
+    
+
         return out_dict
+    
+    # write definition to print number of parameters in encoder1 
+    def count_parameters_encoder1(self):
+        return sum(p.numel() for p in self.encoder_s1.parameters() if p.requires_grad)
+    
+    def count_parameters_encoder2(self):
+        return sum(p.numel() for p in self.encoder_s2.parameters() if p.requires_grad)
 
 
 

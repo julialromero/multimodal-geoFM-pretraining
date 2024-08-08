@@ -66,6 +66,7 @@ def backward(total_loss, scaler):
 def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist_model, args, tb_writer=None):
     # TODO: figure out what dist_model is
     device = torch.device(args.device)
+    print(device)
     autocast = get_autocast(args.precision)
     input_dtype = get_input_dtype(args.precision)
 
@@ -107,6 +108,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
         if args.accum_freq == 1:
             with autocast():
                 model_out = model(s1, s2)
+
                 print('model_out: ', model_out)
                 logit_scale = model_out["logit_scale"]
                 print('logit_scale: ', logit_scale)
@@ -187,6 +189,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
 
         if scaler is not None:
             if args.horovod:
+                print('hello')
                 optimizer.synchronize()
                 scaler.unscale_(optimizer)
                 if args.grad_clip_norm is not None:

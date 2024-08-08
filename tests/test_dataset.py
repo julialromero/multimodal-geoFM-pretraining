@@ -1,6 +1,6 @@
 import os, sys
-sys.path.append(os.path.abspath(os.path.join('..', 'ciip/ciip')))
-print(os.path.abspath(os.path.join('..', 'ciip/ciip')))
+# sys.path.append(os.path.abspath(os.path.join('..', 'ciip/ciip')))
+# print(os.path.abspath(os.path.join('..', 'ciip/ciip')))
 
 
 
