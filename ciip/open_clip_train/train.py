@@ -70,6 +70,10 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
     input_dtype = get_input_dtype(args.precision)
 
     model.train()
+    
+    ## for using pretrained model, these pretrained models are distributedparallel models
+    ## this means we have to either use a distributedparallel model, otherwise i think we have to rename the state_dict keys 
+    ## (as the naming convention is slightly different for regular vs distributed parallel)
     if args.distill:
         dist_model.eval()
 
@@ -86,6 +90,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
     data_time_m = AverageMeter()
     end = time.time()
     for i, batch in enumerate(dataloader):
+        print('i: ', i)
         i_accum = i // args.accum_freq
         step = num_batches_per_epoch * epoch + i_accum
 
@@ -102,28 +107,37 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
         if args.accum_freq == 1:
             with autocast():
                 model_out = model(s1, s2)
+                print('model_out: ', model_out)
                 logit_scale = model_out["logit_scale"]
+                print('logit_scale: ', logit_scale)
                 # print(model_out)
                 if args.distill:
                     with torch.no_grad():
                         dist_model_out = dist_model(s1, s2)
                     model_out.update({f'dist_{k}': v for k, v in dist_model_out.items()})
+                print('BEFORE LOSSES')
                 losses = loss(**model_out, output_dict=True)
+                print('losses: ', losses)
 
                 total_loss = sum(losses.values())
                 losses["loss"] = total_loss
 
+            print('BEFORE BACKWARD')
             backward(total_loss, scaler)
+            print('AFTER BACKWARD')
         else:
             # First, cache the features without any gradient tracking.
             with torch.no_grad():
                 with autocast():
+                    print('BEFORE MODEL2')
                     model_out = model(s1, s2)
+                    print('model_out2: ', model_out)
 
                     for f in ("logit_scale", "logit_bias"):
                         model_out.pop(f, None)
 
                     for key, val in model_out.items():
+                        print('key-val: ', {key, val})
                         if key in accum_features:
                             accum_features[key].append(val)
                         else:
@@ -134,6 +148,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
 
             # If (i + 1) % accum_freq is not zero, move on to the next batch.
             if ((i + 1) % args.accum_freq) > 0:
+                print('CONTINUE')
                 # FIXME this makes data time logging unreliable when accumulating
                 continue
 
@@ -144,8 +159,11 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
             for j in range(args.accum_freq):
                 s1 = accum_s1[j]
                 s2 = accum_s2[j]
+                print('s1: ', s1)
+                print('s2: ', s2)
                 with autocast():
                     model_out = model(s1, s2)
+                    print('model_out3: ', model_out)
 
                     inputs_no_accum = {}
                     inputs_no_accum["logit_scale"] = logit_scale = model_out.pop("logit_scale")
@@ -157,7 +175,9 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                         accumulated = accum_features[key]
                         inputs[key] = torch.cat(accumulated[:j] + [model_out[key]] + accumulated[j + 1:])
 
+                    print('BEFORE LOSSES3')
                     losses = loss(**inputs, **inputs_no_accum, output_dict=True)
+                    print('AFTER LOSSES3: ', losses)
                     del inputs
                     del inputs_no_accum
                     total_loss = sum(losses.values())
@@ -182,7 +202,9 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
         else:
             if args.grad_clip_norm is not None:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm, norm_type=2.0)
+            print('BEFORE optimizer')
             optimizer.step()
+            print('AFTER optimizer')
 
         # reset gradient accum, if enabled
         if args.accum_freq > 1:
