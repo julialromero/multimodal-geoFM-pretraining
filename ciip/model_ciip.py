@@ -199,7 +199,14 @@ class CIIP(nn.Module):
         logits_per_s2 = logits_per_s1.t()
 
         # shape = [global_batch_size, global_batch_size]
-        return logits_per_s1, logits_per_s2
+ 
+        out_dict = {
+            "s1_features": logits_per_s1,
+            "s2_features": logits_per_s2,
+            "logit_scale": logit_scale
+            }
+
+        return out_dict
 
 
 
