@@ -17,8 +17,8 @@ except ImportError:
 
 
 def gather_features(
-        image_features1,
-        image_features2,
+        s1_features,
+        s2_features,
         local_loss=False,
         gather_with_grad=False,
         rank=0,
@@ -29,38 +29,38 @@ def gather_features(
     if use_horovod:
         assert hvd is not None, 'Please install horovod'
         if gather_with_grad:
-            all_image_features1 = hvd.allgather(image_features1)
-            all_image_features2 = hvd.allgather(image_features2)
+            all_s1_features = hvd.allgather(s1_features)
+            all_s2_features = hvd.allgather(s2_features)
         else:
             with torch.no_grad():
-                all_image_features1 = hvd.allgather(image_features1)
-                all_image_features2 = hvd.allgather(image_features2)
+                all_s1_features = hvd.allgather(s1_features)
+                all_s2_features = hvd.allgather(s2_features)
             if not local_loss:
                 # ensure grads for local rank when all_* features don't have a gradient
-                gathered_image_features1 = list(all_image_features1.chunk(world_size, dim=0))
-                gathered_image_features2 = list(all_image_features2.chunk(world_size, dim=0))
-                gathered_image_features1[rank] = image_features1
-                gathered_image_features2[rank] = image_features2
-                all_image_features1 = torch.cat(gathered_image_features1, dim=0)
-                all_image_features2 = torch.cat(gathered_image_features2, dim=0)
+                gathered_s1_features = list(all_s1_features.chunk(world_size, dim=0))
+                gathered_s2_features = list(all_s2_features.chunk(world_size, dim=0))
+                gathered_s1_features[rank] = s1_features
+                gathered_s2_features[rank] = s2_features
+                all_s1_features = torch.cat(gathered_s1_features, dim=0)
+                all_s2_features = torch.cat(gathered_s2_features, dim=0)
     else:
         # We gather tensors from all gpus
         if gather_with_grad:
-            all_image_features1 = torch.cat(torch.distributed.nn.all_gather(image_features1), dim=0)
-            all_image_features2 = torch.cat(torch.distributed.nn.all_gather(image_features2), dim=0)
+            all_s1_features = torch.cat(torch.distributed.nn.all_gather(s1_features), dim=0)
+            all_s2_features = torch.cat(torch.distributed.nn.all_gather(s2_features), dim=0)
         else:
-            gathered_image_features1 = [torch.zeros_like(image_features1) for _ in range(world_size)]
-            gathered_image_features2 = [torch.zeros_like(image_features2) for _ in range(world_size)]
-            dist.all_gather(gathered_image_features1, image_features1)
-            dist.all_gather(gathered_image_features2, image_features2)
+            gathered_s1_features = [torch.zeros_like(s1_features) for _ in range(world_size)]
+            gathered_s2_features = [torch.zeros_like(s2_features) for _ in range(world_size)]
+            dist.all_gather(gathered_s1_features, s1_features)
+            dist.all_gather(gathered_s2_features, s2_features)
             if not local_loss:
                 # ensure grads for local rank when all_* features don't have a gradient
-                gathered_image_features1[rank] = image_features1
-                gathered_image_features2[rank] = image_features2
-            all_image_features1 = torch.cat(gathered_image_features1, dim=0)
-            all_image_features2 = torch.cat(gathered_image_features2, dim=0)
+                gathered_s1_features[rank] = s1_features
+                gathered_s2_features[rank] = s2_features
+            all_s1_features = torch.cat(gathered_s1_features, dim=0)
+            all_s2_features = torch.cat(gathered_s2_features, dim=0)
 
-    return all_image_features1, all_image_features2
+    return all_s1_features, all_s2_features
 
 
 class CiipLoss(nn.Module):
@@ -99,33 +99,33 @@ class CiipLoss(nn.Module):
             labels = self.labels[device]
         return labels
 
-    def get_logits(self, image_features1, image_features2, logit_scale):
+    def get_logits(self, s1_features, s2_features, logit_scale):
         if self.world_size > 1:
-            all_image_features1, all_image_features2 = gather_features(
-                image_features1, image_features2,
+            all_s1_features, all_s2_features = gather_features(
+                s1_features, s2_features,
                 self.local_loss, self.gather_with_grad, self.rank, self.world_size, self.use_horovod)
 
             if self.local_loss:
-                logits_per_image1 = logit_scale * image_features1 @ all_image_features2.T
-                logits_per_image2 = logit_scale * image_features2 @ all_image_features1.T
+                logits_per_s1 = logit_scale * s1_features @ all_s2_features.T
+                logits_per_s2 = logit_scale * s2_features @ all_s1_features.T
             else:
-                logits_per_image1 = logit_scale * all_image_features1 @ all_image_features2.T
-                logits_per_image2 = logits_per_image1.T
+                logits_per_s1 = logit_scale * all_s1_features @ all_s2_features.T
+                logits_per_s2 = logits_per_s1.T
         else:
-            logits_per_image1 = logit_scale * image_features1 @ image_features2.T
-            logits_per_image2 = logit_scale * image_features2 @ image_features1.T
+            logits_per_s1 = logit_scale * s1_features @ s2_features.T
+            logits_per_s2 = logit_scale * s2_features @ s1_features.T
         
-        return logits_per_image1, logits_per_image2
+        return logits_per_s1, logits_per_s2
 
-    def forward(self, image_features1, image_features2, logit_scale, output_dict=False):
-        device = image_features1.device
-        logits_per_image1, logits_per_image2 = self.get_logits(image_features1, image_features2, logit_scale)
+    def forward(self, s1_features, s2_features, logit_scale, output_dict=False):
+        device = s1_features.device
+        logits_per_s1, logits_per_s2 = self.get_logits(s1_features, s2_features, logit_scale)
 
-        labels = self.get_ground_truth(device, logits_per_image1.shape[0])
+        labels = self.get_ground_truth(device, logits_per_s1.shape[0])
 
         total_loss = (
-            F.cross_entropy(logits_per_image1, labels) +
-            F.cross_entropy(logits_per_image2, labels)
+            F.cross_entropy(logits_per_s1, labels) +
+            F.cross_entropy(logits_per_s2, labels)
         ) / 2
 
         return {"contrastive_loss": total_loss} if output_dict else total_loss
