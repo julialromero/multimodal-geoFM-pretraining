@@ -23,7 +23,7 @@ class CIIP(nn.Module):
                  s1_resolution: int,
                  s1_layers: Union[Tuple[int, int, int, int], int],
                  s1_width: int,
-                 s1_patch_size: int,
+                 s1_patch_size: int, # transformer parameter
                  s1_bands: int,
                  # s2
                  s2_resolution: int,
@@ -307,7 +307,7 @@ if __name__ =="__main__":
         s1_resolution=s1_resolution,
         s1_layers=(3, 4, 6, 3), #Resnet-34
         s1_width=512,
-        s1_patch_size=16,
+        s1_patch_size=16, # used by transformer 
         s1_bands=s1_bands,
         s2_resolution=s2_resolution,
         s2_layers=(3, 4, 6, 3), #Resnet-34

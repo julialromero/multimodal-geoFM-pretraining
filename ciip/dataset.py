@@ -6,8 +6,10 @@ import numpy as np
 import rasterio
 from torch.utils.data import Dataset
 
+## TODO: add parameters for 
+
 class S12Dataset(Dataset):
-    def __init__(self, root):
+    def __init__(self, root, ):
         self.root = root
         self.num_locations = None
         self.length = None
@@ -42,12 +44,6 @@ class S12Dataset(Dataset):
 
         # location list
         self.locations = s1_samples
-
-
-        # create path lists
-        s1_location_paths = [os.path.join(s1_dir, location_id) for location_id in self.locations]
-        s2_location_paths = [os.path.join(s2_dir, location_id) for location_id in self.locations]
-
 
         logging.debug('Done loading data.')
 
