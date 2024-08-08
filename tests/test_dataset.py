@@ -8,7 +8,7 @@ from ciip.dataset import S12Dataset
 from torch.utils.data import DataLoader
 # import torch
 
-root = '/home/juro4948/ciip/'
+root = '~/ciip/'
 
 dataset = S12Dataset(root)
 
