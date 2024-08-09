@@ -107,13 +107,8 @@ class SSL4EODataset(Dataset):
         s2_band_paths = [os.path.join(path_to_s2_season, f'B{band}.tif') for band in self.s2_bands]
         s2_band_images = [self.read_raster_image(band_path)[0] for band_path in s2_band_paths]
 
-        # check if the band images have the same shape
-        # print all shapes of bands
-        print([band_image.shape for band_image in s2_band_images])
-
-
         # resize the band images to target image dimension
-        s2_band_images = [np.array(self.resize_transform(Image.fromarray(band_image))) for band_image in s2_band_images]
+        s2_band_images = [np.array(self.resize_transform(Image.fromarray(band_image.astype(np.uint8)))) for band_image in s2_band_images]
         assert all([band_image.shape == s2_band_images[0].shape for band_image in s2_band_images]), 'All bands should have the same shape'
         
         # Normalize the bands
