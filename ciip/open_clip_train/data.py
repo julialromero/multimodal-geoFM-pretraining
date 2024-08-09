@@ -99,6 +99,11 @@ class SSL4EODataset(Dataset):
         vv_image = self.normalize_image(vv_image)
         third_band = self.normalize_image(third_band)
 
+        # resize each of these
+        vh_image = np.array(self.resize_transform(Image.fromarray(vh_image.astype(np.uint8))))
+        vv_image = np.array(self.resize_transform(Image.fromarray(vv_image.astype(np.uint8))))
+        third_band = np.array(self.resize_transform(Image.fromarray(third_band.astype(np.uint8))))
+
         # Create an RGB composite using VH, VV, and their average
         s1_composite_image = np.stack((vh_image, vv_image, third_band), axis=-1)
         
@@ -148,6 +153,8 @@ class SSL4EODataset(Dataset):
     def normalize_image(self, image):
         """Normalize image data to the range [0, 1]"""
         image_min, image_max = np.min(image), np.max(image)
+        if image_max == image_min:
+            return np.zeros_like(image)
         return (image - image_min) / (image_max - image_min)
 
 

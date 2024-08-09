@@ -184,7 +184,12 @@ def parse_config(config):
         'skip_scheduler': config.getboolean('model', 'skip_scheduler'),
         'delete_previous_checkpoint': config.getboolean('train', 'delete_previous_checkpoint'),
         'save_most_recent': config.getboolean('train', 'save_most_recent'),
-        'log_path': config.get('io', 'log_path')
+        'log_path': config.get('io', 'log_path'),
+        'grad_clip_norm': eval(config.get('model', 'grad_clip_norm')),
+        'rank': config.getint('datamodule', 'rank'),
+        'log_every_n_steps': config.getint('io', 'log_every_n_steps'),
+        'world_size': config.getint('datamodule', 'world_size'),
+        'wandb': config.getboolean('io', 'wandb'),
         
     }
 
