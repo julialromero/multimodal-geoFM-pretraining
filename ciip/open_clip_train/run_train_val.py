@@ -7,10 +7,10 @@ import numpy as np
 import torch
 from torch import optim
 
-# from train import train_one_epoch, evaluate
-# from data import get_data
-# from ..model_ciip import CIIP
-# from ..loss import CiipLoss
+from train import train_one_epoch, evaluate
+from data import get_data
+from ..model_ciip import CIIP
+from ..loss import CiipLoss
 
 LATEST_CHECKPOINT_NAME = "epoch_latest.pt"
 
@@ -164,7 +164,7 @@ if __name__ == "__main__":
     config.read(command_line_args.config_file)
 
     args = parse_config(config)
-    print(args.s1_layers)
+    main(args)
 
   else:
     print('Please provide a valid configuration file.')
