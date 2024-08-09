@@ -6,7 +6,7 @@ import os
 import sys
 
 from data import get_data
-from test_data import get_dummy_dataloader
+# from test_data import get_dummy_dataloader
 # from ..loss import ClipLoss
 from train import train_one_epoch
 
@@ -18,7 +18,7 @@ sys.path.insert(0, parent_dir)
 from loss import CiipLoss
 from model_ciip import CIIP
 
-dummy_model = CIIP(
+ciip_model = CIIP(
     embed_dim=512,
     s1_resolution=264,
     s1_layers=(3, 4, 6, 3), #Resnet-34
@@ -63,7 +63,7 @@ def main():
     args = Args()
 
     # Initialize model, loss, optimizer, and scaler
-    model = dummy_model.to(args.device)
+    model = ciip_model.to(args.device)
     def count_parameters(model):
         return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
