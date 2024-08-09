@@ -54,6 +54,8 @@ def main(args, start_epoch=0):
     s2_patch_size=args.s2_patch_size, # used by transformer
     s2_bands=len(args.s2_bands))
   
+  model = model.to(args.device)
+  
   
   exclude = lambda n, p: p.ndim < 2 or "bn" in n or "ln" in n or "bias" in n or 'logit_scale' in n
   include = lambda n, p: not exclude(n, p)
@@ -81,7 +83,9 @@ def main(args, start_epoch=0):
   # scaler = GradScaler() if args.precision == "amp" else None
   scaler = None 
 
-  
+  # check if checkpoint outdir exists
+  os.makedirs(args.checkpoint_path, exist_ok=True)
+
   for epoch in range(start_epoch, args.epochs):
     
     logging.info(f'Start epoch {epoch}')
@@ -160,6 +164,9 @@ def parse_config(config):
         'root': config.get('dataset', 'root'),
         'distributed': config.getboolean('model', 'distributed'),
         'distill': config.get('model', 'distill'),
+        'skip_scheduler': config.getboolean('model', 'skip_scheduler'),
+        'delete_previous_checkpoint': config.getboolean('train', 'delete_previous_checkpoint'),
+        'save_most_recent': config.getboolean('train', 'save_most_recent'),
         
     }
 

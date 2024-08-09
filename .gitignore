@@ -13,3 +13,6 @@ thumbs.db
 
 build/
 dist/
+
+# don't save the model checkpoints
+checkpoints/ 
