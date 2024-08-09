@@ -19,6 +19,8 @@ from PIL import Image
 # from torch.utils.data import Dataset, DataLoader, SubsetRandomSampler, IterableDataset, get_worker_info
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
+from torchvision.transforms import Resize
+# note: if other transforms get passed into the dataset, they will need to be imported
 # from webdataset.filters import _shuffle
 # from webdataset.tariterators import base_plus_ext, url_opener, tar_file_expander, valid_sample
 
@@ -30,15 +32,18 @@ from torch.utils.data.distributed import DistributedSampler
 
 # ssl4eo
 class SSL4EODataset(Dataset):
-    def __init__(self, root, transforms=None, s2_bands=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]):
+    def __init__(self, root, transforms=None, s2_bands=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], target_image_dimension=(264, 264)):
         self.root = root
         self.num_locations = None
         self.length = None
         self.s1_paths = []
         self.s2_paths = []
         self.s2_bands = sorted(s2_bands)
+        # https://pytorch.org/vision/main/generated/torchvision.transforms.Resize.html
+        self.resize_transform = Resize(target_image_dimension)
+
         if 0 in self.s2_bands:
-            raise ValueError('Band index should start from 1')
+            raise ValueError('Band index should be between 1 and 12')
         self.transforms = transforms
 
 
@@ -80,7 +85,7 @@ class SSL4EODataset(Dataset):
         path_to_s1_season = os.path.join(path_to_s1, s1_season_folders[season_idx])
         path_to_s2_season = os.path.join(path_to_s2, s2_season_folders[season_idx])
 
-        ### load and stack s1 images
+        ############ Load and stack s1 images ##############
         vh_path = os.path.join(path_to_s1_season, 'VH.tif')
         vv_path = os.path.join(path_to_s1_season, 'VV.tif')
         vh_image, _ = self.read_raster_image(vh_path)
@@ -94,31 +99,27 @@ class SSL4EODataset(Dataset):
         vv_image = self.normalize_image(vv_image)
         third_band = self.normalize_image(third_band)
 
-        
         # Create an RGB composite using VH, VV, and their average
-        # composite_image = np.stack((vh_image, vv_image, (vh_image + vv_image) / 2), axis=-1)
-
         s1_composite_image = np.stack((vh_image, vv_image, third_band), axis=-1)
         
 
-        ###### Load s2 images
-        band_paths = [os.path.join(path_to_s2_season, f'B{band}.tif') for band in self.s2_bands]
-        band_images = [self.read_raster_image(band_path)[0] for band_path in band_paths]
-
-        ### crop the bands to the same shape
-        # shapes = [band_image.shape for band_image in band_images]
-        # min_shape = min(shapes, key=lambda x: x[0] * x[1])
-        # band_images = [band_image[:min_shape[0], :min_shape[1]] for band_image in band_images]
+        ############### Load s2 images ###################
+        s2_band_paths = [os.path.join(path_to_s2_season, f'B{band}.tif') for band in self.s2_bands]
+        s2_band_images = [self.read_raster_image(band_path)[0] for band_path in s2_band_paths]
 
         # check if the band images have the same shape
         # print all shapes of bands
-        # print([band_image.shape for band_image in band_images])
-        assert all([band_image.shape == band_images[0].shape for band_image in band_images]), 'All bands should have the same shape'
+        print([band_image.shape for band_image in s2_band_images])
+
+
+        # resize the band images to target image dimension
+        s2_band_images = [np.array(self.resize_transform(Image.fromarray(band_image))) for band_image in s2_band_images]
+        assert all([band_image.shape == s2_band_images[0].shape for band_image in s2_band_images]), 'All bands should have the same shape'
         
         # Normalize the bands
-        band_images = [self.normalize_image(band_image) for band_image in band_images]
+        s2_band_images = [self.normalize_image(band_image) for band_image in s2_band_images]
 
-        s2_composite_image = np.stack(band_images, axis=-1)  # Create a composite
+        s2_composite_image = np.stack(s2_band_images, axis=-1)  # Create a composite
 
         s1_composite_image = np.transpose(s1_composite_image, (2, 0, 1))
         s2_composite_image = np.transpose(s2_composite_image, (2, 0, 1))
