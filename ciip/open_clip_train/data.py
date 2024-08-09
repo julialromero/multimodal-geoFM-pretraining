@@ -708,7 +708,7 @@ def get_dataset_fn(data_path, dataset_type):
     
 
 # def get_data(args, preprocess_fns, epoch=0, tokenizer=None):
-def get_data(args, preprocess_fns):
+def get_data(args, preprocess_fns=(None, None)):
     preprocess_train, preprocess_val = preprocess_fns
     data = {}
 

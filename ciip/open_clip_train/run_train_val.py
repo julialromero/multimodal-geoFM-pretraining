@@ -2,6 +2,7 @@ import logging
 import os
 from configparser import ConfigParser
 from types import SimpleNamespace
+import sys
 
 import numpy as np
 import torch
@@ -9,12 +10,17 @@ from torch import optim
 
 from train import train_one_epoch, evaluate
 from data import get_data
-from ..model_ciip import CIIP
-from ..loss import CiipLoss
+# from ..model_ciip import CIIP
+# from ..loss import CiipLoss
+
+parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+sys.path.insert(0, parent_dir)
+from model_ciip import CIIP
+from loss import CiipLoss
 
 LATEST_CHECKPOINT_NAME = "epoch_latest.pt"
 
-def cosine_lr(train, base_lr, warmup_length, steps):
+def cosine_lr(optimizer, base_lr, warmup_length, steps):
     def _lr_adjuster(step):
         if step < warmup_length:
             lr = base_lr * (step + 1) / warmup_length
@@ -22,7 +28,7 @@ def cosine_lr(train, base_lr, warmup_length, steps):
             e = step - warmup_length
             es = steps - warmup_length
             lr = 0.5 * (1 + np.cos(np.pi * e / es)) * base_lr
-        for param_group in train.param_groups:
+        for param_group in optimizer.param_groups:
           param_group["lr"] = lr
         return lr
     return _lr_adjuster
@@ -38,20 +44,37 @@ def main(args, start_epoch=0):
 
   model = CIIP(embed_dim=args.embed_dim,
     s1_resolution=args.s1_resolution,
-    s1_layers=args.resnet_layers,
+    s1_layers=args.s1_layers,
     s1_width=args.width,
     s1_patch_size=args.s1_patch_size, # used by transformer 
-    s1_bands=args.s1_bands,
+    s1_bands=len(args.s1_bands),
     s2_resolution=args.s2_resolution,
-    s2_layers=args.resnet_layers, #Resnet-34
+    s2_layers=args.s2_layers, #Resnet-34
     s2_width=args.width,
     s2_patch_size=args.s2_patch_size, # used by transformer
-    s2_bands=args.s2_bands)
+    s2_bands=len(args.s2_bands))
   
-
-  data = get_data(args, epoch=start_epoch)
+  
+  exclude = lambda n, p: p.ndim < 2 or "bn" in n or "ln" in n or "bias" in n or 'logit_scale' in n
+  include = lambda n, p: not exclude(n, p)
+  named_parameters = list(model.named_parameters())
+  gain_or_bias_params = [p for n, p in named_parameters if exclude(n, p) and p.requires_grad]
+  rest_params = [p for n, p in named_parameters if include(n, p) and p.requires_grad]
+  data = get_data(args)
   total_steps = (data["train"].dataloader.num_batches // args.accum_freq) * args.epochs
-  scheduler = cosine_lr(train, args.lr, args.warmup, total_steps)
+  
+  optimizer= optim.AdamW(
+    [
+        {"params": gain_or_bias_params, "weight_decay": 0.},
+        {"params": rest_params, "weight_decay": args.wd},
+    ],
+    lr=args.lr,
+    betas=(args.beta1, args.beta2),
+    eps=args.eps,
+  )
+
+  scheduler = cosine_lr(optimizer, args.lr, args.warmup, total_steps)
+
   dist_model = None 
   tb_writer = None
   # TODO(behzad): alternatively we might need to use what is in the original code:
@@ -59,27 +82,11 @@ def main(args, start_epoch=0):
   scaler = None 
 
   
-  exclude = lambda n, p: p.ndim < 2 or "bn" in n or "ln" in n or "bias" in n or 'logit_scale' in n
-  include = lambda n, p: not exclude(n, p)
-  named_parameters = list(model.named_parameters())
-  gain_or_bias_params = [p for n, p in named_parameters if exclude(n, p) and p.requires_grad]
-  rest_params = [p for n, p in named_parameters if include(n, p) and p.requires_grad]
-
-  train = optim.AdamW(
-            [
-                {"params": gain_or_bias_params, "weight_decay": 0.},
-                {"params": rest_params, "weight_decay": args.wd},
-            ],
-            lr=args.lr,
-            betas=(args.beta1, args.beta2),
-            eps=args.eps,
-        )
-
   for epoch in range(start_epoch, args.epochs):
     
     logging.info(f'Start epoch {epoch}')
 
-    train_one_epoch(model, data, loss, epoch, train, scaler, scheduler, dist_model, args, tb_writer)
+    train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist_model, args, tb_writer)
     completed_epoch = epoch + 1
 
     if any(v in data for v in ('val', 'imagenet-val', 'imagenet-v2')):
@@ -93,7 +100,7 @@ def main(args, start_epoch=0):
             "epoch": completed_epoch,
             "name": args.name,
             "state_dict": original_model.state_dict(),
-            "train": train.state_dict(),
+            "optimizer": optimizer.state_dict(),
         }
         if scaler is not None:
             checkpoint_dict["scaler"] = scaler.state_dict()
@@ -124,12 +131,12 @@ def parse_config(config):
         's1_layers': eval(config.get('model', 's1_layers')),
         'width': config.getint('model', 'width'),
         's1_patch_size': config.getint('model', 's1_patch_size'),
-        's1_bands': config.getint('model', 's1_bands'),
+        's1_bands': eval(config.get('model', 's1_bands')),
         's2_resolution': config.getint('model', 's2_resolution'),
         's2_layers': eval(config.get('model', 's2_layers')),
         'width': config.getint('model', 'width'),
         's2_patch_size': config.getint('model', 's2_patch_size'),
-        's2_bands': config.getint('model', 's2_bands'),
+        's2_bands': eval(config.get('model', 's2_bands')),
         'lr': config.getfloat('train', 'lr'),
         'wd': config.getfloat('train', 'wd'),
         'beta1': config.getfloat('train', 'beta1'),
@@ -144,9 +151,19 @@ def parse_config(config):
         # 'delete_previous_checkpoint': config.getboolean('train', 'delete_previous_checkpoint'),
         # 'save_most_recent': config.getboolean('train', 'save_most_recent'),
         'save_frequency': config.getint('io', 'save_frequency'),
+        'batch_size': config.getint('datamodule', 'batch_size'),
+        'workers': config.getint('model', 'workers'),
         'precision': config.get('model', 'precision'),
-        'device': config.get('model', 'device')
+        'dataset_type': config.get('dataset', 'dataset_type'),
+        'train_data': config.getboolean('dataset', 'train_data'),
+        'val_data': config.getboolean('dataset', 'val_data'),
+        'root': config.get('dataset', 'root'),
+        'distributed': config.getboolean('model', 'distributed'),
+        'distill': config.get('model', 'distill'),
+        
     }
+
+    config_dict['device'] = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     args = SimpleNamespace(**config_dict)
     return args
@@ -156,7 +173,7 @@ if __name__ == "__main__":
 
   import argparse
   parser = argparse.ArgumentParser()
-  parser.add_argument('-c', '--config_file', default='ciip\open_clip_train\config_train.ini')
+  parser.add_argument('-c', '--config_file', default='ciip/open_clip_train/config_train.ini')
   command_line_args = parser.parse_args()
 
   if os.path.isfile(command_line_args.config_file):
