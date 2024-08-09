@@ -357,8 +357,8 @@ def main(args):
     data = get_data(
         args,
         (preprocess_train, preprocess_val),
-        epoch=start_epoch,
-        tokenizer=tokenizer,
+        # epoch=start_epoch,
+        # tokenizer=tokenizer,
     )
     assert len(data), 'At least one train or eval dataset must be specified.'
 
