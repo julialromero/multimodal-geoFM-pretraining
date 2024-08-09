@@ -3,6 +3,7 @@ import os
 from configparser import ConfigParser
 from types import SimpleNamespace
 import sys
+import time
 
 import numpy as np
 import torch
@@ -10,8 +11,7 @@ from torch import optim
 
 from train import train_one_epoch, evaluate
 from data import get_data
-# from ..model_ciip import CIIP
-# from ..loss import CiipLoss
+from logger import setup_logging
 
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 sys.path.insert(0, parent_dir)
@@ -34,6 +34,22 @@ def cosine_lr(optimizer, base_lr, warmup_length, steps):
     return _lr_adjuster
 
 def main(args, start_epoch=0):
+  
+  log_base_path = os.path.join(args.log_path, args.name)
+  args.log_path = None
+  os.makedirs(log_base_path, exist_ok=True)
+  log_filename = f'out-{args.name}{time.time()}_.log'
+  args.log_path = os.path.join(log_base_path, log_filename)
+    # if os.path.exists(args.log_path) and not resume_latest:
+    #     print(
+    #         "Error. Experiment already exists. Use --name {} to specify a new experiment."
+    #     )
+    #     return -1 
+
+  args.log_level = logging.DEBUG if args.debug else logging.INFO
+  setup_logging(args.log_path, args.log_level)
+  # if args.log_path does not exist create it
+#   os.makedirs(args.log_path, exist_ok=True)
   # loss = create_loss(args)
   loss = CiipLoss(local_loss=False,
     gather_with_grad=False,
@@ -160,6 +176,7 @@ def parse_config(config):
         'precision': config.get('model', 'precision'),
         'dataset_type': config.get('dataset', 'dataset_type'),
         'train_data': config.getboolean('dataset', 'train_data'),
+        'debug': config.getboolean('train', 'debug'),
         'val_data': config.getboolean('dataset', 'val_data'),
         'root': config.get('dataset', 'root'),
         'distributed': config.getboolean('model', 'distributed'),
@@ -167,6 +184,7 @@ def parse_config(config):
         'skip_scheduler': config.getboolean('model', 'skip_scheduler'),
         'delete_previous_checkpoint': config.getboolean('train', 'delete_previous_checkpoint'),
         'save_most_recent': config.getboolean('train', 'save_most_recent'),
+        'log_path': config.get('io', 'log_path')
         
     }
 
