@@ -6,7 +6,7 @@ import os
 import sys
 
 from data import get_data
-# from test_data import get_dummy_dataloader
+from test_data import get_dummy_dataloader
 # from ..loss import ClipLoss
 from train import train_one_epoch
 
@@ -20,12 +20,12 @@ from model_ciip import CIIP
 
 dummy_model = CIIP(
     embed_dim=512,
-    s1_resolution=32,
+    s1_resolution=264,
     s1_layers=(3, 4, 6, 3), #Resnet-34
     s1_width=32,
     s1_patch_size=16,
     s1_bands=3,
-    s2_resolution=32,
+    s2_resolution=264,
     s2_layers=(3, 4, 6, 3), #Resnet-34
     s2_width=32,
     s2_patch_size=16,
@@ -83,12 +83,15 @@ def main():
     scaler = GradScaler() if args.precision == 'fp16' else None
     scheduler = lambda step: None  # Dummy scheduler for testing
 
+    # get dummy dtaloader
+    # dataloader = get_dummy_dataloader(batch_size=args.batch_size, img_size1=(3, 264, 264), img_size2=(3, 264, 264))
+
     # Initialize data loader
     data_info = get_data(args, (None, None))
     # data_in = data_info['train']
     
     # print(f'DATALOADER NUM EPOCHS: {data_in.num_epochs}')
-    # data = {'train': type('ssl4eo', (object,), {'dataloader': dataloader, 'set_epoch': lambda x: None})}
+    # data_info = {'train': type('ssl4eo', (object,), {'dataloader': dataloader, 'set_epoch': lambda x: None})}
     
     # Initialize tensorboard writer
     

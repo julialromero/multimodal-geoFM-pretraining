@@ -80,26 +80,25 @@ class SSL4EODataset(Dataset):
         path_to_s1_season = os.path.join(path_to_s1, s1_season_folders[season_idx])
         path_to_s2_season = os.path.join(path_to_s2, s2_season_folders[season_idx])
 
-        print(f'Path to s1: {path_to_s1_season}')
-        print(f'Path to s2: {path_to_s2_season}')
-
-
         ### load and stack s1 images
         vh_path = os.path.join(path_to_s1_season, 'VH.tif')
         vv_path = os.path.join(path_to_s1_season, 'VV.tif')
         vh_image, _ = self.read_raster_image(vh_path)
         vv_image, _ = self.read_raster_image(vv_path)
 
-        # # create a 3rd band by dividing VV by VH
-        # s1_composite_image = np.stack((vh_image, vv_image, vv_image / vh_image), axis=-1)
+        # # create a 3rd band by taking mean of VV and VH on dim 0
+        third_band = (vv_image + vh_image)/2
 
         # Normalize the VH and VV bands
         vh_image = self.normalize_image(vh_image)
         vv_image = self.normalize_image(vv_image)
-                
+        third_band = self.normalize_image(third_band)
+
+        
         # Create an RGB composite using VH, VV, and their average
         # composite_image = np.stack((vh_image, vv_image, (vh_image + vv_image) / 2), axis=-1)
-        s1_composite_image = np.stack((vh_image, vv_image, vv_image / vh_image), axis=-1)
+
+        s1_composite_image = np.stack((vh_image, vv_image, third_band), axis=-1)
         
 
         ###### Load s2 images
@@ -113,7 +112,7 @@ class SSL4EODataset(Dataset):
 
         # check if the band images have the same shape
         # print all shapes of bands
-        print([band_image.shape for band_image in band_images])
+        # print([band_image.shape for band_image in band_images])
         assert all([band_image.shape == band_images[0].shape for band_image in band_images]), 'All bands should have the same shape'
         
         # Normalize the bands
@@ -124,8 +123,8 @@ class SSL4EODataset(Dataset):
         s1_composite_image = np.transpose(s1_composite_image, (2, 0, 1))
         s2_composite_image = np.transpose(s2_composite_image, (2, 0, 1))
 
-        print(f'S1 composite image shape: {s1_composite_image.shape}')
-        print(f'S2 composite image shape: {s2_composite_image.shape}')
+        # print(f'S1 composite image shape: {s1_composite_image.shape}')
+        # print(f'S2 composite image shape: {s2_composite_image.shape}')
 
 
         ## TODO: double check Image input to transforms ?
