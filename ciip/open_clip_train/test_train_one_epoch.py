@@ -29,7 +29,7 @@ dummy_model = CIIP(
     s2_layers=(3, 4, 6, 3), #Resnet-34
     s2_width=32,
     s2_patch_size=16,
-    s2_bands=12,
+    s2_bands=3,
 )
 
 
@@ -58,6 +58,7 @@ def main():
         horovod = False
         distributed = False
         workers = 0
+        s2_bands = [2, 3, 4]
 
     args = Args()
 

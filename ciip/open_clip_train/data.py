@@ -30,13 +30,15 @@ from torch.utils.data.distributed import DistributedSampler
 
 # ssl4eo
 class SSL4EODataset(Dataset):
-    def __init__(self, root, transforms=None, s2_bands=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]):
+    def __init__(self, root, transforms=None, s2_bands=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]):
         self.root = root
         self.num_locations = None
         self.length = None
         self.s1_paths = []
         self.s2_paths = []
         self.s2_bands = sorted(s2_bands)
+        if 0 in self.s2_bands:
+            raise ValueError('Band index should start from 1')
         self.transforms = transforms
 
 
@@ -88,6 +90,9 @@ class SSL4EODataset(Dataset):
         vh_image, _ = self.read_raster_image(vh_path)
         vv_image, _ = self.read_raster_image(vv_path)
 
+        # # create a 3rd band by dividing VV by VH
+        # s1_composite_image = np.stack((vh_image, vv_image, vv_image / vh_image), axis=-1)
+
         # Normalize the VH and VV bands
         vh_image = self.normalize_image(vh_image)
         vv_image = self.normalize_image(vv_image)
@@ -107,11 +112,20 @@ class SSL4EODataset(Dataset):
         # band_images = [band_image[:min_shape[0], :min_shape[1]] for band_image in band_images]
 
         # check if the band images have the same shape
+        # print all shapes of bands
+        print([band_image.shape for band_image in band_images])
         assert all([band_image.shape == band_images[0].shape for band_image in band_images]), 'All bands should have the same shape'
         
         # Normalize the bands
         band_images = [self.normalize_image(band_image) for band_image in band_images]
+
         s2_composite_image = np.stack(band_images, axis=-1)  # Create a composite
+
+        s1_composite_image = np.transpose(s1_composite_image, (2, 0, 1))
+        s2_composite_image = np.transpose(s2_composite_image, (2, 0, 1))
+
+        print(f'S1 composite image shape: {s1_composite_image.shape}')
+        print(f'S2 composite image shape: {s2_composite_image.shape}')
 
 
         ## TODO: double check Image input to transforms ?
@@ -146,7 +160,7 @@ def get_ssl4eo_dataset(args, is_train, transforms):
     root = args.root
     # train_data if is_train else args.val_data
     assert root
-    default_bands = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    default_bands = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
 
 
     dataset = SSL4EODataset(
