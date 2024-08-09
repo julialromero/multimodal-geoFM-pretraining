@@ -14,7 +14,7 @@ from torch import optim
 
 LATEST_CHECKPOINT_NAME = "epoch_latest.pt"
 
-def cosine_lr(optimizer, base_lr, warmup_length, steps):
+def cosine_lr(train, base_lr, warmup_length, steps):
     def _lr_adjuster(step):
         if step < warmup_length:
             lr = base_lr * (step + 1) / warmup_length
@@ -22,7 +22,7 @@ def cosine_lr(optimizer, base_lr, warmup_length, steps):
             e = step - warmup_length
             es = steps - warmup_length
             lr = 0.5 * (1 + np.cos(np.pi * e / es)) * base_lr
-        for param_group in optimizer.param_groups:
+        for param_group in train.param_groups:
           param_group["lr"] = lr
         return lr
     return _lr_adjuster
@@ -51,7 +51,7 @@ def main(args, start_epoch=0):
 
   data = get_data(args, epoch=start_epoch)
   total_steps = (data["train"].dataloader.num_batches // args.accum_freq) * args.epochs
-  scheduler = cosine_lr(optimizer, args.lr, args.warmup, total_steps)
+  scheduler = cosine_lr(train, args.lr, args.warmup, total_steps)
   dist_model = None 
   tb_writer = None
   # TODO(behzad): alternatively we might need to use what is in the original code:
@@ -65,7 +65,7 @@ def main(args, start_epoch=0):
   gain_or_bias_params = [p for n, p in named_parameters if exclude(n, p) and p.requires_grad]
   rest_params = [p for n, p in named_parameters if include(n, p) and p.requires_grad]
 
-  optimizer = optim.AdamW(
+  train = optim.AdamW(
             [
                 {"params": gain_or_bias_params, "weight_decay": 0.},
                 {"params": rest_params, "weight_decay": args.wd},
@@ -79,7 +79,7 @@ def main(args, start_epoch=0):
     
     logging.info(f'Start epoch {epoch}')
 
-    train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist_model, args, tb_writer)
+    train_one_epoch(model, data, loss, epoch, train, scaler, scheduler, dist_model, args, tb_writer)
     completed_epoch = epoch + 1
 
     if any(v in data for v in ('val', 'imagenet-val', 'imagenet-v2')):
@@ -93,7 +93,7 @@ def main(args, start_epoch=0):
             "epoch": completed_epoch,
             "name": args.name,
             "state_dict": original_model.state_dict(),
-            "optimizer": optimizer.state_dict(),
+            "train": train.state_dict(),
         }
         if scaler is not None:
             checkpoint_dict["scaler"] = scaler.state_dict()
@@ -121,31 +121,31 @@ def parse_config(config):
     config_dict = {
         'embed_dim': config.getint('model', 'embed_dim'),
         's1_resolution': config.getint('model', 's1_resolution'),
-        's1_layers': config.getint('model', 's1_layers'),
+        's1_layers': eval(config.get('model', 's1_layers')),
         'width': config.getint('model', 'width'),
         's1_patch_size': config.getint('model', 's1_patch_size'),
         's1_bands': config.getint('model', 's1_bands'),
         's2_resolution': config.getint('model', 's2_resolution'),
-        's2_layers': config.getint('model', 's2_layers'),
-        's2_width': config.getint('model', 's2_width'),
+        's2_layers': eval(config.get('model', 's2_layers')),
+        'width': config.getint('model', 'width'),
         's2_patch_size': config.getint('model', 's2_patch_size'),
         's2_bands': config.getint('model', 's2_bands'),
-        'lr': config.getfloat('optimizer', 'lr'),
-        'wd': config.getfloat('optimizer', 'wd'),
-        'beta1': config.getfloat('optimizer', 'beta1'),
-        'beta2': config.getfloat('optimizer', 'beta2'),
-        'eps': config.getfloat('optimizer', 'eps'),
-        'warmup': config.getint('optimizer', 'warmup'),
-        'accum_freq': config.getint('optimizer', 'accum_freq'),
+        'lr': config.getfloat('train', 'lr'),
+        'wd': config.getfloat('train', 'wd'),
+        'beta1': config.getfloat('train', 'beta1'),
+        'beta2': config.getfloat('train', 'beta2'),
+        'eps': config.getfloat('train', 'eps'),
+        'warmup': config.getint('train', 'warmup'),
+        'accum_freq': config.getint('train', 'accum_freq'),
         'epochs': config.getint('train', 'epochs'),
         'save_logs': config.getboolean('train', 'save_logs'),
         'name': config.get('train', 'name'),
-        'checkpoint_path': config.get('train', 'checkpoint_path'),
-        'delete_previous_checkpoint': config.getboolean('train', 'delete_previous_checkpoint'),
-        'save_most_recent': config.getboolean('train', 'save_most_recent'),
-        'save_frequency': config.getint('train', 'save_frequency'),
-        'precision': config.get('train', 'precision'),
-        'device': config.get('train', 'device')
+        'checkpoint_path': config.get('io', 'checkpoint_path'),
+        # 'delete_previous_checkpoint': config.getboolean('train', 'delete_previous_checkpoint'),
+        # 'save_most_recent': config.getboolean('train', 'save_most_recent'),
+        'save_frequency': config.getint('io', 'save_frequency'),
+        'precision': config.get('model', 'precision'),
+        'device': config.get('model', 'device')
     }
     
     args = SimpleNamespace(**config_dict)
@@ -164,7 +164,7 @@ if __name__ == "__main__":
     config.read(command_line_args.config_file)
 
     args = parse_config(config)
-    print(args.device)
+    print(args.s1_layers)
 
   else:
     print('Please provide a valid configuration file.')
