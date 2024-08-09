@@ -1,22 +1,16 @@
-import glob
 import logging
 import os
-import re
-import subprocess
-import sys
-import random
-from datetime import datetime
-from functools import partial
+from configparser import ConfigParser
+from types import SimpleNamespace
 
 import numpy as np
 import torch
 from torch import optim
-from torch.cuda.amp import GradScaler
 
-from train import train_one_epoch, evaluate
-from data import get_data
-from ..model_ciip import CIIP
-from ..loss import CiipLoss
+# from train import train_one_epoch, evaluate
+# from data import get_data
+# from ..model_ciip import CIIP
+# from ..loss import CiipLoss
 
 LATEST_CHECKPOINT_NAME = "epoch_latest.pt"
 
@@ -122,3 +116,55 @@ def main(args, start_epoch=0):
             latest_save_path = os.path.join(args.checkpoint_path, LATEST_CHECKPOINT_NAME)
             torch.save(checkpoint_dict, tmp_save_path)
             os.replace(tmp_save_path, latest_save_path)
+
+def parse_config(config):
+    config_dict = {
+        'embed_dim': config.getint('model', 'embed_dim'),
+        's1_resolution': config.getint('model', 's1_resolution'),
+        's1_layers': config.getint('model', 's1_layers'),
+        'width': config.getint('model', 'width'),
+        's1_patch_size': config.getint('model', 's1_patch_size'),
+        's1_bands': config.getint('model', 's1_bands'),
+        's2_resolution': config.getint('model', 's2_resolution'),
+        's2_layers': config.getint('model', 's2_layers'),
+        's2_width': config.getint('model', 's2_width'),
+        's2_patch_size': config.getint('model', 's2_patch_size'),
+        's2_bands': config.getint('model', 's2_bands'),
+        'lr': config.getfloat('optimizer', 'lr'),
+        'wd': config.getfloat('optimizer', 'wd'),
+        'beta1': config.getfloat('optimizer', 'beta1'),
+        'beta2': config.getfloat('optimizer', 'beta2'),
+        'eps': config.getfloat('optimizer', 'eps'),
+        'warmup': config.getint('optimizer', 'warmup'),
+        'accum_freq': config.getint('optimizer', 'accum_freq'),
+        'epochs': config.getint('train', 'epochs'),
+        'save_logs': config.getboolean('train', 'save_logs'),
+        'name': config.get('train', 'name'),
+        'checkpoint_path': config.get('train', 'checkpoint_path'),
+        'delete_previous_checkpoint': config.getboolean('train', 'delete_previous_checkpoint'),
+        'save_most_recent': config.getboolean('train', 'save_most_recent'),
+        'save_frequency': config.getint('train', 'save_frequency'),
+        'precision': config.get('train', 'precision'),
+        'device': config.get('train', 'device')
+    }
+    
+    args = SimpleNamespace(**config_dict)
+    return args
+
+
+if __name__ == "__main__":
+
+  import argparse
+  parser = argparse.ArgumentParser()
+  parser.add_argument('-c', '--config_file', default='ciip\open_clip_train\config_train.ini')
+  command_line_args = parser.parse_args()
+
+  if os.path.isfile(command_line_args.config_file):
+    config = ConfigParser()
+    config.read(command_line_args.config_file)
+
+    args = parse_config(config)
+    print(args.device)
+
+  else:
+    print('Please provide a valid configuration file.')
