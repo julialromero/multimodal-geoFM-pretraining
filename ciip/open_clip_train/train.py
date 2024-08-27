@@ -312,7 +312,7 @@ def evaluate(model, data, epoch, args, tb_writer=None, tokenizer=None):
                 if is_master(args) and (i % 100) == 0:
                     logging.info(
                         f"Eval Epoch: {epoch} [{num_samples} / {samples_per_val}]\t"
-                        f"Clip Loss: {cumulative_loss / num_samples:.6f}\t")
+                        f"CIIP Loss: {cumulative_loss / num_samples:.6f}\t")
 
                     if gen_loss is not None:
                         cumulative_gen_loss += gen_loss * batch_size
@@ -326,7 +326,7 @@ def evaluate(model, data, epoch, args, tb_writer=None, tokenizer=None):
             )
             loss = cumulative_loss / num_samples
             metrics.update(
-                {**val_metrics, "clip_val_loss": loss.item(), "epoch": epoch, "num_samples": num_samples}
+                {**val_metrics, "CIIP_val_loss": loss.item(), "epoch": epoch, "num_samples": num_samples}
             )
             if gen_loss is not None:
                 gen_loss = cumulative_gen_loss / num_samples

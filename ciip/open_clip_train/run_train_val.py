@@ -40,6 +40,7 @@ def main(args, start_epoch=0):
   os.makedirs(log_base_path, exist_ok=True)
   log_filename = f'out-{args.name}{time.time()}_.log'
   args.log_path = os.path.join(log_base_path, log_filename)
+  print(f'Logging to {args.log_path}')
     # if os.path.exists(args.log_path) and not resume_latest:
     #     print(
     #         "Error. Experiment already exists. Use --name {} to specify a new experiment."
@@ -109,6 +110,9 @@ def main(args, start_epoch=0):
     train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist_model, args, tb_writer)
     completed_epoch = epoch + 1
 
+    # print(data['train'].dataloader)
+    # print(data['val'].dataloader)
+    # print("IF statement", 'val' in data)
     if any(v in data for v in ('val', 'imagenet-val', 'imagenet-v2')):
         evaluate(model, data, completed_epoch, args, tb_writer)
 
@@ -177,7 +181,6 @@ def parse_config(config):
         'dataset_type': config.get('dataset', 'dataset_type'),
         'train_data': config.getboolean('dataset', 'train_data'),
         'debug': config.getboolean('train', 'debug'),
-        'val_data': config.getboolean('dataset', 'val_data'),
         'root': config.get('dataset', 'root'),
         'distributed': config.getboolean('model', 'distributed'),
         'distill': config.get('model', 'distill'),
@@ -190,6 +193,9 @@ def parse_config(config):
         'log_every_n_steps': config.getint('io', 'log_every_n_steps'),
         'world_size': config.getint('datamodule', 'world_size'),
         'wandb': config.getboolean('io', 'wandb'),
+        'val_frac': config.getfloat('train', 'val_frac'),
+        'use_val': config.getboolean('train', 'use_val'),
+        'val_frequency': config.getint('train', 'val_frequency'),
         
     }
 

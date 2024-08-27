@@ -6,7 +6,20 @@ import numpy as np
 import rasterio
 from torch.utils.data import Dataset
 
-## TODO: add parameters for 
+
+### band statistics: mean & std
+# calculated from 50k data
+S1_MEAN = [-12.54847273, -20.19237134]
+S1_STD = [5.25697717, 5.91150917]
+
+S2A_MEAN = [752.40087073, 884.29673756, 1144.16202635, 1297.47289228, 1624.90992062, 2194.6423161, 2422.21248945, 2517.76053101, 2581.64687018, 2645.51888987, 2368.51236873, 1805.06846033]
+S2A_STD = [1108.02887453, 1155.15170768, 1183.6292542, 1368.11351514, 1370.265037, 1355.55390699, 1416.51487101, 1474.78900051, 1439.3086061, 1582.28010962, 1455.52084939, 1343.48379601]
+
+S2C_MEAN = [1605.57504906, 1390.78157673, 1314.8729939, 1363.52445545, 1549.44374991, 2091.74883118, 2371.7172463, 2299.90463006, 2560.29504086, 830.06605044, 22.10351321, 2177.07172323, 1524.06546312]
+S2C_STD = [786.78685367, 850.34818441, 875.06484736, 1138.84957046, 1122.17775652, 1161.59187054, 1274.39184232, 1248.42891965, 1345.52684884, 577.31607053, 51.15431158, 1336.09932639, 1136.53823676]
+
+
+
 
 class S12Dataset(Dataset):
     def __init__(self, root, ):
@@ -78,12 +91,16 @@ class S12Dataset(Dataset):
         vv_image, _ = self.read_raster_image(vv_path)
 
         # Normalize the VH and VV bands
-        vh_image = self.normalize_image(vh_image)
-        vv_image = self.normalize_image(vv_image)
+        # vh_image = self.normalize_image(vh_image)
+        # vv_image = self.normalize_image(vv_image)
+        vv_image = self.normalize(vv_image, S1_MEAN[0], S1_STD[0])
+        vh_image = self.normalize(vh_image, S1_MEAN[1], S1_STD[1])
+        
+
                 
         # Create an RGB composite using VH, VV, and their average
-        # composite_image = np.stack((vh_image, vv_image, (vh_image + vv_image) / 2), axis=-1)
-        s1_composite_image = np.stack((vh_image, vv_image, vv_image / vh_image), axis=-1)
+        s1_composite_image = np.stack((vh_image, vv_image, (vh_image + vv_image) / 2), axis=-1)
+        # s1_composite_image = np.stack((vh_image, vv_image, vv_image / vh_image), axis=-1)
         
 
         ### load and stack s2 images
@@ -99,7 +116,8 @@ class S12Dataset(Dataset):
         band_images = [band_image[:min_shape[0], :min_shape[1]] for band_image in band_images]
         
         # Normalize the bands
-        band_images = [self.normalize_image(band_image) for band_image in band_images]
+        # band_images = [self.normalize_image(band_image) for band_image in band_images]
+        band_images = [self.normalize(img, mean, std) for img, mean, std in zip(band_images, S2C_MEAN, S2C_STD)]
         
         s2_composite_image = np.stack(band_images, axis=-1)  # Create an RGB composite
         
@@ -122,7 +140,48 @@ class S12Dataset(Dataset):
         with rasterio.open(image_path) as src:
             return src.read(1), src.profile
 
-    def normalize_image(self, image):
-        """Normalize image data to the range [0, 1]"""
-        image_min, image_max = np.min(image), np.max(image)
-        return (image - image_min) / (image_max - image_min)
+    #### our custom normalization function for image-wise norm
+    # def normalize_image(self, image):
+    #     """Normalize image data to the range [0, 1]"""
+    #     image_min, image_max = np.min(image), np.max(image)
+    #     return (image - image_min) / (image_max - image_min)
+    
+
+    #### band-wise normalization based on mean and std calculate from 50k data
+    ## taken from: https://github.com/zhu-xlab/SSL4EO-S12/blob/2156913c5d8e5a2c572a5b000f0d5eaed6fc3192/src/benchmark/pretrain_ssl/datasets/SSL4EO/ssl4eo_dataset.py#L36
+    # normalize: standardize + percentile
+    def normalize(img, mean, std):
+        min_value = mean - 2 * std
+        max_value = mean + 2 * std
+        img = (img - min_value) / (max_value - min_value) * 255.0
+        img = np.clip(img, 0, 255).astype(np.uint8)
+        return img
+
+
+# taken from: https://github.com/zhu-xlab/SSL4EO-S12/blob/2156913c5d8e5a2c572a5b000f0d5eaed6fc3192/src/benchmark/pretrain_ssl/datasets/SSL4EO/ssl4eo_dataset.py#L127
+class Subset(Dataset):
+
+    def __init__(self, dataset, indices):
+        self.dataset = dataset
+        self.indices = indices
+
+    def __getitem__(self, idx):
+        return self.dataset[self.indices[idx]]
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getattr__(self, name):
+        return getattr(self.dataset, name)
+
+
+def generate_splits(dataset, val_frac, seed=None):
+    rng = np.random.default_rng(seed)
+    val_indices = rng.choice(range(len(dataset)), int(val_frac * len(dataset)))
+
+    # all other indices are for training
+    all_indices = np.arange(len(dataset))
+    train_indices = np.setdiff1d(all_indices, val_indices)
+
+    return Subset(dataset, train_indices), Subset(dataset, val_indices)
+
