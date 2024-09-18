@@ -319,6 +319,9 @@ def evaluate(model, data, epoch, args, tb_writer=None, tokenizer=None):
                         logging.info(
                             f"Generative Loss: {cumulative_gen_loss / num_samples:.6f}\t")
 
+            # print(f's1: {all_s1_features[0].shape, all_s1_features[-1].shape}')
+            # print(f's2: {all_s2_features[0].shape, all_s2_features[-1].shape}')
+
             val_metrics = get_clip_metrics(
                 s1_features=torch.cat(all_s1_features),
                 s2_features=torch.cat(all_s2_features),

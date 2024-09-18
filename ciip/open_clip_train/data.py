@@ -62,6 +62,10 @@ class SSL4EODataset(Dataset):
         self.num_locations = len(s1_samples)
         self.length = self.num_locations * 4
 
+        # Limit 1000 samples for test
+        # self.max_samples = min(self.length, 2001)
+
+        # print(f'Number of samples in dataset: {self.max_samples}')
         print(f'Number of locations in dataset: {self.num_locations}')
 
         # location list
@@ -72,9 +76,14 @@ class SSL4EODataset(Dataset):
 
     def __len__(self):
         return self.length
+        # Adjust for testing
+        # return self.max_samples
 
 
     def __getitem__(self, idx):
+        # if idx >= self.max_samples:
+        #     raise IndexError("Index out of bounds")
+
         ### get the sample corresponding to idx
         location_idx, season_idx = self.int_to_filepath(idx)
 
@@ -229,7 +238,8 @@ def dataset_to_datainfo(args, dataset, is_train):
         num_workers=args.workers,
         pin_memory=True,
         sampler=sampler,
-        drop_last=is_train,
+        # drop_last=is_train,
+        drop_last=True,
     )
     dataloader.num_samples = num_samples
     dataloader.num_batches = len(dataloader)
