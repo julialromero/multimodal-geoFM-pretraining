@@ -11,6 +11,21 @@ We're using hydra to run/iterate/output.  It automatically generates files in th
 5. From there, run pip install -r requirements.txt to import necessary modules
 6. Ensure that the interpreter for your project in your IDE (whether VSCode or Pycharm) is set to the python version from your virtual environment
 
+# CometML Setup
+There's some excellent, automated ML logging software that's available for free to people in academia called CometML.  It integrates cleanly with github and pytorch to quickly create visualizations of your code as you're running experiments.  If you're interested, you can sign up here: https://www.comet.com/.
+
+For those who want to log their project using CometML, it'll require you to do a little bit of configuration work.  Inside the ciip/open_clip_train/configs/comet folder, make a file called personal.yaml.  The contents of that file need to be as follows:
+
+api_key: <your API for Comet here; can be found in account settings online>
+
+project_name: <project here; default of 'general' isn't a bad idea>
+
+workspace: <your github username here>
+
+Comet is turned off in the local_default configuration and on in the prod_default configuration; you can adjust that as needed by changing the io.comet_ml argument.
+
+Given that this contains your API key, DON'T push this file to github.  If you want to go crazy and route the key in from your bash profile, you're more than welcome to do so.
+
 # Local Testing
 This will let you have some quick sanity checking for syntax/environment issues before moving files onto Hal or Alpine for more rigorous iteration.  If you want to adjust any configurations for this, you can do so in the configs/local_default.yaml file.
 1. Go to https://drive.google.com/file/d/1sRWcYbaWs-efXza6kw03GlJQdZHq5iRN/view?pli=1, download the data, then move the folders labelled s1 and s2c into a new directory at the same level as ciip called "local_test_data".
@@ -33,6 +48,3 @@ This is for when you're iterating through different options.
 3. If you want to start messing around with hyperparameters, you can start to add specific config files that override the default hyperparams found in prod_default.yaml.  I've included some sample overrides; the datamodule and train folders both pertain to the subsections in the prod_default.yaml file.  If I wanted to try out these different permutations, I would run something that looks like this: python3 run_train_val.py hydra.job.chdir=False hydra.mode=MULTIRUN datamodule=large_batch,small_batch train=high_learning_rate.
    4. Hydra will then fire off 2 runs, where it's mixing and matching batch sizes against the high learning rate.
 
-# TODO
-- add cometML for logging
-  - document necessary online setup for cometML
