@@ -7,8 +7,7 @@ defaults:
   - override hydra/job_logging: default
 
 io:
-  checkpoint_path: ciip/open_clip_train/checkpoints
-  log_path: ciip/open_clip_train/log
+  checkpoint_path: checkpoints
   save_frequency: 5
   save_logs: True
   log_every_n_steps: 10

@@ -3,7 +3,6 @@ import os
 import hydra
 from omegaconf import DictConfig, OmegaConf
 import sys
-import time
 
 import numpy as np
 import torch
@@ -11,7 +10,6 @@ from torch import optim
 
 from train import train_one_epoch, evaluate
 from data import get_data
-from logger import setup_logging
 
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 sys.path.insert(0, parent_dir)
@@ -19,6 +17,8 @@ from model_ciip import CIIP
 from loss import CiipLoss
 
 LATEST_CHECKPOINT_NAME = "epoch_latest.pt"
+
+logger = logging.getLogger(__name__)
 
 def cosine_lr(optimizer, base_lr, warmup_length, steps):
     def _lr_adjuster(step):
@@ -35,23 +35,7 @@ def cosine_lr(optimizer, base_lr, warmup_length, steps):
 
 @hydra.main(config_path="configs", config_name="local_default")
 def main(args: DictConfig, start_epoch=0):
-  
-  log_base_path = os.path.join(args.io.log_path, args.train.name)
-  args.io.log_path = None
-  os.makedirs(log_base_path, exist_ok=True)
-  log_filename = f'out-{args.train.name}{time.time()}_.log'
-  args.io.log_path = os.path.join(log_base_path, log_filename)
-  print(f'Logging to {args.io.log_path}')
-    # if os.path.exists(args.log_path) and not resume_latest:
-    #     print(
-    #         "Error. Experiment already exists. Use --name {} to specify a new experiment."
-    #     )
-    #     return -1 
 
-  # args.io.log_level = logging.DEBUG if args.train.debug else logging.INFO
-  # setup_logging(args.io.log_path, args.io.log_level)
-  # if args.log_path does not exist create it
-#   os.makedirs(args.log_path, exist_ok=True)
   # loss = create_loss(args)
   loss = CiipLoss(local_loss=False,
     gather_with_grad=False,
@@ -106,7 +90,7 @@ def main(args: DictConfig, start_epoch=0):
 
   for epoch in range(start_epoch, args.train.epochs):
     
-    logging.info(f'Start epoch {epoch}')
+    logger.info(f'Start epoch {epoch}')
 
     train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist_model, args, tb_writer)
     completed_epoch = epoch + 1
