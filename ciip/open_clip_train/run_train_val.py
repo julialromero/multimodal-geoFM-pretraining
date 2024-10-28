@@ -17,6 +17,8 @@ from model_ciip import CIIP
 from loss import CiipLoss
 
 LATEST_CHECKPOINT_NAME = "epoch_latest.pt"
+# Change this to local_default for local testing
+CONF = "prod_default"
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +35,7 @@ def cosine_lr(optimizer, base_lr, warmup_length, steps):
         return lr
     return _lr_adjuster
 
-@hydra.main(config_path="configs", config_name="local_default")
+@hydra.main(config_path="configs", config_name=CONF)
 def main(args: DictConfig, start_epoch=0):
 
   # loss = create_loss(args)

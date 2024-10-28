@@ -26,12 +26,12 @@ model:
   skip_scheduler: False
   distill:
   distributed: False
-  workers: 0
+  workers: 4
 
 #TODO: loss params
 
 datamodule:
-  batch_size: 20
+  batch_size: 128
   world_size: 1
   rank: 0
   horovod: False
@@ -44,10 +44,10 @@ dataset:
 
 train:
   # fraction of data to use for validation
-  device: cpu
+  device: cuda
   use_val: True
   val_frac: 0.1
-  epochs: 1
+  epochs: 50
   lr: 0.0001
   wd: 0.2
   warmup: 10000

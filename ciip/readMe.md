@@ -14,7 +14,7 @@ We're using hydra to run/iterate/output.  It automatically generates files in th
 # Local Testing
 This will let you have some quick sanity checking for syntax/environment issues before moving files onto Hal or Alpine for more rigorous iteration.  If you want to adjust any configurations for this, you can do so in the configs/local_default.yaml file.
 1. Go to https://drive.google.com/file/d/1sRWcYbaWs-efXza6kw03GlJQdZHq5iRN/view?pli=1, download the data, then move the folders labelled s1 and s2c into a new directory at the same level as ciip called "local_test_data".
-2. We need to ensure that hydra is pointed at a config file for small, local runs.  In your run_train_val class, override line 37 to look like this @hydra.main(config_path="../configs", config_name="local_default").
+2. We need to ensure that hydra is pointed at a config file for small, local runs.  In your run_train_val class, change line 21 to look like this: CONF="local_default"
 3. Now, we can do a quick run; you should be running from within the {your_path_to_repo}/ciip/ciip/open_clip_train/ directory: 
    4. In the command line, it'll just look like running python3 run_train_val.py; you can feed in additional hydra configs if you want to (see below)
    6. You can setup your IDE to run this as well by clicking 'edit configurations' for the run_train_val.py class and ensuring that it matches what's above.
@@ -28,11 +28,11 @@ This will let you have some quick sanity checking for syntax/environment issues 
 
 # Production Testing
 This is for when you're iterating through different options.
-1. Make sure line 37 of your run_train_val looks like this: @hydra.main(config_path="../configs", config_name="prod_default")
+1. Make sure line 21 of your run_train_val looks like this: CONF="prod_default"
 2. You can fire off a single run with the exact same command specified above
 3. If you want to start messing around with hyperparameters, you can start to add specific config files that override the default hyperparams found in prod_default.yaml.  I've included some sample overrides; the datamodule and train folders both pertain to the subsections in the prod_default.yaml file.  If I wanted to try out these different permutations, I would run something that looks like this: python3 run_train_val.py hydra.job.chdir=False hydra.mode=MULTIRUN datamodule=large_batch,small_batch train=high_learning_rate.
    4. Hydra will then fire off 2 runs, where it's mixing and matching batch sizes against the high learning rate.
 
-- adjust logging; not seeing anything at the moment
+# TODO
 - add cometML for logging
   - document necessary online setup for cometML

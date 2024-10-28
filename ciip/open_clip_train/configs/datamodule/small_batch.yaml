@@ -1,0 +1,2 @@
+small_batch: 16
+world_size: 1
