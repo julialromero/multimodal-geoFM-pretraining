@@ -93,15 +93,14 @@ def test_model(dataloader, model, loss_fn=nn.CrossEntropyLoss(), val=False):
         i = 0
         # calculate the number of iterations the following loop will run
         for sample in dataloader:
-            print("Running sample number", i, "of", num_batches)
             i += 1
             X, y = sample['image'], sample['label']
             X, y = X.to(device), y.float().to(device)
             pred = model(X)
             test_loss += loss_fn(pred, y).item()
             correct += (pred.argmax(1) == y.argmax(1)).type(torch.float).sum().item()
-            print("-- Test loss:", test_loss)
-            print("-- Correct:", correct)
+            if i % 24 == 0:
+                print("Sample number", i, "of", num_batches, "-- Test loss:", test_loss, "-- Correct:", correct, "of")
     test_loss /= num_batches
     correct /= size
     prefix = "Validation" if val else "Test"
@@ -113,7 +112,9 @@ def train_model(dataloader, model, loss_fn=nn.CrossEntropyLoss(), lr=1e-3):
     model.train()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     size = len(dataloader.dataset)
+    num_batches = len(dataloader)
     model.train()
+    train_loss = 0
     for batch, sample in enumerate(dataloader):
         X, y = sample['image'], sample['label']
         X, y = X.to(device), y.float().to(device)
@@ -121,6 +122,7 @@ def train_model(dataloader, model, loss_fn=nn.CrossEntropyLoss(), lr=1e-3):
         # Compute prediction error
         pred = model(X)
         loss = loss_fn(pred, y)
+        train_loss += loss.item()
 
         # Backpropagation
         loss.backward()
@@ -128,10 +130,15 @@ def train_model(dataloader, model, loss_fn=nn.CrossEntropyLoss(), lr=1e-3):
         optimizer.zero_grad()
 
         # print intermediate results every n batches
-        n = 5
+        n = 24
         if batch % n == 0:
             loss, current = loss.item(), (batch + 1) * len(X)
-            print(f"loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
+            print(f"Batch {batch:d} loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
+
+    # calculate avg training loss
+    train_loss /= num_batches
+    print(f"Training Avg Loss: {train_loss:>8f} \n")
+    
 
 
 # run this code if calling this file directly to load the model run inferences on the BigEarthNet dataset
@@ -155,12 +162,14 @@ if __name__ =="__main__":
     print("Device set to:", device)
     # train the model
     epochs = 5
-    lr = 1e-5
+    lr = 1e-4
+    print("Testing model before training...")
+    test_model(dataloader_test, encoder_s2, val=False)
     print("Training model for" , epochs, "epochs...")
     for t in range(epochs):
         print(f"Epoch {t+1}\n-------------------------------")
         train_model(dataloader_train, encoder_s2, lr=lr)
         test_model(dataloader_val, encoder_s2, val=True)
         # checkpoint the model
-        torch.save(encoder_s2.state_dict(), f"/local/ms-data/bigearthnet/model/s2_encoder_epoch{t+1}.pt")
+        torch.save(encoder_s2.state_dict(), f"/local/ms-data/bigearthnet/model/s2_encoder_lr1e-4_epoch{t+1}.pt")
     test_model(dataloader_test, encoder_s2, val=False)
