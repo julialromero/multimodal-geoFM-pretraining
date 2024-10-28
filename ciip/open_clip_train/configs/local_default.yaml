@@ -1,0 +1,69 @@
+# config file for main (trainer)
+# example: dir: /path/to/dir
+# please use the exact name of the arg attribute as the name of the variable
+defaults:
+  - _self_
+  - override hydra/hydra_logging: default
+  - override hydra/job_logging: default
+
+io:
+  checkpoint_path: ciip/open_clip_train/checkpoints
+  log_path: ciip/open_clip_train/log
+  save_frequency: 5
+  save_logs: True
+  log_every_n_steps: 10
+  wandb: False
+
+model:
+  embed_dim: 512
+  s1_layers: [3, 4, 6, 3]
+  s2_layers: [3, 4, 6, 3]
+  width: 32
+  s1_patch_size: 16
+  s2_patch_size: 16
+  s1_resolution: 264
+  s2_resolution: 264
+  s1_bands: [1, 2, 3]
+  s2_bands: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+  #TODO we should use mixed prevision
+  precision: 'fp16'
+  grad_clip_norm: ~
+  accum_freq: 1
+  skip_scheduler: False
+  distill:
+  distributed: False
+  workers: 0
+
+#TODO: loss params
+
+datamodule:
+  batch_size: 20
+  world_size: 1
+  rank: 0
+  horovod: False
+
+dataset:
+  dataset_type: ssl4eo
+  # train_data is true for training and false for validation
+  train_data: True
+  root: local_test_data/ #TODO: documentation about proper directory to run from
+
+train:
+  # fraction of data to use for validation
+  device: cpu
+  use_val: True
+  val_frac: 0.1
+  epochs: 1
+  lr: 0.0001
+  wd: 0.2
+  warmup: 10000
+  beta1: 0.9
+  beta2: 0.999
+  eps: 1.0e-8
+  val_frequency: 1
+  accum_freq: 5
+  save_logs: True
+  name: ciip_test
+  delete_previous_checkpoint: False
+  save_most_recent: False
+  debug: False
