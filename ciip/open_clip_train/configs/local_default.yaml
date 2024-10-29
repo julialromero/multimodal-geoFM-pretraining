@@ -7,6 +7,9 @@ io:
   save_logs: True
   log_every_n_steps: 10
   wandb: False
+  comet_ml: False
+
+comet: personal
 
 model:
   embed_dim: 512

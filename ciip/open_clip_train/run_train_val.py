@@ -3,6 +3,9 @@ import os
 import hydra
 from omegaconf import DictConfig, OmegaConf
 import sys
+from comet_ml import Experiment
+from comet_ml.integration.pytorch import log_model
+
 
 import numpy as np
 import torch
@@ -18,7 +21,8 @@ from loss import CiipLoss
 
 LATEST_CHECKPOINT_NAME = "epoch_latest.pt"
 # Change this to local_default for local testing
-CONF = "prod_default"
+CONF = "local_default"
+# CONF = "prod_default"
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +63,14 @@ def main(args: DictConfig, start_epoch=0):
     s2_bands=len(args.model.s2_bands))
   
   model = model.to(args.train.device)
+
+  #setup comet_ml logging
+  if(args.io.comet_ml):
+      experiment = Experiment(
+          api_key=args.comet.api_key,
+          project_name=args.comet.project_name,
+          workspace=args.comet.workspace
+      )
   
   
   exclude = lambda n, p: p.ndim < 2 or "bn" in n or "ln" in n or "bias" in n or 'logit_scale' in n
@@ -116,13 +128,20 @@ def main(args: DictConfig, start_epoch=0):
         if scaler is not None:
             checkpoint_dict["scaler"] = scaler.state_dict()
 
-        if completed_epoch == args.train.epochs or (
-            args.save_frequency > 0 and (completed_epoch % args.save_frequency) == 0
-        ):
+        if completed_epoch == args.train.epochs \
+                or (args.save_frequency > 0 and (completed_epoch % args.save_frequency) == 0):
+            # save checkpoints within outputs file
             torch.save(
                 checkpoint_dict,
                 os.path.join(args.io.checkpoint_path, f"epoch_{completed_epoch}.pt"),
             )
+
+            # log out via comet
+            # TBD if we want the whole checkpoint dict or just some specific hyper-params . . .
+            if(args.io.comet_ml):
+                experiment.log_parameters(checkpoint_dict)
+                log_model(experiment, model=original_model, model_name="CIIP!")
+
         if args.train.delete_previous_checkpoint:
             previous_checkpoint = os.path.join(args.io.checkpoint_path, f"epoch_{completed_epoch - 1}.pt")
             if os.path.exists(previous_checkpoint):
