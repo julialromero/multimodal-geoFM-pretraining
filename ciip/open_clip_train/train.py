@@ -65,24 +65,24 @@ def backward(total_loss, scaler):
 
 def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist_model, args, tb_writer=None):
     # TODO: figure out what dist_model is
-    device = torch.device(args.device)
-    autocast = get_autocast(args.precision)
-    input_dtype = get_input_dtype(args.precision)
+    device = torch.device(args.train.device)
+    autocast = get_autocast(args.model.precision)
+    input_dtype = get_input_dtype(args.model.precision)
 
     model.train()
     
     ## for using pretrained model, these pretrained models are distributedparallel models
     ## this means we have to either use a distributedparallel model, otherwise i think we have to rename the state_dict keys 
     ## (as the naming convention is slightly different for regular vs distributed parallel)
-    if args.distill:
+    if args.model.distill:
         dist_model.eval()
 
     data['train'].set_epoch(epoch)  # set epoch in process safe manner via sampler or shared_epoch
     dataloader = data['train'].dataloader
-    num_batches_per_epoch = dataloader.num_batches // args.accum_freq
+    num_batches_per_epoch = dataloader.num_batches // args.train.accum_freq
     sample_digits = math.ceil(math.log(dataloader.num_samples + 1, 10))
 
-    if args.accum_freq > 1:
+    if args.train.accum_freq > 1:
         accum_s1, accum_s2, accum_features = [], [], {}
 
     losses_m = {}
@@ -90,10 +90,10 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
     data_time_m = AverageMeter()
     end = time.time()
     for i, batch in enumerate(dataloader):
-        i_accum = i // args.accum_freq
+        i_accum = i // args.train.accum_freq
         step = num_batches_per_epoch * epoch + i_accum
 
-        if not args.skip_scheduler:
+        if not args.model.skip_scheduler:
             scheduler(step)
 
         s1, s2 = batch
@@ -103,12 +103,12 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
         data_time_m.update(time.time() - end)
         optimizer.zero_grad()
 
-        if args.accum_freq == 1:
+        if args.train.accum_freq == 1:
             with autocast():
                 model_out = model(s1, s2)
 
                 logit_scale = model_out["logit_scale"]
-                if args.distill:
+                if args.model.distill:
                     with torch.no_grad():
                         dist_model_out = dist_model(s1, s2)
                     model_out.update({f'dist_{k}': v for k, v in dist_model_out.items()})
@@ -137,7 +137,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 accum_s2.append(s2)
 
             # If (i + 1) % accum_freq is not zero, move on to the next batch.
-            if ((i + 1) % args.accum_freq) > 0:
+            if ((i + 1) % args.train.accum_freq) > 0:
                 # FIXME this makes data time logging unreliable when accumulating
                 continue
 
@@ -145,7 +145,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
             # Re-do the forward pass for those batches, and use the cached features from the other batches as negatives.
             # Call backwards each time, but only step optimizer at the end.
             optimizer.zero_grad()
-            for j in range(args.accum_freq):
+            for j in range(args.train.accum_freq):
                 s1 = accum_s1[j]
                 s2 = accum_s2[j]
                 with autocast():
@@ -170,26 +170,26 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 backward(total_loss, scaler)
 
         if scaler is not None:
-            if args.horovod:
+            if args.datamodule.horovod:
                 optimizer.synchronize()
                 scaler.unscale_(optimizer)
-                if args.grad_clip_norm is not None:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm, norm_type=2.0)
+                if args.model.grad_clip_norm is not None:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.model.grad_clip_norm, norm_type=2.0)
                 with optimizer.skip_synchronize():
                     scaler.step(optimizer)
             else:
-                if args.grad_clip_norm is not None:
+                if args.model.grad_clip_norm is not None:
                     scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm, norm_type=2.0)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.model.grad_clip_norm, norm_type=2.0)
                 scaler.step(optimizer)
             scaler.update()
         else:
-            if args.grad_clip_norm is not None:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm, norm_type=2.0)
+            if args.model.grad_clip_norm is not None:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.model.grad_clip_norm, norm_type=2.0)
             optimizer.step()
 
         # reset gradient accum, if enabled
-        if args.accum_freq > 1:
+        if args.train.accum_freq > 1:
             accum_s1, accum_s2, accum_features = [], [], {}
 
         # Note: we clamp to 4.6052 = ln(100), as in the original paper.
@@ -199,9 +199,9 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
         batch_time_m.update(time.time() - end)
         end = time.time()
         batch_count = i_accum + 1
-        if is_master(args) and (i_accum % args.log_every_n_steps == 0 or batch_count == num_batches_per_epoch):
+        if is_master(args) and (i_accum % args.io.log_every_n_steps == 0 or batch_count == num_batches_per_epoch):
             batch_size = len(s1)
-            num_samples = batch_count * batch_size * args.accum_freq * args.world_size
+            num_samples = batch_count * batch_size * args.train.accum_freq * args.datamodule.world_size
             samples_per_epoch = dataloader.num_samples
             percent_complete = 100.0 * batch_count / num_batches_per_epoch
 
@@ -218,8 +218,8 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                     for loss_name, loss_m in losses_m.items()
                 ]
             )
-            samples_per_second = args.accum_freq * args.batch_size * args.world_size / batch_time_m.val
-            samples_per_second_per_gpu = args.accum_freq * args.batch_size / batch_time_m.val
+            samples_per_second = args.train.accum_freq * args.datamodule.batch_size * args.datamodule.world_size / batch_time_m.val
+            samples_per_second_per_gpu = args.train.accum_freq * args.datamodule.batch_size / batch_time_m.val
             logging.info(
                 f"Train Epoch: {epoch} [{num_samples:>{sample_digits}}/{samples_per_epoch} ({percent_complete:.0f}%)] "
                 f"Data (t): {data_time_m.avg:.3f} "
@@ -245,7 +245,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 for name, val in log_data.items():
                     tb_writer.add_scalar(name, val, step)
             
-            if args.wandb:
+            if args.io.wandb:
                 assert wandb is not None, 'Please install wandb.'
                 log_data['step'] = step  # for backwards compatibility
                 wandb.log(log_data, step=step)
@@ -260,16 +260,16 @@ def evaluate(model, data, epoch, args, tb_writer=None, tokenizer=None):
     metrics = {}
     if not is_master(args):
         return metrics
-    device = torch.device(args.device)
+    device = torch.device(args.train.device)
     model.eval()
 
     zero_shot_metrics = zero_shot_eval(model, data, epoch, args, tokenizer=tokenizer)
     metrics.update(zero_shot_metrics)
 
-    autocast = get_autocast(args.precision)
-    input_dtype = get_input_dtype(args.precision)
+    autocast = get_autocast(args.model.precision)
+    input_dtype = get_input_dtype(args.model.precision)
 
-    if 'val' in data and (args.val_frequency and ((epoch % args.val_frequency) == 0 or epoch == args.epochs)):
+    if 'val' in data and (args.train.val_frequency and ((epoch % args.train.val_frequency) == 0 or epoch == args.train.epochs)):
         dataloader = data['val'].dataloader
         num_samples = 0
         samples_per_val = dataloader.num_samples
@@ -345,20 +345,20 @@ def evaluate(model, data, epoch, args, tb_writer=None, tokenizer=None):
 
     log_data = {"val/" + name: val for name, val in metrics.items()}
 
-    if args.save_logs:
+    if args.io.save_logs:
         if tb_writer is not None:
             for name, val in log_data.items():
                 tb_writer.add_scalar(name, val, epoch)
 
-        with open(os.path.join(args.checkpoint_path, "results.jsonl"), "a+") as f:
+        with open(os.path.join(args.io.checkpoint_path, "results.jsonl"), "a+") as f:
             f.write(json.dumps(metrics))
             f.write("\n")
 
-    if args.wandb:
+    if args.io.wandb:
         assert wandb is not None, 'Please install wandb.'
         if 'train' in data:
             dataloader = data['train'].dataloader
-            num_batches_per_epoch = dataloader.num_batches // args.accum_freq
+            num_batches_per_epoch = dataloader.num_batches // args.train.accum_freq
             step = num_batches_per_epoch * epoch
         else:
             step = None
@@ -399,7 +399,7 @@ def main(args):
     model = CLIP(**vars(args))
     original_model = model
 
-    for epoch in range(start_epoch, args.epochs):
+    for epoch in range(start_epoch, args.train.epochs):
         if is_master(args):
             logging.info(f'Start epoch {epoch}')
 
@@ -410,7 +410,7 @@ def main(args):
             evaluate(model, data, completed_epoch, args, tb_writer=writer, tokenizer=tokenizer)
 
         # Saving checkpoints.
-        if args.save_logs:
+        if args.io.save_logs:
             checkpoint_dict = {
                 "epoch": completed_epoch,
                 "name": args.name,
@@ -420,22 +420,22 @@ def main(args):
             if scaler is not None:
                 checkpoint_dict["scaler"] = scaler.state_dict()
 
-            if completed_epoch == args.epochs or (
+            if completed_epoch == args.train.epochs or (
                 args.save_frequency > 0 and (completed_epoch % args.save_frequency) == 0
             ):
                 torch.save(
                     checkpoint_dict,
-                    os.path.join(args.checkpoint_path, f"epoch_{completed_epoch}.pt"),
+                    os.path.join(args.io.checkpoint_path, f"epoch_{completed_epoch}.pt"),
                 )
             # if args.delete_previous_checkpoint:
-            #     previous_checkpoint = os.path.join(args.checkpoint_path, f"epoch_{completed_epoch - 1}.pt")
+            #     previous_checkpoint = os.path.join(args.io.checkpoint_path, f"epoch_{completed_epoch - 1}.pt")
             #     if os.path.exists(previous_checkpoint):
             #         os.remove(previous_checkpoint)
 
             # if args.save_most_recent:
             #     # try not to corrupt the latest checkpoint if save fails
-            #     tmp_save_path = os.path.join(args.checkpoint_path, "tmp.pt")
-            #     latest_save_path = os.path.join(args.checkpoint_path, LATEST_CHECKPOINT_NAME)
+            #     tmp_save_path = os.path.join(args.io.checkpoint_path, "tmp.pt")
+            #     latest_save_path = os.path.join(args.io.checkpoint_path, LATEST_CHECKPOINT_NAME)
             #     torch.save(checkpoint_dict, tmp_save_path)
             #     os.replace(tmp_save_path, latest_save_path)
 

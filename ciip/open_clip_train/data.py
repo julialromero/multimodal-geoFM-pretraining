@@ -9,6 +9,7 @@ import os
 from dataclasses import dataclass
 from multiprocessing import Value
 import rasterio
+import hydra
 
 import numpy as np
 # import pandas as pd
@@ -50,12 +51,14 @@ class SSL4EODataset(Dataset):
             raise ValueError('Band index should be between 1 and 12')
         self.transforms = transforms
 
+        original_working_directory = hydra.utils.get_original_cwd()
+        data_parent_directory = "/".join(original_working_directory.split("/")[:-2])
 
-        s1_dir = os.path.join(self.root, 's1')
-        s2_dir = os.path.join(self.root, 's2c')
+        self.s1_dir = os.path.join(data_parent_directory, os.path.join(self.root, 's1'))
+        self.s2_dir = os.path.join(data_parent_directory, os.path.join(self.root, 's2c'))
 
-        s1_samples = os.listdir(s1_dir)
-        s2_samples = os.listdir(s2_dir)
+        s1_samples = os.listdir(self.s1_dir)
+        s2_samples = os.listdir(self.s2_dir)
 
         assert len(s1_samples) == len(s2_samples), 'Number of locations in S1 and S2 should be the same'
 
@@ -89,8 +92,8 @@ class SSL4EODataset(Dataset):
 
         location_folder = self.locations[location_idx]
 
-        path_to_s1 = os.path.join(self.root, 's1', location_folder)
-        path_to_s2 = os.path.join(self.root, 's2c', location_folder)
+        path_to_s1 = os.path.join(self.s1_dir, location_folder)
+        path_to_s2 = os.path.join(self.s2_dir, location_folder)
 
         s1_season_folders = sorted(os.listdir(path_to_s1))
         s2_season_folders = sorted(os.listdir(path_to_s2))
@@ -211,8 +214,8 @@ def generate_splits(dataset, val_frac, seed=None):
 
 
 def get_ssl4eo_dataset(args, is_train, transforms):
-    root = args.root
-    # root = args.train_data if is_train else args.val_data
+    root = args.dataset.root
+    # root = args.dataset.train_data if is_train else args.val_data
     assert root
     default_bands = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
 
@@ -220,7 +223,7 @@ def get_ssl4eo_dataset(args, is_train, transforms):
     dataset = SSL4EODataset(
         root, # root file path
         transforms=transforms, # transforms
-        s2_bands=args.s2_bands if hasattr(args, 's2_bands') else default_bands  # from config file
+        s2_bands=args.model.s2_bands if hasattr(args, 's2_bands') else default_bands  # from config file
     )
 
     return dataset_to_datainfo(args, dataset, is_train)
@@ -228,14 +231,14 @@ def get_ssl4eo_dataset(args, is_train, transforms):
 
 def dataset_to_datainfo(args, dataset, is_train):
     num_samples = len(dataset)
-    sampler = DistributedSampler(dataset) if args.distributed and is_train else None
+    sampler = DistributedSampler(dataset) if args.model.distributed and is_train else None
     shuffle = is_train and sampler is None
 
     dataloader = DataLoader(
         dataset,
-        batch_size=args.batch_size,
+        batch_size=args.datamodule.batch_size,
         shuffle=shuffle,
-        num_workers=args.workers,
+        num_workers=args.model.workers,
         pin_memory=True,
         sampler=sampler,
         # drop_last=is_train,
@@ -299,16 +302,16 @@ def get_dataset_fn(data_path, dataset_type):
 def get_data(args, preprocess_fns=None):
     data = {}
 
-    if args.dataset_type == "ssl4eo":
+    if args.dataset.dataset_type == "ssl4eo":
         ### make splits
-        if args.use_val:
+        if args.train.use_val:
             # first prepare full dataset
-            full_datainfo = get_dataset_fn(args.train_data, args.dataset_type)(
+            full_datainfo = get_dataset_fn(args.dataset.train_data, args.dataset.dataset_type)(
                 args, is_train=True, transforms=preprocess_fns) # is_train and transforms don't matter here
             
             # then make splits
             full_dataset = full_datainfo.dataloader.dataset
-            data['train'], data['val'] = generate_splits(full_dataset, args.val_frac, seed=46)
+            data['train'], data['val'] = generate_splits(full_dataset, args.train.val_frac, seed=46)
 
             # then convert to datainfo
             data['train'] = dataset_to_datainfo(args, data['train'], is_train=True)
@@ -316,18 +319,18 @@ def get_data(args, preprocess_fns=None):
 
 
         else:
-            data['train'] = get_dataset_fn(args.train_data, args.dataset_type)(
+            data['train'] = get_dataset_fn(args.dataset.train_data, args.dataset.dataset_type)(
                 args, is_train=True, transforms=preprocess_fns)
 
         return data
     
     raise NotImplementedError("Only ssl4eo dataset type is supported for now.")
-    # if args.train_data or args.dataset_type == "synthetic":
-    #     data["train"] = get_dataset_fn(args.train_data, args.dataset_type)(
+    # if args.dataset.train_data or args.dataset.dataset_type == "synthetic":
+    #     data["train"] = get_dataset_fn(args.dataset.train_data, args.dataset.dataset_type)(
     #         args, preprocess_train, is_train=True, epoch=epoch, tokenizer=tokenizer)
 
     # if args.val_data:
-    #     data["val"] = get_dataset_fn(args.val_data, args.dataset_type)(
+    #     data["val"] = get_dataset_fn(args.val_data, args.dataset.dataset_type)(
     #         args, preprocess_val, is_train=False, tokenizer=tokenizer)
 
     # if args.imagenet_val is not None:
@@ -445,8 +448,8 @@ def get_data(args, preprocess_fns=None):
 
 #     dataloader = torch.utils.data.DataLoader(
 #         dataset,
-#         batch_size=args.batch_size,
-#         num_workers=args.workers,
+#         batch_size=args.datamodule.batch_size,
+#         num_workers=args.model.workers,
 #         sampler=sampler,
 #     )
 
@@ -618,7 +621,7 @@ def get_data(args, preprocess_fns=None):
 
 
 # def get_wds_dataset(args, preprocess_img, is_train, epoch=0, floor=False, tokenizer=None):
-#     input_shards = args.train_data if is_train else args.val_data
+#     input_shards = args.dataset.train_data if is_train else args.val_data
 #     assert input_shards is not None
 #     resampled = getattr(args, 'dataset_resampled', False) and is_train
 
@@ -638,13 +641,13 @@ def get_data(args, preprocess_fns=None):
 
 #     shared_epoch = SharedEpoch(epoch=epoch)  # create a shared epoch store to sync epoch to dataloader worker proc
 
-#     if is_train and args.train_data_upsampling_factors is not None:
+#     if is_train and args.dataset.train_data_upsampling_factors is not None:
 #         assert resampled, "--train_data_upsampling_factors is only supported when sampling with replacement (with --dataset-resampled)."
     
 #     if resampled:
 #         pipeline = [ResampledShards2(
 #             input_shards,
-#             weights=args.train_data_upsampling_factors,
+#             weights=args.dataset.train_data_upsampling_factors,
 #             deterministic=True,
 #             epoch=shared_epoch,
 #         )]
@@ -684,7 +687,7 @@ def get_data(args, preprocess_fns=None):
 #         wds.rename(image="jpg;png;jpeg;webp", text="txt"),
 #         wds.map_dict(image=preprocess_img, text=lambda text: tokenizer(text)[0]),
 #         wds.to_tuple("image", "text"),
-#         wds.batched(args.batch_size, partial=not is_train)
+#         wds.batched(args.datamodule.batch_size, partial=not is_train)
 #     ])
 
 #     dataset = wds.DataPipeline(*pipeline)
@@ -692,41 +695,41 @@ def get_data(args, preprocess_fns=None):
 #     if is_train:
 #         if not resampled:
 #             num_shards = num_shards or len(expand_urls(input_shards)[0])
-#             assert num_shards >= args.workers * args.world_size, 'number of shards must be >= total workers'
+#             assert num_shards >= args.model.workers * args.world_size, 'number of shards must be >= total workers'
 #         # roll over and repeat a few samples to get same number of full batches on each node
 #         round_fn = math.floor if floor else math.ceil
-#         global_batch_size = args.batch_size * args.world_size
+#         global_batch_size = args.datamodule.batch_size * args.world_size
 #         num_batches = round_fn(num_samples / global_batch_size)
-#         num_workers = max(1, args.workers)
+#         num_workers = max(1, args.model.workers)
 #         num_worker_batches = round_fn(num_batches / num_workers)  # per dataloader worker
 #         num_batches = num_worker_batches * num_workers
 #         num_samples = num_batches * global_batch_size
 #         dataset = dataset.with_epoch(num_worker_batches)  # each worker is iterating over this
 #     else:
 #         # last batches are partial, eval is done on single (master) node
-#         num_batches = math.ceil(num_samples / args.batch_size)
+#         num_batches = math.ceil(num_samples / args.datamodule.batch_size)
 
 #     dataloader = wds.WebLoader(
 #         dataset,
 #         batch_size=None,
 #         shuffle=False,
-#         num_workers=args.workers,
-#         persistent_workers=args.workers > 0,
+#         num_workers=args.model.workers,
+#         persistent_workers=args.model.workers > 0,
 #     )
 
 #     # FIXME not clear which approach is better, with_epoch before vs after dataloader?
 #     # hoping to resolve via https://github.com/webdataset/webdataset/issues/169
 #     # if is_train:
 #     #     # roll over and repeat a few samples to get same number of full batches on each node
-#     #     global_batch_size = args.batch_size * args.world_size
+#     #     global_batch_size = args.datamodule.batch_size * args.world_size
 #     #     num_batches = math.ceil(num_samples / global_batch_size)
-#     #     num_workers = max(1, args.workers)
+#     #     num_workers = max(1, args.model.workers)
 #     #     num_batches = math.ceil(num_batches / num_workers) * num_workers
 #     #     num_samples = num_batches * global_batch_size
 #     #     dataloader = dataloader.with_epoch(num_batches)
 #     # else:
 #     #     # last batches are partial, eval is done on single (master) node
-#     #     num_batches = math.ceil(num_samples / args.batch_size)
+#     #     num_batches = math.ceil(num_samples / args.datamodule.batch_size)
 
 #     # add meta-data to dataloader instance for convenience
 #     dataloader.num_batches = num_batches
@@ -736,7 +739,7 @@ def get_data(args, preprocess_fns=None):
 
 
 # def get_csv_dataset(args, preprocess_fn, is_train, epoch=0, tokenizer=None):
-#     input_filename = args.train_data if is_train else args.val_data
+#     input_filename = args.dataset.train_data if is_train else args.val_data
 #     assert input_filename
 #     dataset = CsvDataset(
 #         input_filename,
@@ -747,14 +750,14 @@ def get_data(args, preprocess_fns=None):
 #         tokenizer=tokenizer
 #     )
 #     num_samples = len(dataset)
-#     sampler = DistributedSampler(dataset) if args.distributed and is_train else None
+#     sampler = DistributedSampler(dataset) if args.model.distributed and is_train else None
 #     shuffle = is_train and sampler is None
 
 #     dataloader = DataLoader(
 #         dataset,
-#         batch_size=args.batch_size,
+#         batch_size=args.datamodule.batch_size,
 #         shuffle=shuffle,
-#         num_workers=args.workers,
+#         num_workers=args.model.workers,
 #         pin_memory=True,
 #         sampler=sampler,
 #         drop_last=is_train,
@@ -797,14 +800,14 @@ def get_data(args, preprocess_fns=None):
 #     dataset = SyntheticDataset(
 #         transform=preprocess_fn, image_size=image_size, dataset_size=args.train_num_samples, tokenizer=tokenizer)
 #     num_samples = len(dataset)
-#     sampler = DistributedSampler(dataset) if args.distributed and is_train else None
+#     sampler = DistributedSampler(dataset) if args.model.distributed and is_train else None
 #     shuffle = is_train and sampler is None
 
 #     dataloader = DataLoader(
 #         dataset,
-#         batch_size=args.batch_size,
+#         batch_size=args.datamodule.batch_size,
 #         shuffle=shuffle,
-#         num_workers=args.workers,
+#         num_workers=args.model.workers,
 #         pin_memory=True,
 #         sampler=sampler,
 #         drop_last=is_train,
