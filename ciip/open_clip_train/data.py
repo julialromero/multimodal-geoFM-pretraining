@@ -109,8 +109,9 @@ class SSL4EODataset(Dataset):
         third_band = np.array(self.resize_transform(Image.fromarray(third_band.astype(np.uint8))))
 
         # Create an RGB composite using VH, VV, and their average
-        s1_composite_image = np.stack((vh_image, vv_image, third_band), axis=-1)
-        
+        # s1_composite_image = np.stack((vh_image, vv_image, third_band), axis=-1)
+        s1_composite_image = np.stack((vh_image, vv_image), axis=-1)
+
 
         ############### Load s2 images ###################
         s2_band_paths = [os.path.join(path_to_s2_season, f'B{band}.tif') for band in self.s2_bands]
