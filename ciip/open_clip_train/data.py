@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from multiprocessing import Value
 import rasterio
 import hydra
+import torch
 
 import numpy as np
 # import pandas as pd
@@ -146,8 +147,8 @@ class SSL4EODataset(Dataset):
 
         ## TODO: double check Image input to transforms ?
         if self.transforms is not None:
-            s1_composite_image = self.transforms(Image.fromarray(s1_composite_image))
-            s2_composite_image = self.transforms(Image.fromarray(s2_composite_image))
+            s1_composite_image = self.transforms(s1_composite_image)
+            s2_composite_image = self.transforms(s2_composite_image)
         
 
         return (s1_composite_image, s2_composite_image)

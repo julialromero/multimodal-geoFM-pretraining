@@ -19,6 +19,9 @@ sys.path.insert(0, parent_dir)
 from model_ciip import CIIP
 from loss import CiipLoss
 
+from torchvision.transforms import v2
+from torchvision.transforms import RandomCrop
+
 LATEST_CHECKPOINT_NAME = "epoch_latest.pt"
 # Change this to local_default for local testing
 CONF = "local_default"
@@ -78,7 +81,19 @@ def main(args: DictConfig, start_epoch=0):
   named_parameters = list(model.named_parameters())
   gain_or_bias_params = [p for n, p in named_parameters if exclude(n, p) and p.requires_grad]
   rest_params = [p for n, p in named_parameters if include(n, p) and p.requires_grad]
-  data = get_data(args)
+
+  # define transforms
+  transforms = v2.Compose([
+      # v2.RandomCrop(size=(224, 224)),
+      v2.RandomHorizontalFlip(p=0.5),
+      v2.RandomVerticalFlip(p=0.5),
+      v2.ColorJitter(contrast=0.5, brightness=0.5),
+      # v2.GaussianBlur(),
+      # v2.ToDtype(torch.float32, scale=True),
+      # v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+  ])
+
+  data = get_data(args, transforms)
   total_steps = (data["train"].dataloader.num_batches // args.train.accum_freq) * args.train.epochs
   
   optimizer= optim.AdamW(
