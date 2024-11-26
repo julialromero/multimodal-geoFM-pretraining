@@ -20,7 +20,7 @@ from model_ciip import CIIP
 from loss import CiipLoss
 
 from torchvision.transforms import v2
-from torchvision.transforms import RandomCrop
+# from torchvision.transforms import *
 
 LATEST_CHECKPOINT_NAME = "epoch_latest.pt"
 # Change this to local_default for local testing
@@ -83,14 +83,12 @@ def main(args: DictConfig, start_epoch=0):
   rest_params = [p for n, p in named_parameters if include(n, p) and p.requires_grad]
 
   # define transforms
+  #TODO: color jitter only works on 3-channel images right now; a custom function would likely be quite useful here
   transforms = v2.Compose([
-      # v2.RandomCrop(size=(224, 224)),
+      v2.RandomResizedCrop(size=(args.model.s1_resolution, args.model.s2_resolution), antialias=True),
       v2.RandomHorizontalFlip(p=0.5),
       v2.RandomVerticalFlip(p=0.5),
-      v2.ColorJitter(contrast=0.5, brightness=0.5),
-      # v2.GaussianBlur(),
-      # v2.ToDtype(torch.float32, scale=True),
-      # v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+      v2.GaussianBlur(3),
   ])
 
   data = get_data(args, transforms)

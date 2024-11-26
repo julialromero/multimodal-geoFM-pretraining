@@ -22,6 +22,7 @@ from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torchvision.transforms import Resize
+from PIL import Image
 
 
 ### band statistics: mean & std
@@ -147,8 +148,8 @@ class SSL4EODataset(Dataset):
 
         ## TODO: double check Image input to transforms ?
         if self.transforms is not None:
-            s1_composite_image = self.transforms(s1_composite_image)
-            s2_composite_image = self.transforms(s2_composite_image)
+            s1_composite_image = self.transforms(torch.from_numpy(s1_composite_image))
+            s2_composite_image = self.transforms(torch.from_numpy(s2_composite_image))
         
 
         return (s1_composite_image, s2_composite_image)
@@ -224,7 +225,8 @@ def get_ssl4eo_dataset(args, is_train, transforms):
     dataset = SSL4EODataset(
         root, # root file path
         transforms=transforms, # transforms
-        s2_bands=args.model.s2_bands if hasattr(args, 's2_bands') else default_bands  # from config file
+        s2_bands=args.model.s2_bands if hasattr(args, 's2_bands') else default_bands,  # from config file
+        target_image_dimension=(args.dataset.dimension, args.dataset.dimension)
     )
 
     return dataset_to_datainfo(args, dataset, is_train)
