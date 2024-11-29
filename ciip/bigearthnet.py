@@ -143,7 +143,6 @@ def train_model(dataloader, model, loss_fn=nn.CrossEntropyLoss(), lr=1e-3):
     # calculate avg training loss
     train_loss /= num_batches
     print(f"Training Avg Loss: {train_loss:>8f} \n")
-    
 
 
 # run this code if calling this file directly to load the model run inferences on the BigEarthNet dataset
@@ -179,3 +178,6 @@ if __name__ =="__main__":
         # checkpoint the model
         torch.save(encoder_s2.state_dict(), f"/local/ms-data/bigearthnet/model/s2_encoder_lr1e-2_epoch{t+1}.pt")
     test_model(dataloader_test, encoder_s2, val=False)
+    
+# TODO add image normalization before running with CIIP model
+# freeze most layers of the S2 model and only train the last layer

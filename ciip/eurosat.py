@@ -4,11 +4,13 @@ from torch import nn
 from torch.utils.data import DataLoader
 from torchvision.transforms import v2 as transforms
 from torchgeo.datasets import EuroSATSpatial
-from torchgeo.models import resnet18, ResNet18_Weights
+from torchgeo.models import resnet50, ResNet50_Weights
 from model_ciip import CIIP
 from sklearn.metrics import f1_score
 
 from torch.nn import Module, ModuleList, Conv1d, Sequential, ReLU, Dropout, Linear
+
+# define a simple MLP head for the CIIP model
 class MLPHead(Module):
     def __init__(self, input_dim, final_dim):
         hidden_size = 256
@@ -22,7 +24,6 @@ class MLPHead(Module):
         x = self.relu(x)
         x = self.fc2(x)
         return x
-
 
 # load the dataset
 def download_data(root_path):
@@ -65,7 +66,6 @@ def load_torchgeo_model():
     return model   
 
 def load_ciip_model_checkpoint(checkpoint_path):
-    # TODO FIGURE OUT WHAT IS GETTING LOADED AND HOW TO ACTUALLY LOAD IT
     s1_bands = [1, 2, 3]
     s2_bands = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     model = CIIP(
@@ -94,13 +94,11 @@ def modify_ciip_for_eurosat(model, num_classes=10):
         param.requires_grad = False
         
     # add in another layer to match the number of classes in the EuroSAT dataset
-    # encoder_s2.fc = nn.Linear(512, num_classes)
+    encoder_s2.fc = nn.Linear(512, num_classes)
 
-
-    encoder_s2.fc = MLPHead(input_dim=512, final_dim=num_classes)
+    # encoder_s2.fc = MLPHead(input_dim=512, final_dim=num_classes)
     for param in encoder_s2.fc.parameters():
         param.requires_grad = True
-
 
     # # Wrap the forward function
     original_forward = encoder_s2.forward
@@ -188,7 +186,7 @@ def train_model(dataloader, model, loss_fn=nn.CrossEntropyLoss(), lr=1e-3):
 # run this code if calling this file directly to load the model run inferences on the EuroSAT dataset
 if __name__ =="__main__":
     root_path = "/local/ms-data/eurosat"
-    batch_size = 1024
+    batch_size = 128
     torch.manual_seed(7)
     tx = transforms.Compose([
         transforms.Resize((264, 264)),  # Resizes the images
@@ -206,23 +204,19 @@ if __name__ =="__main__":
         batch_size=batch_size, 
         transforms=tx
     )
-    # TODO try with the model weights from epoch 5 and epoch 25 of CIIP weights
-    # model = load_ciip_model_checkpoint("/local/ms-data/SSL4EO/model/epoch_50.pt")
-    # print("Checkpoint loaded successfully.")
-    # TODO try with other heads for the CIIP model
-    # TODO try extracting the embeddings for all of the eurosat images then training just the classifier
-    # encoder_s2 = modify_ciip_for_eurosat(model)
-    # print("Model modified for EuroSAT dataset.")
-    encoder_s2 = resnet18(weights=None, in_chans=12, num_classes=10)
-    # TODO try with pretrained weights from other models
-    # encoder_s2 = resnet18(weights=ResNet18_Weights.SENTINEL2_ALL_MOCO, in_chans=12, num_classes=10)
+    path_to_model = "/local/ms-data/SSL4EO/model/bs_128_09-2024/epoch_50.pt"
+    ciip_model = load_ciip_model_checkpoint(path_to_model)
+    print("Checkpoint loaded successfully.")
+    encoder_s2 = modify_ciip_for_eurosat(ciip_model)
+    print("Model modified for EuroSAT dataset.")
+    # try out a randomly initiatilized resnet instead of ciip
+    # encoder_s2 = resnet50(weights=None, in_chans=12, num_classes=10)
+    # encoder_s2 = resnet50(weights=ResNet50_Weights.SENTINEL2_ALL_MOCO, in_chans=12, num_classes=10)
     device = ("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
     torch.cuda.set_device(1)
     print("Device set to:", device)
-    # TODO try with 50 epochs
-    epochs = 5
-    # TODO try with other learning rates for the randomly initialized model baseline (already tried 1e-3, 1e-1)
-    lr = 1e-1
+    epochs = 1
+    lr = 1e-3
     print("Testing model before training...")
     test_model(dataloader_test, encoder_s2, val=False)
     print("Training model for" , epochs, "epochs...")
@@ -232,3 +226,10 @@ if __name__ =="__main__":
         test_model(dataloader_val, encoder_s2, val=True)
         # torch.save(encoder_s2.state_dict(), f"/local/ms-data/eurosat/model/s2_encoder_lr1e-2_epoch{t+1}.pt")
     test_model(dataloader_test, encoder_s2, val=False)
+    
+# TODO try with the model weights from epoch 5 and epoch 25 of CIIP weights
+# TODO try with other heads for the CIIP model
+# TODO try extracting the embeddings for all of the eurosat images then training just the classifier
+# TODO try with pretrained weights from other models
+# TODO try with 50 epochs
+# TODO try with other learning rates for the randomly initialized model baseline (already tried 1e-3, 1e-1)
