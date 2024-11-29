@@ -3,6 +3,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 from torchvision.transforms import v2 as transforms
 from torchgeo.datasets import BigEarthNet
+from torchgeo.models import resnet50, ResNet50_Weights
 from model_ciip import CIIP
 
 # Load the BigEarthNet dataset
@@ -42,7 +43,11 @@ class CustomTransform:
     def __call__(self, sample):
         sample['image'] = self.transform(sample['image'])
         return sample
-    
+
+def load_torchgeo_model(): 
+    # Load the pre-trained ResNet-50 model
+    model = resnet50(weights=ResNet50_Weights.SENTINEL2_ALL_MOCO, in_chans=12, num_classes=19)
+    return model   
 
 def load_ciip_model_checkpoint(checkpoint_path):
     # TODO FIGURE OUT WHAT IS GETTING LOADED AND HOW TO ACTUALLY LOAD IT
@@ -100,7 +105,7 @@ def test_model(dataloader, model, loss_fn=nn.CrossEntropyLoss(), val=False):
             test_loss += loss_fn(pred, y).item()
             correct += (pred.argmax(1) == y.argmax(1)).type(torch.float).sum().item()
             if i % 24 == 0:
-                print("Sample number", i, "of", num_batches, "-- Test loss:", test_loss, "-- Correct:", correct, "of")
+                print("Sample number", i, "of", num_batches, "-- Test loss:", test_loss, "-- Correct:", correct)
     test_loss /= num_batches
     correct /= size
     prefix = "Validation" if val else "Test"
@@ -138,7 +143,6 @@ def train_model(dataloader, model, loss_fn=nn.CrossEntropyLoss(), lr=1e-3):
     # calculate avg training loss
     train_loss /= num_batches
     print(f"Training Avg Loss: {train_loss:>8f} \n")
-    
 
 
 # run this code if calling this file directly to load the model run inferences on the BigEarthNet dataset
@@ -155,14 +159,15 @@ if __name__ =="__main__":
     # grab just the s2_encoder part of the model
     encoder_s2 = modify_ciip_for_bigearthnet(model)
     print("Model modified for BigEarthNet dataset.")
-    torch.save(encoder_s2.state_dict(), "/local/ms-data/bigearthnet/model/s2_encoder_epoch0.pt")
+    # encoder_s2 = load_torchgeo_model()
+    # torch.save(encoder_s2.state_dict(), "/local/ms-data/bigearthnet/model/ssl4eo_s2_moco_epoch0.pt")
     # configure gpu
     device = ("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
     torch.cuda.set_device(1)
     print("Device set to:", device)
     # train the model
     epochs = 5
-    lr = 1e-4
+    lr = 1e-2
     print("Testing model before training...")
     test_model(dataloader_test, encoder_s2, val=False)
     print("Training model for" , epochs, "epochs...")
@@ -171,5 +176,8 @@ if __name__ =="__main__":
         train_model(dataloader_train, encoder_s2, lr=lr)
         test_model(dataloader_val, encoder_s2, val=True)
         # checkpoint the model
-        torch.save(encoder_s2.state_dict(), f"/local/ms-data/bigearthnet/model/s2_encoder_lr1e-4_epoch{t+1}.pt")
+        torch.save(encoder_s2.state_dict(), f"/local/ms-data/bigearthnet/model/s2_encoder_lr1e-2_epoch{t+1}.pt")
     test_model(dataloader_test, encoder_s2, val=False)
+    
+# TODO add image normalization before running with CIIP model
+# freeze most layers of the S2 model and only train the last layer
