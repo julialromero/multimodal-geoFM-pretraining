@@ -5,6 +5,7 @@ from torch.utils.data import DataLoader
 from torchvision.transforms import v2 as transforms
 from torchgeo.datasets import EuroSATSpatial
 from torchgeo.models import resnet50, ResNet50_Weights
+from torchgeo.models import resnet18, ResNet18_Weights
 from model_ciip import CIIP
 from sklearn.metrics import f1_score
 
@@ -151,7 +152,7 @@ def test_model(dataloader, model, loss_fn=nn.CrossEntropyLoss(), val=False):
     f1 = f1_score(all_labels, all_preds, average='weighted')  # Use 'macro' or 'weighted' depending on your dataset
 
     prefix = "Validation" if val else "Test"
-    print(f"-- {prefix} Error -- Accuracy: {(100*correct):>0.1f}%, Avg loss: {test_loss:>8f}, F1 Score: {100*f1:>0.1f}% \n")
+    print(f"-- {prefix} Error -- Avg loss: {test_loss:>8f}, Accuracy: {(100*correct):>0.1f}%, F1 Score: {100*f1:>0.1f}% \n")
 
 
 def train_model(dataloader, model, loss_fn=nn.CrossEntropyLoss(), lr=1e-3):
@@ -186,12 +187,28 @@ def train_model(dataloader, model, loss_fn=nn.CrossEntropyLoss(), lr=1e-3):
     # calculate avg training loss
     train_loss /= num_batches
     print(f"-- Training Error -- Avg Loss: {train_loss:>8f}")
-    
+
+def get_s2_encoder_model(model_name):
+    if model_name == "resnet50":
+        model = resnet50(weights=None, in_chans=12, num_classes=10)
+    elif model_name == "resnet50_pretrained":
+        model = resnet50(weights=ResNet50_Weights.SENTINEL2_ALL_MOCO, in_chans=12, num_classes=10)
+    elif model_name == "resnet18":
+        model = resnet18(weights=None, in_chans=12, num_classes=10)
+    elif model_name == "resnet18_pretrained":
+        model = resnet18(weights=ResNet18_Weights.SENTINEL2_ALL_MOCO, in_chans=12, num_classes=10)
+    elif model_name == "ciip":
+        path_to_ciip_model = "/local/ms-data/SSL4EO/model/bs_128_09-2024/epoch_50.pt"
+        ciip_model = load_ciip_model_checkpoint(path_to_ciip_model)
+        encoder_s2 = modify_ciip_for_eurosat(ciip_model)
+    else:
+        raise ValueError("Model not found.")
+    return model
 
 # run this code if calling this file directly to load the model run inferences on the EuroSAT dataset
 if __name__ =="__main__":
     root_path = "/ADrive/data/eurosat"
-    batch_size = 128
+    batch_size = 512
     num_workers = 32
     torch.manual_seed(7)
     tx = transforms.Compose([
@@ -210,17 +227,12 @@ if __name__ =="__main__":
         transforms=tx,
         num_workers=num_workers
     )
-    # path_to_model = "/local/ms-data/SSL4EO/model/bs_128_09-2024/epoch_50.pt"
-    # ciip_model = load_ciip_model_checkpoint(path_to_model)
-    # encoder_s2 = modify_ciip_for_eurosat(ciip_model)
-    # try out a randomly initiatilized resnet instead of ciip
-    encoder_s2 = resnet50(weights=None, in_chans=12, num_classes=10)
-    # encoder_s2 = resnet50(weights=ResNet50_Weights.SENTINEL2_ALL_MOCO, in_chans=12, num_classes=10)
+    encoder_s2 = get_s2_encoder_model("resnet18")
     device = ("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
     torch.cuda.set_device(1)
     print("Device set to:", device)
     epochs = 5
-    lr = 1e-3
+    lr = 1e-2
     print("Testing model before training...")
     test_model(dataloader_test, encoder_s2, val=False)
     print("Training model for" , epochs, "epochs...")
