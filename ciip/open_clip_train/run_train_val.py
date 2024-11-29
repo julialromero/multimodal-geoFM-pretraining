@@ -19,6 +19,9 @@ sys.path.insert(0, parent_dir)
 from model_ciip import CIIP
 from loss import CiipLoss
 
+from torchvision.transforms import v2
+# from torchvision.transforms import *
+
 LATEST_CHECKPOINT_NAME = "epoch_latest.pt"
 # Change this to local_default for local testing
 CONF = "local_default"
@@ -78,7 +81,17 @@ def main(args: DictConfig, start_epoch=0):
   named_parameters = list(model.named_parameters())
   gain_or_bias_params = [p for n, p in named_parameters if exclude(n, p) and p.requires_grad]
   rest_params = [p for n, p in named_parameters if include(n, p) and p.requires_grad]
-  data = get_data(args)
+
+  # define transforms
+  #TODO: color jitter only works on 3-channel images right now; a custom function would likely be quite useful here
+  transforms = v2.Compose([
+      v2.RandomResizedCrop(size=(args.model.s1_resolution, args.model.s2_resolution), antialias=True),
+      v2.RandomHorizontalFlip(p=0.5),
+      v2.RandomVerticalFlip(p=0.5),
+      v2.GaussianBlur(3),
+  ])
+
+  data = get_data(args, transforms)
   total_steps = (data["train"].dataloader.num_batches // args.train.accum_freq) * args.train.epochs
   
   optimizer= optim.AdamW(
