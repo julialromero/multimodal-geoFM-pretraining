@@ -39,15 +39,16 @@ def download_data(root_path):
     _ = EuroSATSpatial(root=root_path, download=True)
     print('Dataset downloaded!')
 
-def load_data(root_path="/local/ms-data/eurosat", bands="all", batch_size=64, transforms=None):
+def load_data(root_path="/local/ms-data/eurosat", bands="all", batch_size=64, num_workers=16, transforms=None):
+    print("Loading data...")
     dataset_train = EuroSATSpatial(root_path, bands=bands, split="train", transforms=transforms)
     dataset_val = EuroSATSpatial(root_path, bands=bands, split="val", transforms=transforms)
     dataset_test = EuroSATSpatial(root_path, bands=bands, split="test", transforms=transforms)
 
     # define a dataloader to iterate over the dataset
-    dataloader_train = DataLoader(dataset_train, batch_size=batch_size, num_workers=64)
-    dataloader_val = DataLoader(dataset_val, batch_size=batch_size, num_workers=64)
-    dataloader_test = DataLoader(dataset_test, batch_size=batch_size, num_workers=64)
+    dataloader_train = DataLoader(dataset_train, batch_size=batch_size, num_workers=num_workers)
+    dataloader_val = DataLoader(dataset_val, batch_size=batch_size, num_workers=num_workers)
+    dataloader_test = DataLoader(dataset_test, batch_size=batch_size, num_workers=num_workers)
     
     return dataloader_train, dataloader_val, dataloader_test
 
@@ -83,6 +84,8 @@ def load_ciip_model_checkpoint(checkpoint_path):
     )  
     checkpoint = torch.load(checkpoint_path)
     model.load_state_dict(checkpoint['state_dict'])
+    print("Checkpoint loaded successfully.")
+    
     return model
 
 def modify_ciip_for_eurosat(model, num_classes=10):
@@ -110,6 +113,8 @@ def modify_ciip_for_eurosat(model, num_classes=10):
 
     # Replace the model's forward with the new forward function
     encoder_s2.forward = new_forward
+    print("Model modified for EuroSAT dataset.")
+    
     return encoder_s2
 
 def test_model(dataloader, model, loss_fn=nn.CrossEntropyLoss(), val=False):
@@ -185,37 +190,36 @@ def train_model(dataloader, model, loss_fn=nn.CrossEntropyLoss(), lr=1e-3):
 
 # run this code if calling this file directly to load the model run inferences on the EuroSAT dataset
 if __name__ =="__main__":
-    root_path = "/local/ms-data/eurosat"
+    root_path = "/ADrive/data/eurosat"
     batch_size = 128
+    num_workers = 32
     torch.manual_seed(7)
     tx = transforms.Compose([
-        transforms.Resize((264, 264)),  # Resizes the images
+        transforms.Resize((264, 264))  # Resizes the images
         # normalize values according to -> https://d-nb.info/1239826591/34
         # remember to exclude B10 cirrus band
-        transforms.Normalize(mean=[1353.439, 1117.253, 1042.253, 947.128, 1199.404, 2002.936, 2373.488, 2300.642, 732.159, 12.113, 1119.173, 2598.82], 
-                              std=[65.571, 154.376, 188.262, 278.926, 228.244, 355.633, 454.901, 530.549, 98.718, 1.187, 304.439, 501.747])
+        # transforms.Normalize(mean=[1353.439, 1117.253, 1042.253, 947.128, 1199.404, 2002.936, 2373.488, 2300.642, 732.159, 12.113, 1119.173, 2598.82], 
+                            #   std=[65.571, 154.376, 188.262, 278.926, 228.244, 355.633, 454.901, 530.549, 98.718, 1.187, 304.439, 501.747])
     ])
     custom_tx = CustomTransform(tx)
     download_data(root_path)
-    print("Loading data...")
     dataloader_train, dataloader_val, dataloader_test = load_data(
         root_path, 
         bands=('B01', 'B02', 'B03', 'B04', 'B05', 'B06', 'B07', 'B08', 'B8A', 'B09', 'B11', 'B12'), # drop B10, not included in SSL4EO level 2a 
         batch_size=batch_size, 
-        transforms=tx
+        transforms=tx,
+        num_workers=num_workers
     )
-    path_to_model = "/local/ms-data/SSL4EO/model/bs_128_09-2024/epoch_50.pt"
-    ciip_model = load_ciip_model_checkpoint(path_to_model)
-    print("Checkpoint loaded successfully.")
-    encoder_s2 = modify_ciip_for_eurosat(ciip_model)
-    print("Model modified for EuroSAT dataset.")
+    # path_to_model = "/local/ms-data/SSL4EO/model/bs_128_09-2024/epoch_50.pt"
+    # ciip_model = load_ciip_model_checkpoint(path_to_model)
+    # encoder_s2 = modify_ciip_for_eurosat(ciip_model)
     # try out a randomly initiatilized resnet instead of ciip
-    # encoder_s2 = resnet50(weights=None, in_chans=12, num_classes=10)
+    encoder_s2 = resnet50(weights=None, in_chans=12, num_classes=10)
     # encoder_s2 = resnet50(weights=ResNet50_Weights.SENTINEL2_ALL_MOCO, in_chans=12, num_classes=10)
     device = ("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
     torch.cuda.set_device(1)
     print("Device set to:", device)
-    epochs = 1
+    epochs = 5
     lr = 1e-3
     print("Testing model before training...")
     test_model(dataloader_test, encoder_s2, val=False)
