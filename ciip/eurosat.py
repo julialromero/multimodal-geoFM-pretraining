@@ -3,7 +3,7 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 from torchvision.transforms import v2 as transforms
-from torchgeo.datasets import EuroSATSpatial
+from torchgeo.datasets import EuroSAT
 from torchgeo.models import resnet50, ResNet50_Weights
 from torchgeo.models import resnet18, ResNet18_Weights
 from model_ciip import CIIP
@@ -37,19 +37,19 @@ def download_data(root_path):
 
     # download
     print('Downloading dataset...')
-    _ = EuroSATSpatial(root=root_path, download=True)
+    _ = EuroSAT(root=root_path, download=True)
     print('Dataset downloaded!')
 
-def load_data(root_path="/local/ms-data/eurosat", bands="all", batch_size=64, num_workers=16, transforms=None):
+def load_data(root_path, bands, batch_size, num_workers, transforms):
     print("Loading data...")
-    dataset_train = EuroSATSpatial(root_path, bands=bands, split="train", transforms=transforms)
-    dataset_val = EuroSATSpatial(root_path, bands=bands, split="val", transforms=transforms)
-    dataset_test = EuroSATSpatial(root_path, bands=bands, split="test", transforms=transforms)
+    dataset_train = EuroSAT(root_path, bands=bands, split="train", transforms=transforms)
+    dataset_val = EuroSAT(root_path, bands=bands, split="val", transforms=transforms)
+    dataset_test = EuroSAT(root_path, bands=bands, split="test", transforms=transforms)
 
     # define a dataloader to iterate over the dataset
-    dataloader_train = DataLoader(dataset_train, batch_size=batch_size, num_workers=num_workers)
-    dataloader_val = DataLoader(dataset_val, batch_size=batch_size, num_workers=num_workers)
-    dataloader_test = DataLoader(dataset_test, batch_size=batch_size, num_workers=num_workers)
+    dataloader_train = DataLoader(dataset_train, batch_size=batch_size, num_workers=num_workers, shuffle=True)
+    dataloader_val = DataLoader(dataset_val, batch_size=batch_size, num_workers=num_workers, shuffle=True)
+    dataloader_test = DataLoader(dataset_test, batch_size=batch_size, num_workers=num_workers, shuffle=True)
     
     return dataloader_train, dataloader_val, dataloader_test
 
@@ -113,9 +113,7 @@ def modify_ciip_for_eurosat(model, num_classes=10):
     
     return encoder_s2
 
-def test_model(dataloader, model, loss_fn=nn.CrossEntropyLoss(), val=False):
-    # print("Running test_model function...")
-    model.to(device)
+def test_model(dataloader, model, loss_fn, val=False):
     size = len(dataloader.dataset)
     num_batches = len(dataloader)
     model.eval()
@@ -124,9 +122,7 @@ def test_model(dataloader, model, loss_fn=nn.CrossEntropyLoss(), val=False):
     all_labels = []
 
     with torch.no_grad():
-        i = 0
         for sample in dataloader:
-            i += 1
             X, y = sample['image'], sample['label']
             X, y = X.to(device), y.to(device)
             pred = model(X)
@@ -136,30 +132,23 @@ def test_model(dataloader, model, loss_fn=nn.CrossEntropyLoss(), val=False):
             # Collect predictions and labels
             all_preds.extend(pred.argmax(1).cpu().numpy())
             all_labels.extend(y.cpu().numpy())
-
-            # if i % 2 == 0:
-            #     print("Sample number", i, "of", num_batches, "-- Test loss:", test_loss, "-- Correct:", correct)
     
+    # calculate metrics
     test_loss /= num_batches
     correct /= size
-
-    # Calculate F1 score
     f1 = f1_score(all_labels, all_preds, average='weighted')  # Use 'macro' or 'weighted' depending on your dataset
 
+    # report on metrics
     prefix = "Validation" if val else "Test"
     print(f"-- {prefix} Error -- Avg loss: {test_loss:>8f}, Accuracy: {(100*correct):>0.1f}%, F1 Score: {100*f1:>0.1f}% \n")
 
 
-def train_model(dataloader, model, loss_fn=nn.CrossEntropyLoss(), lr=1e-3):
-    # print("Training model...")
-    model.to(device)
-    model.train()
+def train_model(dataloader, model, loss_fn, lr):
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    size = len(dataloader.dataset)
     num_batches = len(dataloader)
     model.train()
     train_loss = 0
-    for batch, sample in enumerate(dataloader):
+    for _, sample in enumerate(dataloader):
         X, y = sample['image'], sample['label']
         X, y = X.to(device), y.to(device)
         
@@ -173,12 +162,6 @@ def train_model(dataloader, model, loss_fn=nn.CrossEntropyLoss(), lr=1e-3):
         optimizer.step()
         optimizer.zero_grad()
 
-        # # print intermediate results every n batches
-        # n = 4
-        # if batch % n == 0:
-        #     loss, current = loss.item(), (batch + 1) * len(X)
-        #     print(f"Batch {batch:d} loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
-
     # calculate avg training loss
     train_loss /= num_batches
     print(f"-- Training Error -- Avg Loss: {train_loss:>8f}")
@@ -187,11 +170,11 @@ def get_s2_encoder_model(model_name):
     if model_name == "resnet50":
         model = resnet50(weights=None, in_chans=12, num_classes=10)
     elif model_name == "resnet50_pretrained":
-        model = resnet50(weights=ResNet50_Weights.SENTINEL2_ALL_MOCO, in_chans=12, num_classes=10)
+        model = resnet50(weights=ResNet50_Weights.SENTINEL2_ALL_MOCO, in_chans=13, num_classes=10)
     elif model_name == "resnet18":
         model = resnet18(weights=None, in_chans=12, num_classes=10)
     elif model_name == "resnet18_pretrained":
-        model = resnet18(weights=ResNet18_Weights.SENTINEL2_ALL_MOCO, in_chans=12, num_classes=10)
+        model = resnet18(weights=ResNet18_Weights.SENTINEL2_ALL_MOCO, in_chans=13, num_classes=10)
     elif model_name == "ciip":
         path_to_ciip_model = "/local/ms-data/SSL4EO/model/bs_128_09-2024/epoch_50.pt"
         ciip_model = load_ciip_model_checkpoint(path_to_ciip_model)
@@ -203,14 +186,17 @@ def get_s2_encoder_model(model_name):
 # run this code if calling this file directly to load the model run inferences on the EuroSAT dataset
 if __name__ =="__main__":
     root_path = "/ADrive/data/eurosat"
-    model_type = "resnet50" # choose from "resnet50", "resnet50_pretrained", "resnet18", "resnet18_pretrained", "ciip"
-    batch_size = 128
+    model_type = "resnet18" # choose from "resnet50", "resnet50_pretrained", "resnet18", "resnet18_pretrained", "ciip"
+    batch_size = 512
     num_workers = 32
-    epochs = 50
-    lr = 1e-3
-    torch.manual_seed(7)
+    epochs = 20
+    lr = 1e-4
+    loss_fn = nn.CrossEntropyLoss()
+    torch.manual_seed(44)
+
+    # configure and load the data
     tx = transforms.Compose([
-        transforms.Resize((264, 264))  # Resizes the images
+        transforms.Resize((224, 224))  # Resizes the images
         # normalize values according to -> https://d-nb.info/1239826591/34
         # remember to exclude B10 cirrus band
         # transforms.Normalize(mean=[1353.439, 1117.253, 1042.253, 947.128, 1199.404, 2002.936, 2373.488, 2300.642, 732.159, 12.113, 1119.173, 2598.82], 
@@ -225,19 +211,24 @@ if __name__ =="__main__":
         transforms=tx,
         num_workers=num_workers
     )
-    encoder_s2 = get_s2_encoder_model(model_type)
+    
+    # define and load the model, configure devices
+    model = get_s2_encoder_model(model_type)
     print("Model loaded successfully. Using model:", model_type)
     device = ("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
     torch.cuda.set_device(1)
+    model.to(device)
     print("Device set to:", device)
+
+    # test and train the model
     print("Testing model before training...")
-    test_model(dataloader_test, encoder_s2, val=False)
+    test_model(dataloader_test, model, loss_fn, val=False)
     print("Training model for" , epochs, "epochs with a batch size of", batch_size, "and learning rate of", lr)
     for t in range(epochs):
         print(f"Epoch {t+1} -------------------------------")
-        train_model(dataloader_train, encoder_s2, lr=lr)
-        test_model(dataloader_val, encoder_s2, val=True)
-    test_model(dataloader_test, encoder_s2, val=False)
+        train_model(dataloader_train, model, loss_fn, lr=lr)
+        test_model(dataloader_val, model, loss_fn, val=True)
+    test_model(dataloader_test, model, loss_fn, val=False)
 
 # TODO traverse the learning rates (already tried 1e-3, 1e-2, 1e-1)
 # TODO try with more epochs once one seems to do okay with 5 epochs
