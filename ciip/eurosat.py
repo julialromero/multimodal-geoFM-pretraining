@@ -9,22 +9,22 @@ from torchgeo.models import resnet18, ResNet18_Weights
 from model_ciip import CIIP
 from sklearn.metrics import f1_score
 
-from torch.nn import Module, ModuleList, Conv1d, Sequential, ReLU, Dropout, Linear
+# from torch.nn import Module, ModuleList, Conv1d, Sequential, ReLU, Dropout, Linear
 
-# define a simple MLP head for the CIIP model
-class MLPHead(Module):
-    def __init__(self, input_dim, final_dim):
-        hidden_size = 256
-        super(MLPHead, self).__init__()
-        self.fc1 = Linear(input_dim, hidden_size)  # First fully connected layer
-        self.relu = ReLU()                          # ReLU activation function
-        self.fc2 = Linear(hidden_size, final_dim)
+# # define a simple MLP head for the CIIP model
+# class MLPHead(Module):
+#     def __init__(self, input_dim, final_dim):
+#         hidden_size = 256
+#         super(MLPHead, self).__init__()
+#         self.fc1 = Linear(input_dim, hidden_size)  # First fully connected layer
+#         self.relu = ReLU()                          # ReLU activation function
+#         self.fc2 = Linear(hidden_size, final_dim)
         
-    def forward(self, x):
-        x = self.fc1(x)
-        x = self.relu(x)
-        x = self.fc2(x)
-        return x
+#     def forward(self, x):
+#         x = self.fc1(x)
+#         x = self.relu(x)
+#         x = self.fc2(x)
+#         return x
 
 # load the dataset
 def download_data(root_path):
@@ -61,11 +61,6 @@ class CustomTransform:
     def __call__(self, sample):
         sample['image'] = self.transform(sample['image'])
         return sample
-
-def load_torchgeo_model(): 
-    # Load the pre-trained ResNet-50 model
-    model = resnet50(weights=ResNet50_Weights.SENTINEL2_ALL_MOCO, in_chans=12, num_classes=19)
-    return model   
 
 def load_ciip_model_checkpoint(checkpoint_path):
     s1_bands = [1, 2, 3]
@@ -200,7 +195,7 @@ def get_s2_encoder_model(model_name):
     elif model_name == "ciip":
         path_to_ciip_model = "/local/ms-data/SSL4EO/model/bs_128_09-2024/epoch_50.pt"
         ciip_model = load_ciip_model_checkpoint(path_to_ciip_model)
-        encoder_s2 = modify_ciip_for_eurosat(ciip_model)
+        model = modify_ciip_for_eurosat(ciip_model)
     else:
         raise ValueError("Model not found.")
     return model
@@ -208,8 +203,11 @@ def get_s2_encoder_model(model_name):
 # run this code if calling this file directly to load the model run inferences on the EuroSAT dataset
 if __name__ =="__main__":
     root_path = "/ADrive/data/eurosat"
-    batch_size = 512
+    model_type = "resnet50" # choose from "resnet50", "resnet50_pretrained", "resnet18", "resnet18_pretrained", "ciip"
+    batch_size = 128
     num_workers = 32
+    epochs = 50
+    lr = 1e-3
     torch.manual_seed(7)
     tx = transforms.Compose([
         transforms.Resize((264, 264))  # Resizes the images
@@ -227,22 +225,23 @@ if __name__ =="__main__":
         transforms=tx,
         num_workers=num_workers
     )
-    encoder_s2 = get_s2_encoder_model("resnet18")
+    encoder_s2 = get_s2_encoder_model(model_type)
+    print("Model loaded successfully. Using model:", model_type)
     device = ("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
     torch.cuda.set_device(1)
     print("Device set to:", device)
-    epochs = 5
-    lr = 1e-2
     print("Testing model before training...")
     test_model(dataloader_test, encoder_s2, val=False)
-    print("Training model for" , epochs, "epochs...")
+    print("Training model for" , epochs, "epochs with a batch size of", batch_size, "and learning rate of", lr)
     for t in range(epochs):
         print(f"Epoch {t+1} -------------------------------")
         train_model(dataloader_train, encoder_s2, lr=lr)
         test_model(dataloader_val, encoder_s2, val=True)
-        # torch.save(encoder_s2.state_dict(), f"/local/ms-data/eurosat/model/s2_encoder_lr1e-2_epoch{t+1}.pt")
     test_model(dataloader_test, encoder_s2, val=False)
-    
+
+# TODO traverse the learning rates (already tried 1e-3, 1e-2, 1e-1)
+# TODO try with more epochs once one seems to do okay with 5 epochs
+
 # TODO try with the model weights from epoch 5 and epoch 25 of CIIP weights
 # TODO try with other heads for the CIIP model
 # TODO try extracting the embeddings for all of the eurosat images then training just the classifier
