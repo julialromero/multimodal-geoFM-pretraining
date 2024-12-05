@@ -8,6 +8,7 @@ from torchgeo.models import resnet50, ResNet50_Weights
 from torchgeo.models import resnet18, ResNet18_Weights
 from model_ciip import CIIP
 from sklearn.metrics import f1_score
+from collections import OrderedDict
 
 # from torch.nn import Module, ModuleList, Conv1d, Sequential, ReLU, Dropout, Linear
 
@@ -83,7 +84,15 @@ def create_ciip_model():
 def load_ciip_model_checkpoint(checkpoint_path):
     model = create_ciip_model()
     checkpoint = torch.load(checkpoint_path)
-    model.load_state_dict(checkpoint['state_dict'])
+
+    state_dict = checkpoint_path['state_dict']
+    new_state_dict = OrderedDict()
+    for k, v in state_dict.items():
+        name = k.replace("module.", "")  # remove `module.`
+        new_state_dict[name] = v
+    # load params
+    model.load_state_dict(new_state_dict)
+
     print("Checkpoint loaded successfully.")
     
     return model
