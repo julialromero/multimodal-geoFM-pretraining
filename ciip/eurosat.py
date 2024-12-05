@@ -85,7 +85,7 @@ def load_ciip_model_checkpoint(checkpoint_path):
     model = create_ciip_model()
     checkpoint = torch.load(checkpoint_path)
 
-    state_dict = checkpoint_path['state_dict']
+    state_dict = checkpoint['state_dict']
     new_state_dict = OrderedDict()
     for k, v in state_dict.items():
         name = k.replace("module.", "")  # remove `module.`
