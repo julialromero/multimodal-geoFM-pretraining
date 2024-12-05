@@ -9,6 +9,7 @@ from torchgeo.models import resnet18, ResNet18_Weights
 from model_ciip import CIIP
 from sklearn.metrics import f1_score
 from collections import OrderedDict
+from datetime import date
 
 # from torch.nn import Module, ModuleList, Conv1d, Sequential, ReLU, Dropout, Linear
 
@@ -129,7 +130,7 @@ def modify_ciip_for_eurosat(model, num_classes=10, freeze_encoder=False):
     
     return encoder_s2
 
-def test_model(dataloader, model, loss_fn, val=False):
+def test_model(dataloader, model, loss_fn, file, val=False):
     size = len(dataloader.dataset)
     num_batches = len(dataloader)
     model.eval()
@@ -156,10 +157,10 @@ def test_model(dataloader, model, loss_fn, val=False):
 
     # report on metrics
     prefix = "Validation" if val else "Test"
-    print(f"-- {prefix} Error -- Avg loss: {test_loss:>8f}, Accuracy: {(100*correct):>0.1f}%, F1 Score: {100*f1:>0.1f}% \n")
+    output_general((f"-- {prefix} Error -- Avg loss: {test_loss:>8f}, Accuracy: {(100*correct):>0.1f}%, F1 Score: {100*f1:>0.1f}% \n"), file)
 
 
-def train_model(dataloader, model, loss_fn, lr):
+def train_model(dataloader, model, loss_fn, lr, file):
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     num_batches = len(dataloader)
     model.train()
@@ -180,7 +181,7 @@ def train_model(dataloader, model, loss_fn, lr):
 
     # calculate avg training loss
     train_loss /= num_batches
-    print(f"-- Training Error -- Avg Loss: {train_loss:>8f}")
+    output_general(f"-- Training Error -- Avg Loss: {train_loss:>8f}", file)
 
 def get_s2_encoder_model(model_name, num_bands, ciip_model_checkpoint_path):
     if model_name == "resnet50":
@@ -201,8 +202,17 @@ def get_s2_encoder_model(model_name, num_bands, ciip_model_checkpoint_path):
         raise ValueError("Model not found.")
     return model
 
+def output_general(your_string, file):
+    print(your_string)
+    file.write(your_string + "\n")
+
 # run this code if calling this file directly to load the model run inferences on the EuroSAT dataset
 if __name__ =="__main__":
+
+    today = str(date.today())
+    filename = "benchmarks/eurosat/" + today + ".txt"
+    file = open(filename, "w")
+
     # set run params
     root_path = "/ADrive/data"
     data_path = os.path.join(root_path, "eurosat")
@@ -243,23 +253,23 @@ if __name__ =="__main__":
     
     # define and load the model, configure devices
     model = get_s2_encoder_model(model_type, num_bands, ciip_model_checkpoint_path)
-    print("Model loaded successfully. Using model:", model_type)
-    print("Using bands:", bands)
+    output_general(("Model loaded successfully. Using model:", model_type), file)
+    output_general(("Using bands:", bands), file)
     device = ("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
     torch.cuda.set_device(which_gpu)
     model.to(device)
-    print("Device set to:", device)
-    print("Image preprocessing steps:", tx)
+    output_general(("Device set to:", device), file)
+    output_general(("Image preprocessing steps:", tx), file)
 
     # test and train the model
-    print("Testing model before training...")
+    output_general("Testing model before training...", file)
     test_model(dataloader_test, model, loss_fn, val=False)
-    print("Training model for" , epochs, "epochs with a batch size of", batch_size, "and learning rate of", lr)
+    output_general(("Training model for" , epochs, "epochs with a batch size of", batch_size, "and learning rate of", lr), file)
     for t in range(epochs):
-        print(f"Epoch {t+1} -------------------------------")
-        train_model(dataloader_train, model, loss_fn, lr=lr)
-        test_model(dataloader_val, model, loss_fn, val=True)
-    test_model(dataloader_test, model, loss_fn, val=False)
+        output_general(f"Epoch {t + 1} -------------------------------", file)
+        train_model(dataloader_train, model, loss_fn, lr, file)
+        test_model(dataloader_val, model, loss_fn, file, val=True)
+    test_model(dataloader_test, model, loss_fn, file, val=False)
     torch.save(model.state_dict(), model_checkpoint_path)
 
 # TODO track loss in a variable
