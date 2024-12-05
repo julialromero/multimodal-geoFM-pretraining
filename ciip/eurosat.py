@@ -173,7 +173,7 @@ def train_model(dataloader, model, loss_fn, lr):
     train_loss /= num_batches
     print(f"-- Training Error -- Avg Loss: {train_loss:>8f}")
 
-def get_s2_encoder_model(model_name, num_bands):
+def get_s2_encoder_model(model_name, num_bands, ciip_model_checkpoint_path):
     if model_name == "resnet50":
         model = resnet50(weights=None, in_chans=num_bands, num_classes=10)
     elif model_name == "resnet50_pretrained":
@@ -186,9 +186,8 @@ def get_s2_encoder_model(model_name, num_bands):
         full_ciip_model = create_ciip_model()
         model = modify_ciip_for_eurosat(full_ciip_model, num_classes=10, freeze_encoder=False)
     elif model_name == "ciip":
-        path_to_ciip_model = "/local/ms-data/SSL4EO/model/bs_128_09-2024/epoch_50.pt"
-        ciip_model = load_ciip_model_checkpoint(path_to_ciip_model)
-        model = modify_ciip_for_eurosat(ciip_model, num_classes=10, freeze_encoder=True)
+        ciip_model = load_ciip_model_checkpoint(ciip_model_checkpoint_path)
+        model = modify_ciip_for_eurosat(ciip_model, num_classes=10, freeze_encoder=False)
     else:
         raise ValueError("Model not found.")
     return model
@@ -197,8 +196,8 @@ def get_s2_encoder_model(model_name, num_bands):
 if __name__ =="__main__":
     # set run params
     root_path = "/ADrive/data"
-    data_path = os.path.join(root_path, "eurosat") 
-    model_type = "resnet32_modified" # choose from "resnet50", "resnet50_pretrained", "resnet18", "resnet18_pretrained", "resnet32_modified", "ciip"
+    data_path = os.path.join(root_path, "eurosat")
+    model_type = "ciip" # choose from "resnet50", "resnet50_pretrained", "resnet18", "resnet18_pretrained", "resnet32_modified", "ciip"
     bands = ('B01', 'B02', 'B03', 'B04', 'B05', 'B06', 'B07', 'B08', 'B8A', 'B09', 'B11', 'B12')  # drop B10, not included in SSL4EO level 2a 
     num_bands = len(bands)
     input_dim = (264, 264)
@@ -209,8 +208,11 @@ if __name__ =="__main__":
     loss_fn = nn.CrossEntropyLoss()
     torch.manual_seed(44)
     which_gpu = 1
-    experiment_name = "resnet32_random_lr" + str(lr) + "_bs" + str(batch_size) + "_norm" + "_e" + str(epochs)
-    model_checkpoint_path = os.path.join(root_path, "ciip_model", experiment_name + ".pt")
+    experiment_group = "bs_128_09-2024"
+    experiment_name = "ciip" + "_lr" + str(lr) + "_bs" + str(batch_size) + "_norm" + "_frozen" + "_e" + str(epochs) 
+    ciip_model_name = "epoch_50"
+    model_checkpoint_path = os.path.join(root_path, "ciip_model", experiment_group, experiment_name + ".pt")
+    ciip_model_checkpoint_path = os.path.join(root_path, "ciip_model", experiment_group, ciip_model_name + ".pt") 
 
     # configure and load the data
     tx = transforms.Compose([
@@ -231,7 +233,7 @@ if __name__ =="__main__":
     )
     
     # define and load the model, configure devices
-    model = get_s2_encoder_model(model_type, num_bands=num_bands)
+    model = get_s2_encoder_model(model_type, num_bands, ciip_model_checkpoint_path)
     print("Model loaded successfully. Using model:", model_type)
     print("Using bands:", bands)
     device = ("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
