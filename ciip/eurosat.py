@@ -9,7 +9,7 @@ from torchgeo.models import resnet18, ResNet18_Weights
 from model_ciip import CIIP
 from sklearn.metrics import f1_score
 from collections import OrderedDict
-from datetime import date
+from datetime import datetime
 
 # from torch.nn import Module, ModuleList, Conv1d, Sequential, ReLU, Dropout, Linear
 
@@ -209,7 +209,7 @@ def output_general(your_string, file):
 # run this code if calling this file directly to load the model run inferences on the EuroSAT dataset
 if __name__ =="__main__":
 
-    today = str(date.today())
+    today = str(datetime.now())
     filename = "benchmarks/eurosat/" + today + ".txt"
     file = open(filename, "w")
 
