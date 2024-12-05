@@ -65,8 +65,8 @@ class CustomTransform:
         return sample
 
 def create_ciip_model():
-    s1_bands = [1, 2, 3]
-    s2_bands = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    s1_bands = [1, 2]
+    s2_bands = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
     model = CIIP(
         embed_dim=512,
         s1_resolution=264,
@@ -217,7 +217,7 @@ if __name__ =="__main__":
     root_path = "/ADrive/data"
     data_path = os.path.join(root_path, "eurosat")
     model_type = "ciip" # choose from "resnet50", "resnet50_pretrained", "resnet18", "resnet18_pretrained", "resnet32_modified", "ciip"
-    bands = ('B01', 'B02', 'B03', 'B04', 'B05', 'B06', 'B07', 'B08', 'B8A', 'B09', 'B11', 'B12')  # drop B10, not included in SSL4EO level 2a 
+    bands = ('B01', 'B02', 'B03', 'B04', 'B05', 'B06', 'B07', 'B08', 'B8A', 'B09', 'B10', 'B11', 'B12')  # drop B10, not included in SSL4EO level 2a 
     num_bands = len(bands)
     input_dim = (264, 264)
     batch_size = 256
@@ -227,9 +227,9 @@ if __name__ =="__main__":
     loss_fn = nn.CrossEntropyLoss()
     torch.manual_seed(44)
     which_gpu = 1
-    experiment_group = "bs_128_09-2024"
-    experiment_name = "ciip" + "_lr" + str(lr) + "_bs" + str(batch_size) + "_norm" + "_frozen" + "_e" + str(epochs) 
-    ciip_model_name = "epoch_50"
+    experiment_group = "bs_512_11-2024"
+    experiment_name = "ciip" + "_lr" + str(lr) + "_bs" + str(batch_size) + "_norm" + "_e" + str(epochs) 
+    ciip_model_name = "epoch_35"
     model_checkpoint_path = os.path.join(root_path, "ciip_model", experiment_group, experiment_name + ".pt")
     ciip_model_checkpoint_path = os.path.join(root_path, "ciip_model", experiment_group, ciip_model_name + ".pt") 
 
@@ -238,8 +238,8 @@ if __name__ =="__main__":
         transforms.Resize(input_dim),  # Resizes the images, 224 for ResNet, 264 for CIIP
         # normalize values according to -> https://d-nb.info/1239826591/34
         # remember to exclude B10 cirrus band
-        transforms.Normalize(mean=[1353.439, 1117.253, 1042.253, 947.128, 1199.404, 2002.936, 2373.488, 2300.642, 732.159, 12.113, 1119.173, 2598.82], 
-                              std=[65.571, 154.376, 188.262, 278.926, 228.244, 355.633, 454.901, 530.549, 98.718, 1.187, 304.439, 501.747])
+        transforms.Normalize(mean=[1353.439, 1117.253, 1042.253, 947.128, 1199.404, 2002.936, 2373.488, 2300.642, 732.159, 12.113, 1820.932, 1119.173, 2598.82], 
+                              std=[65.571, 154.376, 188.262, 278.926, 228.244, 355.633, 454.901, 530.549, 98.718, 1.187, 378.496, 304.439, 501.747])
     ])
     custom_tx = CustomTransform(tx)
     download_data(data_path)
@@ -272,10 +272,8 @@ if __name__ =="__main__":
     test_model(dataloader_test, model, loss_fn, file, val=False)
     torch.save(model.state_dict(), model_checkpoint_path)
 
-# TODO track loss in a variable
+# TODO track loss in a variable > change output to a .txt or .csv file
 # TODO add early stopping
-# TODO try training a modified resnet32 model
-# TODO try with the model weights from epoch 5 and epoch 25 of CIIP weights
 # TODO try with other heads for the CIIP model
 # TODO try extracting the embeddings for all of the eurosat images then training just the classifier
 # TODO try with pretrained weights from other models
