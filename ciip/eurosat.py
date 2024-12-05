@@ -8,6 +8,9 @@ from torchgeo.models import resnet50, ResNet50_Weights
 from torchgeo.models import resnet18, ResNet18_Weights
 from model_ciip import CIIP
 from sklearn.metrics import f1_score
+from collections import OrderedDict
+from datetime import datetime
+import warnings 
 
 # from torch.nn import Module, ModuleList, Conv1d, Sequential, ReLU, Dropout, Linear
 
@@ -63,8 +66,8 @@ class CustomTransform:
         return sample
 
 def create_ciip_model():
-    s1_bands = [1, 2, 3]
-    s2_bands = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    s1_bands = [1, 2]
+    s2_bands = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
     model = CIIP(
         embed_dim=512,
         s1_resolution=264,
@@ -83,7 +86,15 @@ def create_ciip_model():
 def load_ciip_model_checkpoint(checkpoint_path):
     model = create_ciip_model()
     checkpoint = torch.load(checkpoint_path)
-    model.load_state_dict(checkpoint['state_dict'])
+
+    state_dict = checkpoint['state_dict']
+    new_state_dict = OrderedDict()
+    for k, v in state_dict.items():
+        name = k.replace("module.", "")  # remove `module.`
+        new_state_dict[name] = v
+    # load params
+    model.load_state_dict(new_state_dict)
+
     print("Checkpoint loaded successfully.")
     
     return model
@@ -120,7 +131,7 @@ def modify_ciip_for_eurosat(model, num_classes=10, freeze_encoder=False):
     
     return encoder_s2
 
-def test_model(dataloader, model, loss_fn, val=False):
+def test_model(dataloader, model, loss_fn, file, val=False):
     size = len(dataloader.dataset)
     num_batches = len(dataloader)
     model.eval()
@@ -147,10 +158,10 @@ def test_model(dataloader, model, loss_fn, val=False):
 
     # report on metrics
     prefix = "Validation" if val else "Test"
-    print(f"-- {prefix} Error -- Avg loss: {test_loss:>8f}, Accuracy: {(100*correct):>0.1f}%, F1 Score: {100*f1:>0.1f}% \n")
+    output_general((f"-- {prefix} Error -- Avg loss: {test_loss:>8f}, Accuracy: {(100*correct):>0.1f}%, F1 Score: {100*f1:>0.1f}% \n"), file)
 
 
-def train_model(dataloader, model, loss_fn, lr):
+def train_model(dataloader, model, loss_fn, lr, file):
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     num_batches = len(dataloader)
     model.train()
@@ -171,7 +182,7 @@ def train_model(dataloader, model, loss_fn, lr):
 
     # calculate avg training loss
     train_loss /= num_batches
-    print(f"-- Training Error -- Avg Loss: {train_loss:>8f}")
+    output_general(f"-- Training Error -- Avg Loss: {train_loss:>8f}", file)
 
 def get_s2_encoder_model(model_name, num_bands, ciip_model_checkpoint_path):
     if model_name == "resnet50":
@@ -192,13 +203,18 @@ def get_s2_encoder_model(model_name, num_bands, ciip_model_checkpoint_path):
         raise ValueError("Model not found.")
     return model
 
+def output_general(your_string, file):
+    print(your_string)
+    file.write(your_string + "\n")
+
 # run this code if calling this file directly to load the model run inferences on the EuroSAT dataset
 if __name__ =="__main__":
+
     # set run params
     root_path = "/ADrive/data"
     data_path = os.path.join(root_path, "eurosat")
     model_type = "ciip" # choose from "resnet50", "resnet50_pretrained", "resnet18", "resnet18_pretrained", "resnet32_modified", "ciip"
-    bands = ('B01', 'B02', 'B03', 'B04', 'B05', 'B06', 'B07', 'B08', 'B8A', 'B09', 'B11', 'B12')  # drop B10, not included in SSL4EO level 2a 
+    bands = ('B01', 'B02', 'B03', 'B04', 'B05', 'B06', 'B07', 'B08', 'B8A', 'B09', 'B10', 'B11', 'B12')  # drop B10, not included in SSL4EO level 2a 
     num_bands = len(bands)
     input_dim = (264, 264)
     batch_size = 256
@@ -208,19 +224,28 @@ if __name__ =="__main__":
     loss_fn = nn.CrossEntropyLoss()
     torch.manual_seed(44)
     which_gpu = 1
-    experiment_group = "bs_128_09-2024"
-    experiment_name = "ciip" + "_lr" + str(lr) + "_bs" + str(batch_size) + "_norm" + "_frozen" + "_e" + str(epochs) 
-    ciip_model_name = "epoch_50"
+    experiment_group = "bs_512_11-2024"
+    experiment_name = "ciip" + "_lr" + str(lr) + "_bs" + str(batch_size) + "_norm" + "_e" + str(epochs) 
+    ciip_model_name = "epoch_35"
     model_checkpoint_path = os.path.join(root_path, "ciip_model", experiment_group, experiment_name + ".pt")
     ciip_model_checkpoint_path = os.path.join(root_path, "ciip_model", experiment_group, ciip_model_name + ".pt") 
+
+    # configure logging
+    today = str(datetime.now())
+    log_output_path = os.path.join(root_path, "ciip_model", "logs")
+    if not os.path.exists(log_output_path):
+        os.makedirs(log_output_path)
+    filename = os.path.join(log_output_path, experiment_name + "_" + today + ".txt")
+    file = open(filename, "w")
+    warnings.filterwarnings('ignore') 
 
     # configure and load the data
     tx = transforms.Compose([
         transforms.Resize(input_dim),  # Resizes the images, 224 for ResNet, 264 for CIIP
         # normalize values according to -> https://d-nb.info/1239826591/34
         # remember to exclude B10 cirrus band
-        transforms.Normalize(mean=[1353.439, 1117.253, 1042.253, 947.128, 1199.404, 2002.936, 2373.488, 2300.642, 732.159, 12.113, 1119.173, 2598.82], 
-                              std=[65.571, 154.376, 188.262, 278.926, 228.244, 355.633, 454.901, 530.549, 98.718, 1.187, 304.439, 501.747])
+        transforms.Normalize(mean=[1353.439, 1117.253, 1042.253, 947.128, 1199.404, 2002.936, 2373.488, 2300.642, 732.159, 12.113, 1820.932, 1119.173, 2598.82], 
+                              std=[65.571, 154.376, 188.262, 278.926, 228.244, 355.633, 454.901, 530.549, 98.718, 1.187, 378.496, 304.439, 501.747])
     ])
     custom_tx = CustomTransform(tx)
     download_data(data_path)
@@ -233,30 +258,29 @@ if __name__ =="__main__":
     )
     
     # define and load the model, configure devices
+    output_general("Running experiment group " + experiment_group + " named: " + experiment_name, file)
     model = get_s2_encoder_model(model_type, num_bands, ciip_model_checkpoint_path)
-    print("Model loaded successfully. Using model:", model_type)
-    print("Using bands:", bands)
+    output_general("Model loaded successfully. Using model: " + model_type, file)
+    output_general("Using bands:"+ str(bands), file)
     device = ("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
     torch.cuda.set_device(which_gpu)
     model.to(device)
-    print("Device set to:", device)
-    print("Image preprocessing steps:", tx)
+    output_general("Device set to:" + device, file)
+    output_general("Image preprocessing steps: " + str(tx), file)
 
     # test and train the model
-    print("Testing model before training...")
-    test_model(dataloader_test, model, loss_fn, val=False)
-    print("Training model for" , epochs, "epochs with a batch size of", batch_size, "and learning rate of", lr)
+    output_general("Testing model before training...", file)
+    test_model(dataloader_test, model, loss_fn, file, val=False)
+    output_general("Training model for " + str(epochs) + " epochs with a batch size of " + str(batch_size) + " and learning rate of " + str(lr), file)
     for t in range(epochs):
-        print(f"Epoch {t+1} -------------------------------")
-        train_model(dataloader_train, model, loss_fn, lr=lr)
-        test_model(dataloader_val, model, loss_fn, val=True)
-    test_model(dataloader_test, model, loss_fn, val=False)
+        output_general(f"Epoch {t + 1} -------------------------------", file)
+        train_model(dataloader_train, model, loss_fn, lr, file)
+        test_model(dataloader_val, model, loss_fn, file, val=True)
+    test_model(dataloader_test, model, loss_fn, file, val=False)
     torch.save(model.state_dict(), model_checkpoint_path)
 
-# TODO track loss in a variable
+# TODO track loss in a variable > change output to a .txt or .csv file
 # TODO add early stopping
-# TODO try training a modified resnet32 model
-# TODO try with the model weights from epoch 5 and epoch 25 of CIIP weights
 # TODO try with other heads for the CIIP model
 # TODO try extracting the embeddings for all of the eurosat images then training just the classifier
 # TODO try with pretrained weights from other models
