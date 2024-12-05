@@ -10,6 +10,7 @@ from model_ciip import CIIP
 from sklearn.metrics import f1_score
 from collections import OrderedDict
 from datetime import datetime
+import warnings 
 
 # from torch.nn import Module, ModuleList, Conv1d, Sequential, ReLU, Dropout, Linear
 
@@ -209,10 +210,6 @@ def output_general(your_string, file):
 # run this code if calling this file directly to load the model run inferences on the EuroSAT dataset
 if __name__ =="__main__":
 
-    today = str(datetime.now())
-    filename = "benchmarks/eurosat/" + today + ".txt"
-    file = open(filename, "w")
-
     # set run params
     root_path = "/ADrive/data"
     data_path = os.path.join(root_path, "eurosat")
@@ -233,6 +230,15 @@ if __name__ =="__main__":
     model_checkpoint_path = os.path.join(root_path, "ciip_model", experiment_group, experiment_name + ".pt")
     ciip_model_checkpoint_path = os.path.join(root_path, "ciip_model", experiment_group, ciip_model_name + ".pt") 
 
+    # configure logging
+    today = str(datetime.now())
+    log_output_path = os.path.join(root_path, "ciip_model", "logs")
+    if not os.path.exists(log_output_path):
+        os.makedirs(log_output_path)
+    filename = os.path.join(log_output_path, experiment_name + "_" + today + ".txt")
+    file = open(filename, "w")
+    warnings.filterwarnings('ignore') 
+
     # configure and load the data
     tx = transforms.Compose([
         transforms.Resize(input_dim),  # Resizes the images, 224 for ResNet, 264 for CIIP
@@ -252,19 +258,20 @@ if __name__ =="__main__":
     )
     
     # define and load the model, configure devices
+    output_general("Running experiment group " + experiment_group + " named: " + experiment_name, file)
     model = get_s2_encoder_model(model_type, num_bands, ciip_model_checkpoint_path)
-    output_general(("Model loaded successfully. Using model:", model_type), file)
-    output_general(("Using bands:", bands), file)
+    output_general("Model loaded successfully. Using model: " + model_type, file)
+    output_general("Using bands:"+ str(bands), file)
     device = ("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
     torch.cuda.set_device(which_gpu)
     model.to(device)
-    output_general(("Device set to:", device), file)
-    output_general(("Image preprocessing steps:", tx), file)
+    output_general("Device set to:" + device, file)
+    output_general("Image preprocessing steps: " + str(tx), file)
 
     # test and train the model
     output_general("Testing model before training...", file)
-    test_model(dataloader_test, model, loss_fn, val=False)
-    output_general(("Training model for" , epochs, "epochs with a batch size of", batch_size, "and learning rate of", lr), file)
+    test_model(dataloader_test, model, loss_fn, file, val=False)
+    output_general("Training model for " + str(epochs) + " epochs with a batch size of " + str(batch_size) + " and learning rate of " + str(lr), file)
     for t in range(epochs):
         output_general(f"Epoch {t + 1} -------------------------------", file)
         train_model(dataloader_train, model, loss_fn, lr, file)
