@@ -11,6 +11,7 @@ from sklearn.metrics import f1_score
 from collections import OrderedDict
 from datetime import datetime
 import warnings 
+from eval_utils import CustomTransform, create_ciip_model, load_ciip_model_checkpoint, modify_ciip_for_eurosat
 
 # from torch.nn import Module, ModuleList, Conv1d, Sequential, ReLU, Dropout, Linear
 
@@ -56,80 +57,7 @@ def load_data(data_path, bands, batch_size, num_workers, transforms):
     
     return dataloader_train, dataloader_val, dataloader_test
 
-# Custom transform function to handle the dictionary structure of torchgeo dataset
-class CustomTransform:
-    def __init__(self, transform):
-        self.transform = transform
 
-    def __call__(self, sample):
-        sample['image'] = self.transform(sample['image'])
-        return sample
-
-def create_ciip_model():
-    s1_bands = [1, 2]
-    s2_bands = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
-    model = CIIP(
-        embed_dim=512,
-        s1_resolution=264,
-        s1_layers= (3, 4, 6, 3),
-        s1_width=32,
-        s1_patch_size=16, # used by transformer 
-        s1_bands=len(s1_bands),
-        s2_resolution=264,
-        s2_layers=(3, 4, 6, 3), #Resnet-34
-        s2_width=32,
-        s2_patch_size=16, # used by transformer
-        s2_bands=len(s2_bands)
-    )
-    return model  
-
-def load_ciip_model_checkpoint(checkpoint_path):
-    model = create_ciip_model()
-    checkpoint = torch.load(checkpoint_path)
-
-    state_dict = checkpoint['state_dict']
-    new_state_dict = OrderedDict()
-    for k, v in state_dict.items():
-        name = k.replace("module.", "")  # remove `module.`
-        new_state_dict[name] = v
-    # load params
-    model.load_state_dict(new_state_dict)
-
-    print("Checkpoint loaded successfully.")
-    
-    return model
-
-def modify_ciip_for_eurosat(model, num_classes=10, freeze_encoder=False):
-    # grab just the s2_encoder part of the model
-    encoder_s2 = model.encoder_s2
-
-    # Freeze the parameters of the original encoder
-    if freeze_encoder:
-        for param in encoder_s2.parameters():
-            param.requires_grad = False
-        
-    # add in another layer to match the number of classes in the EuroSAT dataset
-    encoder_s2.fc = nn.Linear(512, num_classes)
-
-    # unfreeze the last layer
-    # only need to do this if the encoder was frozen
-    if freeze_encoder:
-        for param in encoder_s2.fc.parameters():
-            param.requires_grad = True
-
-    # Wrap the forward function
-    original_forward = encoder_s2.forward
-
-    def new_forward(x):
-        x = original_forward(x)  # Get the 512-dim embedding from the existing forward pass
-        x = encoder_s2.fc(x)  # Pass through the new FC layer for 19-class output
-        return x
-
-    # Replace the model's forward with the new forward function
-    encoder_s2.forward = new_forward
-    print("Model modified for EuroSAT dataset.")
-    
-    return encoder_s2
 
 def test_model(dataloader, model, loss_fn, file, val=False):
     size = len(dataloader.dataset)
