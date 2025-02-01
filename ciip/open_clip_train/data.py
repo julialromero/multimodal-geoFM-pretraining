@@ -52,12 +52,13 @@ class SSL4EODataset(Dataset):
         if 0 in self.s2_bands:
             raise ValueError('Band index should be between 1 and 12')
         self.transforms = transforms
+        self.s2_tier = s2_tier
 
         original_working_directory = hydra.utils.get_original_cwd()
         data_parent_directory = "/".join(original_working_directory.split("/")[:-2])
 
         self.s1_dir = os.path.join(data_parent_directory, os.path.join(self.root, 's1'))
-        self.s2_dir = os.path.join(data_parent_directory, os.path.join(self.root, s2_tier))
+        self.s2_dir = os.path.join(data_parent_directory, os.path.join(self.root, self.s2_tier))
 
         s1_samples = os.listdir(self.s1_dir)
         s2_samples = os.listdir(self.s2_dir)
@@ -137,7 +138,11 @@ class SSL4EODataset(Dataset):
         
         # Normalize the bands
         # s2_band_images = [self.normalize_image(band_image) for band_image in s2_band_images]
-        s2_band_images = [self.normalize(img, mean, std) for img, mean, std in zip(s2_band_images, S2C_MEAN, S2C_STD)]
+        if self.s2_tier == "s2a":
+            s2_band_images = [self.normalize(img, mean, std) for img, mean, std in
+                              zip(s2_band_images, S2A_MEAN, S2A_STD)]
+        else:
+            s2_band_images = [self.normalize(img, mean, std) for img, mean, std in zip(s2_band_images, S2C_MEAN, S2C_STD)]
         
         s2_composite_image = np.stack(s2_band_images, axis=-1)  # Create a composite
         s1_composite_image = np.transpose(s1_composite_image, (2, 0, 1))
