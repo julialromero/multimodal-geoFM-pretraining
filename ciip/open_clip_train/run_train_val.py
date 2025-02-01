@@ -63,7 +63,8 @@ def main(args: DictConfig, start_epoch=0):
     s2_layers=OmegaConf.to_object(args.model.s2_layers), #Resnet-34
     s2_width=args.model.width,
     s2_patch_size=args.model.s2_patch_size, # used by transformer
-    s2_bands=len(args.model.s2_bands))
+    s2_bands=len(args.model.s2_bands),
+    framework=args.model.framework)
   
   model = model.to(args.train.device)
 

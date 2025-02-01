@@ -6,6 +6,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from torchgeo.models import resnet50, resnet18
+
 from model import ModifiedResNet#, S1Transformer, S2Transformer
 # VisionTransformer
 
@@ -31,6 +33,7 @@ class CIIP(nn.Module):
                  s2_width: int,
                  s2_patch_size: int,
                  s2_bands: int,
+                 framework: str = "modified_resnet"
                 #  # text
                 #  context_length: int,
                 #  vocab_size: int,
@@ -43,9 +46,9 @@ class CIIP(nn.Module):
         # self.context_length = context_length
 
 
-        ## Create s1 encoder model
-        if isinstance(s1_layers, (tuple, list)):
-            print("Using ResNet for S1")
+        # Create s1 encoder model
+        if framework == "modified_resnet":
+            print("Using Modified ResNet for S1")
             s1_heads = s1_width * 32 // 64
             self.encoder_s1 = ModifiedResNet(
                 layers=s1_layers,
@@ -55,7 +58,7 @@ class CIIP(nn.Module):
                 input_resolution=s1_resolution,
                 width=s1_width
             )
-        else:
+        elif framework == "transformer":
             s1_heads = s1_width // 64
             self.encoder_s1 = S1Transformer(
                 input_resolution=s1_resolution,
@@ -65,9 +68,22 @@ class CIIP(nn.Module):
                 heads=s1_heads,
                 output_dim=embed_dim
             )
+        elif framework == "resnet18":
+            self.encoder_s1 = resnet18(
+                    in_chans=s1_bands,
+                    num_classes = embed_dim
+                    )
+        elif framework == "resent50":
+            self.encoder_s1 = resnet50(
+                in_chans=s1_bands,
+                num_classes=embed_dim
+            )
+        else:
+            print("Framework not supported for S1")
 
-        ## Same for s2
-        if isinstance(s2_layers, (tuple, list)):
+
+        # Same for s2
+        if framework == "modified_resnet":
             print("Using ResNet for S2")
             s2_heads = s2_width * 32 // 64
             self.encoder_s2 = ModifiedResNet(  ## adapt this to s2
@@ -78,7 +94,7 @@ class CIIP(nn.Module):
                 input_resolution=s2_resolution,
                 width=s2_width
             )
-        else:
+        elif framework == "transformer":
             s2_heads = s2_width // 64
             self.encoder_s2 = S2Transformer(
                 input_resolution=s2_resolution,
@@ -88,6 +104,19 @@ class CIIP(nn.Module):
                 heads=s2_heads,
                 output_dim=embed_dim
             )
+        elif framework == "resnet18":
+            self.encoder_s2 = resnet18(
+                in_chans=s2_bands,
+                num_classes=embed_dim
+            )
+        elif framework == "resnet50":
+            self.encoder_s2 = resnet50(
+                in_chans=s2_bands,
+                num_classes=embed_dim
+            )
+        else:
+            print("Framework not supported for S1")
+
 
         ##### Text transformer is removed #####
         # self.transformer = Transformer(

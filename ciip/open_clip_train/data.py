@@ -39,7 +39,7 @@ S2C_STD = [786.78685367, 850.34818441, 875.06484736, 1138.84957046, 1122.1777565
 
 # ssl4eo
 class SSL4EODataset(Dataset):
-    def __init__(self, root, transforms=None, s2_bands=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], target_image_dimension=(264, 264)):
+    def __init__(self, root, s2_tier, s2_bands,transforms=None, target_image_dimension=(264, 264)):
         self.root = root
         self.num_locations = None
         self.length = None
@@ -57,7 +57,7 @@ class SSL4EODataset(Dataset):
         data_parent_directory = "/".join(original_working_directory.split("/")[:-2])
 
         self.s1_dir = os.path.join(data_parent_directory, os.path.join(self.root, 's1'))
-        self.s2_dir = os.path.join(data_parent_directory, os.path.join(self.root, 's2c'))
+        self.s2_dir = os.path.join(data_parent_directory, os.path.join(self.root, s2_tier))
 
         s1_samples = os.listdir(self.s1_dir)
         s2_samples = os.listdir(self.s2_dir)
@@ -219,13 +219,14 @@ def get_ssl4eo_dataset(args, is_train, transforms):
     root = args.dataset.root
     # root = args.dataset.train_data if is_train else args.val_data
     assert root
-    default_bands = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    default_bands = ["1", "2", "3", "4", "5", "6", "7", "8", "8A", "9", "10", "11", "12"]
 
     
     dataset = SSL4EODataset(
         root, # root file path
-        transforms=transforms, # transforms
-        s2_bands=args.model.s2_bands if hasattr(args, 's2_bands') else default_bands,  # from config file
+        args.dataset.s2_tier,
+        args.model.s2_bands if hasattr(args, 'dataset.s2_bands') else default_bands,  # from config file
+        transforms=transforms,  # transforms
         target_image_dimension=(args.dataset.dimension, args.dataset.dimension)
     )
 

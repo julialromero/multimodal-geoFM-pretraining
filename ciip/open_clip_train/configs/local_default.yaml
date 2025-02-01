@@ -12,6 +12,7 @@ io:
 comet: personal
 
 model:
+  framework: resnet18 #options are resnet18, resnet50, modified_resnet, transformer
   embed_dim: 512
   s1_layers: [3, 4, 6, 3]
   s2_layers: [3, 4, 6, 3]
@@ -21,7 +22,7 @@ model:
   s1_resolution: 224
   s2_resolution: 224
   s1_bands: [1, 2, 3]
-  s2_bands: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+  s2_bands: [1, 2, 3, 4, 5, 6, 7, 8, 8A, 9, 10, 11, 12] # if using sentinel-2 s2a tier, band 10 is no longer present
   #TODO we should use mixed prevision
   precision: 'fp16'
   grad_clip_norm: ~
@@ -45,6 +46,7 @@ dataset:
   train_data: True
   dimension: 264
   root: local_test_data/ #TODO: documentation about proper directory to run from
+  s2_tier: s2c # TOA data
 
 train:
   # fraction of data to use for validation
