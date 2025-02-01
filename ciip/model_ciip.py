@@ -73,7 +73,7 @@ class CIIP(nn.Module):
                     in_chans=s1_bands,
                     num_classes = embed_dim
                     )
-        elif framework == "resent50":
+        elif framework == "resnet50":
             self.encoder_s1 = resnet50(
                 in_chans=s1_bands,
                 num_classes=embed_dim
