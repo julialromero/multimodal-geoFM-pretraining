@@ -115,15 +115,16 @@ class SSL4EODataset(Dataset):
 
         vv_image = self.normalize(vv_image, S1_MEAN[0], S1_STD[0])
         vh_image = self.normalize(vh_image, S1_MEAN[1], S1_STD[1])
-        third_band = (vh_image + vv_image) / 2
+        # third_band = (vh_image + vv_image) / 2
 
         # resize each of these
         vh_image = np.array(self.resize_transform(Image.fromarray(vh_image.astype(np.uint8))))
         vv_image = np.array(self.resize_transform(Image.fromarray(vv_image.astype(np.uint8))))
-        third_band = np.array(self.resize_transform(Image.fromarray(third_band.astype(np.uint8))))
+        # third_band = np.array(self.resize_transform(Image.fromarray(third_band.astype(np.uint8))))
 
         # Create an RGB composite using VH, VV, and their average
-        s1_composite_image = np.stack((vh_image, vv_image, third_band), axis=-1)
+        # if you want to add a 3rd band for RGB-related purposes, uncomment third_band above and stack
+        s1_composite_image = np.stack((vh_image, vv_image), axis=-1)
         
 
         ############### Load s2 images ###################
