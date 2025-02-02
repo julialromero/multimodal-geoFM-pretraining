@@ -85,12 +85,16 @@ def main(args: DictConfig, start_epoch=0):
 
   # define transforms
   #TODO: color jitter only works on 3-channel images right now; a custom function would likely be quite useful here
-  transforms = v2.Compose([
-      v2.RandomResizedCrop(size=(args.model.s1_resolution, args.model.s2_resolution), antialias=True),
-      v2.RandomHorizontalFlip(p=0.5),
-      v2.RandomVerticalFlip(p=0.5),
-      v2.GaussianBlur(3),
-  ])
+
+  if args.dataset.use_transforms:
+      transforms = v2.Compose([
+          v2.RandomResizedCrop(size=(args.model.s1_resolution, args.model.s2_resolution), antialias=True),
+          v2.RandomHorizontalFlip(p=0.5),
+          v2.RandomVerticalFlip(p=0.5),
+          v2.GaussianBlur(3),
+      ])
+  else:
+      transforms = None
 
   data = get_data(args, transforms)
   total_steps = (data["train"].dataloader.num_batches // args.train.accum_freq) * args.train.epochs

@@ -47,6 +47,7 @@ dataset:
   dimension: 264
   root: local_test_data/ #TODO: documentation about proper directory to run from
   sentinel_2_tier: s2c # TOA data from Sentinel-2 tier 1C; s2a for BOA corrections
+  use_transforms: False
 
 train:
   # fraction of data to use for validation
