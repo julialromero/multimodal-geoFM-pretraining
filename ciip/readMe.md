@@ -28,7 +28,7 @@ Given that this contains your API key, DON'T push this file to github.  If you w
 
 # Local Testing
 This will let you have some quick sanity checking for syntax/environment issues before moving files onto Hal or Alpine for more rigorous iteration.  If you want to adjust any configurations for this, you can do so in the configs/local_default.yaml file.
-1. Go to https://drive.google.com/file/d/1sRWcYbaWs-efXza6kw03GlJQdZHq5iRN/view?pli=1, download the data, then move the folders labelled s1 and s2c into a new directory at the same level as ciip called "local_test_data".
+1. Go to https://drive.google.com/file/d/1sRWcYbaWs-efXza6kw03GlJQdZHq5iRN/view?pli=1, download the data, then move the folders labelled s1, s2c, and s2a into a new directory at the same level as ciip called "local_test_data".
 2. We need to ensure that hydra is pointed at a config file for small, local runs.  In your run_train_val class, change line 21 to look like this: CONF="local_default"
 3. Now, we can do a quick run; you should be running from within the {your_path_to_repo}/ciip/ciip/open_clip_train/ directory: 
    4. In the command line, it'll just look like running python3 run_train_val.py; you can feed in additional hydra configs if you want to (see below)

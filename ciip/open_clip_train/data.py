@@ -39,7 +39,7 @@ S2C_STD = [786.78685367, 850.34818441, 875.06484736, 1138.84957046, 1122.1777565
 
 # ssl4eo
 class SSL4EODataset(Dataset):
-    def __init__(self, root, transforms=None, s2_bands=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], target_image_dimension=(264, 264)):
+    def __init__(self, root, s2_tier, s2_bands,transforms=None, target_image_dimension=(264, 264)):
         self.root = root
         self.num_locations = None
         self.length = None
@@ -52,12 +52,13 @@ class SSL4EODataset(Dataset):
         if 0 in self.s2_bands:
             raise ValueError('Band index should be between 1 and 12')
         self.transforms = transforms
+        self.s2_tier = s2_tier
 
         original_working_directory = hydra.utils.get_original_cwd()
         data_parent_directory = "/".join(original_working_directory.split("/")[:-2])
 
         self.s1_dir = os.path.join(data_parent_directory, os.path.join(self.root, 's1'))
-        self.s2_dir = os.path.join(data_parent_directory, os.path.join(self.root, 's2c'))
+        self.s2_dir = os.path.join(data_parent_directory, os.path.join(self.root, self.s2_tier))
 
         s1_samples = os.listdir(self.s1_dir)
         s2_samples = os.listdir(self.s2_dir)
@@ -115,15 +116,16 @@ class SSL4EODataset(Dataset):
 
         vv_image = self.normalize(vv_image, S1_MEAN[0], S1_STD[0])
         vh_image = self.normalize(vh_image, S1_MEAN[1], S1_STD[1])
-        third_band = (vh_image + vv_image) / 2
+        # third_band = (vh_image + vv_image) / 2
 
         # resize each of these
         vh_image = np.array(self.resize_transform(Image.fromarray(vh_image.astype(np.uint8))))
         vv_image = np.array(self.resize_transform(Image.fromarray(vv_image.astype(np.uint8))))
-        third_band = np.array(self.resize_transform(Image.fromarray(third_band.astype(np.uint8))))
+        # third_band = np.array(self.resize_transform(Image.fromarray(third_band.astype(np.uint8))))
 
         # Create an RGB composite using VH, VV, and their average
-        s1_composite_image = np.stack((vh_image, vv_image, third_band), axis=-1)
+        # if you want to add a 3rd band for RGB-related purposes, uncomment third_band above and stack
+        s1_composite_image = np.stack((vh_image, vv_image), axis=-1)
         
 
         ############### Load s2 images ###################
@@ -136,7 +138,11 @@ class SSL4EODataset(Dataset):
         
         # Normalize the bands
         # s2_band_images = [self.normalize_image(band_image) for band_image in s2_band_images]
-        s2_band_images = [self.normalize(img, mean, std) for img, mean, std in zip(s2_band_images, S2C_MEAN, S2C_STD)]
+        if self.s2_tier == "s2a":
+            s2_band_images = [self.normalize(img, mean, std) for img, mean, std in
+                              zip(s2_band_images, S2A_MEAN, S2A_STD)]
+        else:
+            s2_band_images = [self.normalize(img, mean, std) for img, mean, std in zip(s2_band_images, S2C_MEAN, S2C_STD)]
         
         s2_composite_image = np.stack(s2_band_images, axis=-1)  # Create a composite
         s1_composite_image = np.transpose(s1_composite_image, (2, 0, 1))
@@ -219,13 +225,14 @@ def get_ssl4eo_dataset(args, is_train, transforms):
     root = args.dataset.root
     # root = args.dataset.train_data if is_train else args.val_data
     assert root
-    default_bands = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    default_bands = ["1", "2", "3", "4", "5", "6", "7", "8", "8A", "9", "10", "11", "12"]
 
     
     dataset = SSL4EODataset(
         root, # root file path
-        transforms=transforms, # transforms
-        s2_bands=args.model.s2_bands if hasattr(args, 's2_bands') else default_bands,  # from config file
+        args.dataset.s2_tier,
+        args.model.s2_bands if hasattr(args, 'dataset.s2_bands') else default_bands,  # from config file
+        transforms=transforms,  # transforms
         target_image_dimension=(args.dataset.dimension, args.dataset.dimension)
     )
 
