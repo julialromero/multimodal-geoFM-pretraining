@@ -5,7 +5,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torchgen.native_function_generation import self_to_out_signature
 
 from torchgeo.models import resnet50, resnet18, ResNet18_Weights, ResNet50_Weights
 

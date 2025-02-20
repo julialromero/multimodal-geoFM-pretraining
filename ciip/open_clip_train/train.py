@@ -8,9 +8,8 @@ import sys
 import numpy as np
 import torch
 import torch.nn.functional as F
-from fiona.env import local
+
 from torch.nn.parallel.distributed import DistributedDataParallel
-from torch.xpu import device
 
 try:
     import wandb
