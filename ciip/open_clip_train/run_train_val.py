@@ -24,8 +24,8 @@ from torchvision.transforms import v2
 
 LATEST_CHECKPOINT_NAME = "epoch_latest.pt"
 # Change this to local_default for local testing
-CONF = "local_default"
-# CONF = "prod_default"
+# CONF = "local_default"
+CONF = "prod_default"
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +44,11 @@ def cosine_lr(optimizer, base_lr, warmup_length, steps):
 
 @hydra.main(config_path="configs", config_name=CONF)
 def main(args: DictConfig, start_epoch=0):
+
+  print("LOCAL_RANK", os.environ.get("LOCAL_RANK"))
+  # Get the Local Rank
+  local_rank = int(os.environ.get("LOCAL_RANK", 0))
+  args.train.device = "cuda:%d" % local_rank
 
   # loss = create_loss(args)
   loss = CiipLoss(local_loss=False,
@@ -64,8 +69,11 @@ def main(args: DictConfig, start_epoch=0):
     s2_width=args.model.width,
     s2_patch_size=args.model.s2_patch_size, # used by transformer
     s2_bands=len(args.model.s2_bands),
-    framework=args.model.framework)
-  
+    framework=args.model.framework,
+    pretrain=args.model.pretrain.load,
+    s1_weights=args.model.pretrain.s1_weights,
+    s2_weights=args.model.pretrain.s2_weights)
+
   model = model.to(args.train.device)
 
   #setup comet_ml logging
@@ -75,8 +83,8 @@ def main(args: DictConfig, start_epoch=0):
           project_name=args.comet.project_name,
           workspace=args.comet.workspace
       )
-  
-  
+
+
   exclude = lambda n, p: p.ndim < 2 or "bn" in n or "ln" in n or "bias" in n or 'logit_scale' in n
   include = lambda n, p: not exclude(n, p)
   named_parameters = list(model.named_parameters())
@@ -97,8 +105,9 @@ def main(args: DictConfig, start_epoch=0):
       transforms = None
 
   data = get_data(args, transforms)
+  # Testing with a small subset
   total_steps = (data["train"].dataloader.num_batches // args.train.accum_freq) * args.train.epochs
-  
+
   optimizer= optim.AdamW(
     [
         {"params": gain_or_bias_params, "weight_decay": 0.},
@@ -111,17 +120,17 @@ def main(args: DictConfig, start_epoch=0):
 
   scheduler = cosine_lr(optimizer, args.train.lr, args.train.warmup, total_steps)
 
-  dist_model = None 
+  dist_model = None
   tb_writer = None
   # TODO(behzad): alternatively we might need to use what is in the original code:
   # scaler = GradScaler() if args.precision == "amp" else None
-  scaler = None 
+  scaler = None
 
   # check if checkpoint outdir exists
   os.makedirs(args.io.checkpoint_path, exist_ok=True)
 
   for epoch in range(start_epoch, args.train.epochs):
-    
+
     logger.info(f'Start epoch {epoch}')
 
     train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist_model, args, tb_writer)
@@ -130,11 +139,11 @@ def main(args: DictConfig, start_epoch=0):
     # print(data['train'].dataloader)
     # print(data['val'].dataloader)
     # print("IF statement", 'val' in data)
-    if any(v in data for v in ('val', 'imagenet-val', 'imagenet-v2')):
-        evaluate(model, data, completed_epoch, args, tb_writer)
+    # if any(v in data for v in ('val', 'imagenet-val', 'imagenet-v2')):
+    #     evaluate(model, data, completed_epoch, args, tb_writer)
 
     original_model = model
-    
+
     # Saving checkpoints.
     if args.io.save_logs:
         checkpoint_dict = {
@@ -147,7 +156,7 @@ def main(args: DictConfig, start_epoch=0):
             checkpoint_dict["scaler"] = scaler.state_dict()
 
         if completed_epoch == args.train.epochs \
-                or (args.save_frequency > 0 and (completed_epoch % args.save_frequency) == 0):
+                or (args.io.save_frequency > 0 and (completed_epoch % args.io.save_frequency) == 0):
             # save checkpoints within outputs file
             torch.save(
                 checkpoint_dict,
