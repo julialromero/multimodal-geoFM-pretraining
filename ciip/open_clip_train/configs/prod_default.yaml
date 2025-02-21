@@ -5,14 +5,18 @@ io:
   checkpoint_path: checkpoints
   save_frequency: 5
   save_logs: True
-  log_every_n_steps: 10
+  log_every_n_steps: 50
   wandb: False
   comet_ml: True
 
 comet: personal
 
 model:
-  framework: resnet18 #options are resnet18, resnet50, modified_resnet, transformer
+  framework: resnet50 #options are resnet18, resnet50, modified_resnet, transformer
+  pretrain:
+    load: True
+    s1_weights: "MOCO" # Only support for resnet50. S1: MOCO
+    s2_weights: "MOCO" # Only support for resnet50. S2: MOCO, DINO
   embed_dim: 512
   s1_layers: [3, 4, 6, 3]
   s2_layers: [3, 4, 6, 3]
@@ -32,6 +36,7 @@ model:
   distributed: False
   workers: 4
 
+
 #TODO: loss params
 
 datamodule:
@@ -45,16 +50,16 @@ dataset:
   # train_data is true for training and false for validation
   train_data: True
   dimension: 264
-  root: local_test_data/ #TODO: documentation about proper directory to run from
-  sentinel_2_tier: s2c # TOA data from Sentinel-2 tier 1C; s2a for BOA corrections
+  root: /local/ms-data/SSL4EO/ #TODO: documentation about proper directory to run from
+  s2_tier: s2c # TOA data from Sentinel-2 tier 1C; s2a for BOA corrections
   use_transforms: False
 
 train:
   # fraction of data to use for validation
   device: cuda
-  use_val: True
-  val_frac: 0.1
-  epochs: 50
+  use_val: False
+  val_frac: 0.0
+  epochs: 100
   lr: 0.0001
   wd: 0.2
   warmup: 10000

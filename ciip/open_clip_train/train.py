@@ -8,6 +8,7 @@ import sys
 import numpy as np
 import torch
 import torch.nn.functional as F
+
 from torch.nn.parallel.distributed import DistributedDataParallel
 
 try:
@@ -15,6 +16,8 @@ try:
 except ImportError:
     wandb = None
 
+parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+sys.path.insert(0, parent_dir)
 from open_clip import get_input_dtype
 from open_clip_train.distributed import is_master
 from open_clip_train.zero_shot import zero_shot_eval
