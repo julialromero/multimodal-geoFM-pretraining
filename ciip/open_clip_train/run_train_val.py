@@ -166,7 +166,12 @@ def main(args: DictConfig, start_epoch=0):
             # log out via comet
             # TBD if we want the whole checkpoint dict or just some specific hyper-params . . .
             if(args.io.comet_ml):
-                experiment.log_parameters(checkpoint_dict)
+                # Extract only the scalar items
+                experiment.log_parameters({
+                    "epoch": checkpoint_dict["epoch"],
+                    "name": checkpoint_dict["name"],
+                    # Add any other scalar or string fields here...
+                })
                 log_model(experiment, model=original_model, model_name="CIIP!")
 
         if args.train.delete_previous_checkpoint:
