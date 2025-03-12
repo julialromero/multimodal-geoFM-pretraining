@@ -5,11 +5,16 @@ io:
   checkpoint_path: checkpoints
   save_frequency: 5
   save_logs: True
+  logs: /path/to/logs #base path for logs 
   log_every_n_steps: 50
   wandb: False
   comet_ml: True
+  resume:
 
-comet: personal
+comet: #personal
+  api_key: 
+  project_name: general
+  workspace:
 
 model:
   framework: resnet50 #options are resnet18, resnet50, modified_resnet, transformer
@@ -28,22 +33,33 @@ model:
   s1_bands: [1, 2]
   s2_bands: [1, 2, 3, 4, 5, 6, 7, 8, 8A, 9, 10, 11, 12] # if using sentinel-2 s2a tier, band 10 is no longer present
   #TODO we should use mixed prevision
-  precision: 'fp16'
+  precision: 'amp' #'fp16'
   grad_clip_norm: ~
-  accum_freq: 1
   skip_scheduler: False
-  distill:
-  distributed: False
-  workers: 4
+  # distill_model:
+  # distributed: 
+  workers: 6 # workers per GPU
 
 
 #TODO: loss params
 
 datamodule:
-  batch_size: 128
-  world_size: 1
-  rank: 0
+  batch_size: 256 # batch sizer per GPU
+  world_size: 2
+  rank: 
   horovod: False
+  local_rank:
+  local_loss: True
+  gather_with_grad: True
+  distributed:
+  device:
+  distill:
+  siglip:
+  dist_backend:
+
+
+  dist_url:
+  no_set_device_rank:
 
 dataset:
   dataset_type: ssl4eo
@@ -56,7 +72,7 @@ dataset:
 
 train:
   # fraction of data to use for validation
-  device: cuda
+  # device: cuda
   use_val: False
   val_frac: 0.0
   epochs: 100
@@ -72,4 +88,28 @@ train:
   name: ciip_test
   delete_previous_checkpoint: False
   save_most_recent: False
-  debug: False
+  debug: False # for logger
+  seed: 56
+
+#other placeholders
+remote_sync:
+remote_sync_frequency:
+remote_sync_protocol:
+report_to:
+log_path:
+log_local:
+log_level:
+wandb:
+tensorboard:
+tensorboard_path:
+distill_pretrained:
+distill_model:
+distill:
+siglip:
+grad_checkpointing:
+use_bn_sync:
+ddp_static_graph:
+trace:
+save_logs:
+torchcompile:
+copy_codebase:

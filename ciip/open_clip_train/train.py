@@ -68,7 +68,7 @@ def backward(total_loss, scaler):
 
 def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist_model, args, tb_writer=None):
     # TODO: figure out what dist_model is
-    device = torch.device(args.train.device)
+    device = torch.device(args.datamodule.device)
     autocast = get_autocast(args.model.precision)
     input_dtype = get_input_dtype(args.model.precision)
 
@@ -77,7 +77,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
     ## for using pretrained model, these pretrained models are distributedparallel models
     ## this means we have to either use a distributedparallel model, otherwise i think we have to rename the state_dict keys 
     ## (as the naming convention is slightly different for regular vs distributed parallel)
-    if args.model.distill:
+    if args.distill:
         dist_model.eval()
 
     data['train'].set_epoch(epoch)  # set epoch in process safe manner via sampler or shared_epoch
@@ -111,7 +111,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 model_out = model(s1, s2)
 
                 logit_scale = model_out["logit_scale"]
-                if args.model.distill:
+                if args.distill:
                     with torch.no_grad():
                         dist_model_out = dist_model(s1, s2)
                     model_out.update({f'dist_{k}': v for k, v in dist_model_out.items()})

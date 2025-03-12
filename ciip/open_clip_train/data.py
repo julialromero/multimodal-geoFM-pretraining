@@ -241,7 +241,7 @@ def get_ssl4eo_dataset(args, is_train, transforms):
 
 def dataset_to_datainfo(args, dataset, is_train):
     num_samples = len(dataset)
-    sampler = DistributedSampler(dataset) if args.model.distributed and is_train else None
+    sampler = DistributedSampler(dataset) if args.datamodule.distributed and is_train else None
     shuffle = is_train and sampler is None
 
     dataloader = DataLoader(
