@@ -190,6 +190,17 @@ class SSL4EODataset(Dataset):
         img = (img - min_value) / (max_value - min_value) * 255.0
         img = np.clip(img, 0, 255).astype(np.uint8)
         return img
+    
+
+    def get_sample_uid(self, idx):
+        location_idx, season_idx = self.int_to_filepath(idx)
+        location_folder = self.locations[location_idx]
+
+        filepath = os.path.join(self.root, 's1', location_folder)
+
+        unique_id = f'{location_folder}_season{season_idx}'
+        return (unique_id, filepath)
+ 
 
 
 # taken from: https://github.com/zhu-xlab/SSL4EO-S12/blob/2156913c5d8e5a2c572a5b000f0d5eaed6fc3192/src/benchmark/pretrain_ssl/datasets/SSL4EO/ssl4eo_dataset.py#L127

@@ -276,6 +276,22 @@ class CIIP(nn.Module):
 
         return out_dict
     
+
+    def compute_embeddings(self, s1, s2):
+        s1_features = self.encode_s1(s1)
+        s2_features = self.encode_s2(s2)
+
+        # # normalized features
+        s1_features  = s1_features  / s1_features.norm(dim=1, keepdim=True)
+        s2_features = s2_features / s2_features.norm(dim=1, keepdim=True)
+
+        out_dict = {
+            "s1_features": s1_features,
+            "s2_features": s2_features,
+            }
+    
+        return out_dict
+    
     # write definition to print number of parameters in encoder1 
     def count_parameters_encoder1(self):
         return sum(p.numel() for p in self.encoder_s1.parameters() if p.requires_grad)

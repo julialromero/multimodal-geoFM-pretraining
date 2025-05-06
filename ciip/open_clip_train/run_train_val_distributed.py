@@ -183,7 +183,7 @@ def main(args: DictConfig, start_epoch=0):
                 logging.info(f'No latest resume checkpoint found in {checkpoint_path}.')
         if args.datamodule.distributed:
             # sync found checkpoint path to all ranks
-            resume_from = broadcast_object(args, resume_from)
+            resume_from = broadcast_object(args.datamodule, resume_from)
         args.io.resume = resume_from
 
     if args.copy_codebase:
@@ -482,9 +482,9 @@ def main(args: DictConfig, start_epoch=0):
 
                 # log out via comet
                 # TBD if we want the whole checkpoint dict or just some specific hyper-params . . .
-                if(args.io.comet_ml):
-                    experiment.log_parameters(checkpoint_dict)
-                    log_model(experiment, model=original_model, model_name="CIIP!")
+                # if(args.io.comet_ml):
+                #     experiment.log_parameters(checkpoint_dict)
+                #     log_model(experiment, model=original_model, model_name="CIIP!")
 
         if args.train.delete_previous_checkpoint:
             previous_checkpoint = os.path.join(args.io.checkpoint_path, f"epoch_{completed_epoch - 1}.pt")
