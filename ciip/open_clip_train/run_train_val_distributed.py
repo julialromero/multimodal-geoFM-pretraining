@@ -349,24 +349,24 @@ def main(args: DictConfig, start_epoch=0):
     # optionally resume from a checkpoint
     start_epoch = 0
     if args.io.resume is not None:
-        raise NotImplementedError('Resume not yet supported.')
-        # checkpoint = pt_load(args.resume, map_location='cpu')
-        # if 'epoch' in checkpoint:
-        #     # resuming a train checkpoint w/ epoch and optimizer state
-        #     start_epoch = checkpoint["epoch"]
-        #     sd = checkpoint["state_dict"]
-        #     if not args.distributed and next(iter(sd.items()))[0].startswith('module'):
-        #         sd = {k[len('module.'):]: v for k, v in sd.items()}
-        #     model.load_state_dict(sd)
-        #     if optimizer is not None:
-        #         optimizer.load_state_dict(checkpoint["optimizer"])
-            # if scaler is not None and 'scaler' in checkpoint:
-            #     scaler.load_state_dict(checkpoint['scaler'])
-        #     logging.info(f"=> resuming checkpoint '{args.resume}' (epoch {start_epoch})")
-        # else:
-        #     # loading a bare (model only) checkpoint for fine-tune or evaluation
-        #     model.load_state_dict(checkpoint)
-        #     logging.info(f"=> loaded checkpoint '{args.resume}' (epoch {start_epoch})")
+        # raise NotImplementedError('Resume not yet supported.')
+        checkpoint = pt_load(args.io.resume, map_location='cpu')
+        if 'epoch' in checkpoint:
+            # resuming a train checkpoint w/ epoch and optimizer state
+            start_epoch = checkpoint["epoch"]
+            sd = checkpoint["state_dict"]
+            if not args.datamodule.distributed and next(iter(sd.items()))[0].startswith('module'):
+                sd = {k[len('module.'):]: v for k, v in sd.items()}
+            model.load_state_dict(sd)
+            if optimizer is not None:
+                optimizer.load_state_dict(checkpoint["optimizer"])
+            if scaler is not None and 'scaler' in checkpoint:
+                scaler.load_state_dict(checkpoint['scaler'])
+            logging.info(f"=> resuming checkpoint '{args.io.resume}' (epoch {start_epoch})")
+        else:
+            # loading a bare (model only) checkpoint for fine-tune or evaluation
+            model.load_state_dict(checkpoint)
+            logging.info(f"=> loaded checkpoint '{args.io.resume}' (epoch {start_epoch})")
 
 
     if args.dataset.use_transforms:
@@ -473,7 +473,8 @@ def main(args: DictConfig, start_epoch=0):
                 checkpoint_dict["scaler"] = scaler.state_dict()
 
             if completed_epoch == args.train.epochs \
-                    or (args.io.save_frequency > 0 and (completed_epoch % args.io.save_frequency) == 0):
+                    or (args.io.save_frequency > 0 and (completed_epoch % args.io.save_frequency) == 0) \
+                        or completed_epoch == 1:
                 # save checkpoints within outputs file
                 torch.save(
                     checkpoint_dict,

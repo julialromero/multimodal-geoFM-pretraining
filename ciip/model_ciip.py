@@ -6,9 +6,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from torchgeo.models import resnet50, resnet18, ResNet18_Weights, ResNet50_Weights
-
-from model import ModifiedResNet#, S1Transformer, S2Transformer
+from torchgeo.models import resnet18, ResNet18_Weights, ResNet50_Weights, resnet50
+from model import ModifiedResNet, ResNet50 #, S1Transformer, S2Transformer
 # VisionTransformer
 
 
@@ -17,6 +16,44 @@ from model import ModifiedResNet#, S1Transformer, S2Transformer
 ############ START CIIP MODEL IMPLEMENTATION #################
 ##############################################################
 
+def compute_optimal_orthogonal_mapping(X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
+    """
+    Compute the orthogonal matrix W that best aligns Y to X (i.e., X ≈ YW).
+    Args:
+        X: [N, D] tensor of image embeddings
+        Y: [N, D] tensor of text embeddings
+    Returns:
+        W: [D, D] orthogonal matrix
+    """
+
+    # Ensure inputs are float tensors and on same device
+    X = X.to(dtype=torch.float32)
+    Y = Y.to(dtype=torch.float32)
+
+    X = X.T
+    Y = Y.T
+
+    # Optional: normalize to unit norm
+    X = X / X.norm(dim=0, keepdim=True).clamp(min=1e-8)
+    Y = Y / Y.norm(dim=0, keepdim=True).clamp(min=1e-8)
+
+    # Compute cross-covariance matrix
+    A = Y @ X.T  # shape: [dim, dim]
+
+    # SVD decomposition
+    U, _, Vt = torch.linalg.svd(A)
+
+    # Compute the orthogonal matrix R
+    R = U @ Vt
+
+    # Optional: ensure det(R) == 1 to prevent reflection
+    if torch.linalg.det(R) < 0:
+        Vt[-1, :] *= -1
+        R = U @ Vt
+
+    print(f"Orthogonal matrix R shape: {R.shape}, det(R): {torch.linalg.det(R)}")
+
+    return R
 
 class CIIP(nn.Module):
     def __init__(self,
@@ -79,7 +116,11 @@ class CIIP(nn.Module):
             if pretrain:
                 print("Warning: Pretrained weights are not supported for ResNet18 (S1). Ignoring pretrain flag for S1.")
         elif framework == "resnet50":
-            self.encoder_s1 = resnet50(
+            # self.encoder_s1 = resnet50(
+            #     in_chans=s1_bands,
+            #     num_classes=embed_dim
+            # )
+            self.encoder_s1 = ResNet50(
                 in_chans=s1_bands,
                 num_classes=embed_dim
             )
@@ -117,7 +158,11 @@ class CIIP(nn.Module):
             if pretrain:
                 print("Warning: Pretrained weights are not supported for ResNet18 (S1). Ignoring pretrain flag for S1.")
         elif framework == "resnet50":
-            self.encoder_s2 = resnet50(
+            # self.encoder_s2 = resnet50(
+            #     c=s2_bands,
+            #     num_classes=embed_dim
+            # )
+            self.encoder_s2 = ResNet50(
                 in_chans=s2_bands,
                 num_classes=embed_dim
             )
@@ -235,6 +280,12 @@ class CIIP(nn.Module):
 
     def encode_s2(self, s2):
         return self.encoder_s2(s2.type(self.dtype_s2))
+
+    def set_orthogonal_transformation(self, W: torch.Tensor):
+        """Set the orthogonal transformation matrix W for S1 modality."""
+        if W is not None and W.shape[0] != W.shape[1]:
+            raise ValueError("Orthogonal transformation matrix W must be square.")
+        self.W = W
     
     # def encode_text(self, text):
     #     x = self.token_embedding(text).type(self.dtype)  # [batch_size, n_ctx, d_model]
@@ -291,7 +342,83 @@ class CIIP(nn.Module):
             }
     
         return out_dict
-    
+
+    def compute_orthogonal_matrix(self, s1, s2):
+        self.encoder_s1.compute_orthogonal_matrix = True
+        self.encoder_s2.compute_orthogonal_matrix = True
+
+        
+        s1_layer1_features = self.encode_s1(s1)
+        s2_layer1_features = self.encode_s2(s2)
+        # # print dtype
+        # print(f"S1 Layer1 Features dtype: {s1_layer1_features.dtype}, device: {s1_layer1_features.device}")
+        # print(f"S2 Layer1 Features dtype: {s2_layer1_features.dtype}, device: {s2_layer1_features.device}")
+
+
+        # Compute centroids BEFORE alignment (mean over batch and spatial dims)
+        centroid_s1 = s1_layer1_features.mean(dim=0) # shape (num_samples, num_feats) ## #.mean(dim=[0, 2, 3])  # shape: (feat_dim,)
+        centroid_s2 = s2_layer1_features.mean(dim=0) #.mean(dim=[0, 2, 3])
+
+        l2_before = torch.norm(centroid_s1 - centroid_s2, p=2).item()
+        cos_before = F.cosine_similarity(centroid_s1.unsqueeze(0), centroid_s2.unsqueeze(0)).item()
+
+        print(f"Before alignment - L2 norm between centroids: {l2_before:.6f}")
+        print(f"Before alignment - Cosine similarity between centroids: {cos_before:.6f}")
+
+        s1_flat = s1_layer1_features #.permute(0, 2, 3, 1).reshape(-1, s1_layer1_features.shape[1])  # shape: [300*66*66, 64]
+        s2_flat = s2_layer1_features #.permute(0, 2, 3, 1).reshape(-1, s2_layer1_features.shape[1])  # shape: [300*66*66, 64]
+
+        # # adjust features to be shape (num_samples, featuredim)
+        # print(f"S1 Layer1 Features Shape: {s1_flat.shape}")
+        # print(f"S2 Layer1 Features Shape: {s2_flat.shape}")
+
+        # normalize features
+        s1_flat = s1_flat / s1_flat.norm(dim=1, keepdim=True)
+        s2_flat = s2_flat / s2_flat.norm(dim=1, keepdim=True)
+
+
+        W = compute_optimal_orthogonal_mapping(s2_flat, s1_flat)
+        W = W.to(device=s1.device, dtype=torch.float32, non_blocking=True)
+
+        s1_flat = s1_flat.to(dtype=torch.float32)
+
+        # print data types and shapes
+        # print(f"S1 Flat Features Shape: {s1_flat.shape}, dtype: {s1_flat.dtype}, device: {s1_flat.device}")
+        # print(f"W  dtype: {W.dtype}, device: {W.device}")
+        s1_transformed_flat = s1_flat @ W
+        s1_aligned = s1_transformed_flat #.reshape(B, H, P, C).permute(0, 3, 1, 2)
+            
+
+        # Compute centroids AFTER alignment
+        centroid_s1_aligned = s1_aligned.mean(dim=0) #.mean(dim=[0, 2, 3])
+
+        l2_after = torch.norm(centroid_s1_aligned - centroid_s2, p=2).item()
+        cos_after = F.cosine_similarity(centroid_s1_aligned.unsqueeze(0), centroid_s2.unsqueeze(0)).item()
+
+        print(f"After alignment - L2 norm between centroids: {l2_after:.6f}")
+        print(f"After alignment - Cosine similarity between centroids: {cos_after:.6f}")
+
+
+        self.encoder_s1.compute_orthogonal_matrix = False
+        self.encoder_s2.compute_orthogonal_matrix = False
+        self.encoder_s1.apply_orthogonal_matrix = True
+        # self.encoder_s1.W = W
+        self.encoder_s1.register_buffer("W", W)
+        
+
+
+        # create dictionary to return
+        out_dict = {
+        "l2_before": float(l2_before),
+        "cos_before": float(cos_before),
+        "l2_after": float(l2_after),
+        "cos_after": float(cos_after)
+        }
+
+        return W.detach().cpu(), out_dict
+
+
+
     # write definition to print number of parameters in encoder1 
     def count_parameters_encoder1(self):
         return sum(p.numel() for p in self.encoder_s1.parameters() if p.requires_grad)

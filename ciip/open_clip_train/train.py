@@ -23,6 +23,23 @@ from open_clip_train.distributed import is_master
 from open_clip_train.zero_shot import zero_shot_eval
 from open_clip_train.precision import get_autocast
 
+import random
+from torch.utils.data import Dataset, DataLoader
+
+class Subset(Dataset):
+
+    def __init__(self, dataset, indices):
+        self.dataset = dataset
+        self.indices = indices
+
+    def __getitem__(self, idx):
+        return self.dataset[self.indices[idx]]
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getattr__(self, name):
+        return getattr(self.dataset, name)
 
 class AverageMeter(object):
     """Computes and stores the average and current value"""
@@ -87,6 +104,36 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
 
     if args.train.accum_freq > 1:
         accum_s1, accum_s2, accum_features = [], [], {}
+
+
+    with torch.no_grad():
+        if epoch == 0 and args.train.apply_orthogonal_mapping:
+            #log
+            logging.info("Computing optimal orthogonal mapping W for s1 to s2...")
+            base_dataset = dataloader.dataset
+            random.seed(42)
+            sample_indices = random.sample(range(len(base_dataset)), 2_000)
+            subset = Subset(base_dataset, sample_indices)
+            loader = DataLoader(subset, batch_size=300, shuffle=False)
+            batch = next(iter(loader))
+            s1, s2 = batch
+            s1 = s1.to(device=device, dtype=input_dtype, non_blocking=True)
+            s2 = s2.to(device=device, dtype=input_dtype, non_blocking=True)
+            if hasattr(model, "module"):
+                W, stats = model.module.compute_orthogonal_matrix(s1, s2)
+            else:
+                W, stats = model.compute_orthogonal_matrix(s2, s1)
+            logging.info(f"Computed W: {W.shape}")
+            logging.info(f"Orthogonal matrix stats: {stats}")
+            # save stats to log directory
+            if args.io.save_logs:
+                with open(os.path.join(args.io.checkpoint_path, "orthogonal_matrix_stats.json"), "w") as f:
+                    json.dump(stats, f, indent=4)
+                # save W matrix to log directory 
+                W_path = os.path.join(args.io.checkpoint_path, "W.pt")
+                torch.save(W, W_path)
+                logging.info(f"Saved orthogonal matrix W to {W_path}")
+
 
     losses_m = {}
     batch_time_m = AverageMeter()
