@@ -10,7 +10,7 @@ except ImportError:
 
 
 def is_global_master(args):
-    return args.rank == 0
+    return args.datamodule.rank == 0
 
 
 def is_local_master(args):
@@ -65,31 +65,31 @@ def init_distributed_device(args):
     # Works in both single and multi-node scenarios.
     args.distributed = False
     args.world_size = 1
-    args.rank = 0  # global rank
+    args.datamodule.rank = 0  # global rank
     args.local_rank = 0
     if args.horovod:
         assert hvd is not None, "Horovod is not installed"
         hvd.init()
         args.local_rank = int(hvd.local_rank())
-        args.rank = hvd.rank()
+        args.datamodule.rank = hvd.rank()
         args.world_size = hvd.size()
         args.distributed = True
         os.environ['LOCAL_RANK'] = str(args.local_rank)
-        os.environ['RANK'] = str(args.rank)
+        os.environ['RANK'] = str(args.datamodule.rank)
         os.environ['WORLD_SIZE'] = str(args.world_size)
     elif is_using_distributed():
         if 'SLURM_PROCID' in os.environ:
             # DDP via SLURM
-            args.local_rank, args.rank, args.world_size = world_info_from_env()
+            args.local_rank, args.datamodule.rank, args.world_size = world_info_from_env()
             # SLURM var -> torch.distributed vars in case needed
             os.environ['LOCAL_RANK'] = str(args.local_rank)
-            os.environ['RANK'] = str(args.rank)
+            os.environ['RANK'] = str(args.datamodule.rank)
             os.environ['WORLD_SIZE'] = str(args.world_size)
             torch.distributed.init_process_group(
                 backend=args.dist_backend,
                 init_method=args.dist_url,
                 world_size=args.world_size,
-                rank=args.rank,
+                rank=args.datamodule.rank,
             )
         else:
             # DDP via torchrun, torch.distributed.launch
@@ -98,7 +98,7 @@ def init_distributed_device(args):
                 backend=args.dist_backend,
                 init_method=args.dist_url)
             args.world_size = torch.distributed.get_world_size()
-            args.rank = torch.distributed.get_rank()
+            args.datamodule.rank = torch.distributed.get_rank()
         args.distributed = True
 
     if torch.cuda.is_available():
@@ -119,7 +119,7 @@ def broadcast_object(args, obj, src=0):
     if args.horovod:
         return hvd.broadcast_object(obj, root_rank=src)
     else:
-        if args.rank == src:
+        if args.datamodule.rank == src:
             objects = [obj]
         else:
             objects = [None]

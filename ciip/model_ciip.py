@@ -6,6 +6,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from torchgeo.models import resnet50, resnet18, ResNet18_Weights, ResNet50_Weights
+
 from model import ModifiedResNet#, S1Transformer, S2Transformer
 # VisionTransformer
 
@@ -31,21 +33,25 @@ class CIIP(nn.Module):
                  s2_width: int,
                  s2_patch_size: int,
                  s2_bands: int,
+                 framework: str = "modified_resnet",
                 #  # text
                 #  context_length: int,
                 #  vocab_size: int,
                 #  transformer_width: int,
                 #  transformer_heads: int,
                 #  transformer_layers: int
+                 pretrain: bool = False,
+                 s1_weights: str = "MOCO",
+                 s2_weights: str = "MOCO",
                  ):
         super().__init__()
 
         # self.context_length = context_length
 
 
-        ## Create s1 encoder model
-        if isinstance(s1_layers, (tuple, list)):
-            print("Using ResNet for S1")
+        # Create s1 encoder model
+        if framework == "modified_resnet":
+            print("Using Modified ResNet for S1")
             s1_heads = s1_width * 32 // 64
             self.encoder_s1 = ModifiedResNet(
                 layers=s1_layers,
@@ -55,7 +61,7 @@ class CIIP(nn.Module):
                 input_resolution=s1_resolution,
                 width=s1_width
             )
-        else:
+        elif framework == "transformer":
             s1_heads = s1_width // 64
             self.encoder_s1 = S1Transformer(
                 input_resolution=s1_resolution,
@@ -65,9 +71,24 @@ class CIIP(nn.Module):
                 heads=s1_heads,
                 output_dim=embed_dim
             )
+        elif framework == "resnet18":
+            self.encoder_s1 = resnet18(
+                    in_chans=s1_bands,
+                    num_classes = embed_dim
+                    )
+            if pretrain:
+                print("Warning: Pretrained weights are not supported for ResNet18 (S1). Ignoring pretrain flag for S1.")
+        elif framework == "resnet50":
+            self.encoder_s1 = resnet50(
+                in_chans=s1_bands,
+                num_classes=embed_dim
+            )
+        else:
+            print("Framework not supported for S1")
 
-        ## Same for s2
-        if isinstance(s2_layers, (tuple, list)):
+
+        # Same for s2
+        if framework == "modified_resnet":
             print("Using ResNet for S2")
             s2_heads = s2_width * 32 // 64
             self.encoder_s2 = ModifiedResNet(  ## adapt this to s2
@@ -78,7 +99,7 @@ class CIIP(nn.Module):
                 input_resolution=s2_resolution,
                 width=s2_width
             )
-        else:
+        elif framework == "transformer":
             s2_heads = s2_width // 64
             self.encoder_s2 = S2Transformer(
                 input_resolution=s2_resolution,
@@ -88,6 +109,46 @@ class CIIP(nn.Module):
                 heads=s2_heads,
                 output_dim=embed_dim
             )
+        elif framework == "resnet18":
+            self.encoder_s2 = resnet18(
+                in_chans=s2_bands,
+                num_classes=embed_dim
+            )
+            if pretrain:
+                print("Warning: Pretrained weights are not supported for ResNet18 (S1). Ignoring pretrain flag for S1.")
+        elif framework == "resnet50":
+            self.encoder_s2 = resnet50(
+                in_chans=s2_bands,
+                num_classes=embed_dim
+            )
+        else:
+            print("Framework not supported for S1")
+
+        # Load pretrained weights
+        if pretrain:
+            if framework != "resnet50":
+                print("Warning: Pretrained weights only support for ResNet50 framework.")
+            else:
+                # Load S1 pretrained weights (only "MOCO" is allowed)
+                if self.encoder_s1 is not None:
+                    if s1_weights != "MOCO":
+                        raise ValueError("For ResNet50 S1 encoder, only 'MOCO' pretrained weights are supported.")
+                    else:
+                        # Load S1 weights using ResNet50_Weights (for example, SENTINEL1_ALL_MOCO)
+                        weights_obj = ResNet50_Weights.SENTINEL1_ALL_MOCO
+                        self.encoder_s1.load_state_dict(weights_obj.get_state_dict(progress=True), strict=False)
+                # Load S2 pretrained weights ("MOCO" or "DINO" are allowed)
+                if self.encoder_s2 is not None:
+                    if s2_weights not in ["MOCO", "DINO"]:
+                        raise ValueError(
+                            "For ResNet50 S2 encoder, pretrained weights should be either 'MOCO' or 'DINO'.")
+                    else:
+                        if s2_weights == "MOCO":
+                            weights_obj = ResNet50_Weights.SENTINEL2_ALL_MOCO
+                        else:
+                            weights_obj = ResNet50_Weights.SENTINEL2_ALL_DINO
+                        self.encoder_s2.load_state_dict(weights_obj.get_state_dict(progress=True), strict=False)
+
 
         ##### Text transformer is removed #####
         # self.transformer = Transformer(
