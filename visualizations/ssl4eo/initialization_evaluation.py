@@ -367,7 +367,7 @@ def main(args: DictConfig):
     
     data = get_data(args)
     train_dataset = data['train'].dataloader.dataset
-    subset_indices = np.random.RandomState(42).choice(len(train_dataset), 2000, replace=False)
+    subset_indices = np.random.RandomState(42).choice(len(train_dataset), 200, replace=False)
     subset_dataset = torch.utils.data.Subset(train_dataset, subset_indices)
     
     models = os.listdir(chkpt_path)
@@ -385,10 +385,10 @@ def main(args: DictConfig):
     cosine_sims = []
 
     for model_epoch_fn in models:
+        model_checkpoints.append(int(model_epoch_fn.split('_')[1].split('.')[0]))
+
         if 'epoch_0' in model_epoch_fn:
             model_epoch_fn = 'epoch_init.pt'
-
-        model_checkpoints.append(int(model_epoch_fn.split('_')[1].split('.')[0]))
             
         path = os.path.join(chkpt_path, model_epoch_fn)
 
