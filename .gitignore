@@ -19,4 +19,4 @@ checkpoints/
 log/
 
 
-*/ciip/open_clip_train/configs/prod_default.yaml
+*/configs/prod_default.yaml
