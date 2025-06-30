@@ -365,7 +365,7 @@ def main(args: DictConfig):
     
     # path to the orthogonal matrix (static)
     w_path = '/home/juro4948/ciip/logs/2025_06_08-14_09_50-model_resnet50-lr_0.0001-b_128-j_6-p_fp16/checkpoints/W.pt'
-    num_pairs = 10000 
+    num_pairs = 10000
 
     input_dtype = get_input_dtype(args.model.precision)
     autocast = get_autocast(args.model.precision)
@@ -441,6 +441,7 @@ def main(args: DictConfig):
     print(f'Length of paired L2 norms: {len(paired_l2_norms)}')
     print(f'Length of centroid L2 norms: {len(centroid_l2_norms)}')
     print(f'Length of cosine sims: {len(cosine_sims)}')
+    print(f'Model checkpoints: {model_checkpoints}')
     # now plot each
     # plt.plot(model_checkpoints, paired_l2_norms)
     plt.figure()
@@ -453,7 +454,7 @@ def main(args: DictConfig):
     plt.ylabel('Pairwise L2 Norms')
     plt.title('Pairwise S1-S2 L2 Norms over Orthogonal Cone Init Model Training Process (n={})'.format(num_pairs))
     plt.grid()
-    plt.savefig('pairwise-l2norm.png')
+    plt.savefig('pairwise-l2norm.png', bbox_inches='tight')
     plt.show()
 
     plt.figure()
@@ -462,7 +463,7 @@ def main(args: DictConfig):
     plt.ylabel('Centroid L2 Norm')
     plt.title('Centroid S1-S2 L2 Norm over Orthogonal Cone Init Model Training Process (n={})'.format(num_pairs))
     plt.grid()
-    plt.savefig('centroid-l2norm.png')
+    plt.savefig('centroid-l2norm.png', bbox_inches='tight')
     plt.show()
 
     plt.figure()
@@ -471,7 +472,7 @@ def main(args: DictConfig):
     plt.ylabel('Centroid Cosine Sim')
     plt.title('Centroid S1-S2 Cosine Sim over Orthogonal Cone Init Model Training Process (n={})'.format(num_pairs))
     plt.grid()
-    plt.savefig('pairwise-cosine-sim.png')
+    plt.savefig('centroid-cosine-sim.png', bbox_inches='tight')
     plt.show()
 
 
