@@ -12,22 +12,42 @@ from data import get_data
 
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 sys.path.insert(0, parent_dir)
-from model_ciip import CIIP
 from open_clip import get_input_dtype
 from open_clip_train.precision import get_autocast
 from open_clip_train.distributed import is_master
 
-LATEST_CHECKPOINT_NAME = "epoch_20.pt"
-CHECKPOINT_EPOCH = '20'
+import timm
+from torchgeo.models import ResNet50_Weights
 
+MODEL_NAME = "MoCo"
+
+### band statistics: mean & std
+# calculated from 50k data
+S1_MEAN = [-12.54847273, -20.19237134]
+S1_STD = [5.25697717, 5.91150917]
+
+S2A_MEAN = [752.40087073, 884.29673756, 1144.16202635, 1297.47289228, 1624.90992062, 2194.6423161, 2422.21248945, 2517.76053101, 2581.64687018, 2645.51888987, 2368.51236873, 1805.06846033]
+S2A_STD = [1108.02887453, 1155.15170768, 1183.6292542, 1368.11351514, 1370.265037, 1355.55390699, 1416.51487101, 1474.78900051, 1439.3086061, 1582.28010962, 1455.52084939, 1343.48379601]
+
+S2C_MEAN = [1605.57504906, 1390.78157673, 1314.8729939, 1363.52445545, 1549.44374991, 2091.74883118, 2371.7172463, 2299.90463006, 2560.29504086, 830.06605044, 22.10351321, 2177.07172323, 1524.06546312]
+S2C_STD = [786.78685367, 850.34818441, 875.06484736, 1138.84957046, 1122.17775652, 1161.59187054, 1274.39184232, 1248.42891965, 1345.52684884, 577.31607053, 51.15431158, 1336.09932639, 1136.53823676]
+
+
+def normalize(img, mean, std):
+    min_value = mean - 2 * std
+    max_value = mean + 2 * std
+    img = (img - min_value) / (max_value - min_value)
+    # img = np.clip(img, 0, 1).astype(np.float32)
+    return img
 
 def extract_embeddings(model, data, args, embedding_output_path):
     metrics = {}
     if not is_master(args):
         return metrics
     device = torch.device(args.device)
-    model.eval()
-
+    # Set eval mode
+    model['s1'].eval()
+    model['s2'].eval()
     # zero_shot_metrics = zero_shot_eval(model, data, epoch, args, tokenizer=tokenizer)
     # metrics.update(zero_shot_metrics)
 
@@ -39,13 +59,18 @@ def extract_embeddings(model, data, args, embedding_output_path):
             uid, filepath = data.get_sample_uid(idx) # TODO: i think this is correct?
             sample = data[idx]
             s1, s2 = sample
-            s1 = torch.tensor(s1).unsqueeze(0).to(device=device, dtype=input_dtype, non_blocking=True)
-            s2 = torch.tensor(s2).unsqueeze(0).to(device=device, dtype=input_dtype, non_blocking=True)
+            # Normalize
+            # s1 = [normalize(img, mean, std) for img, mean, std in zip(s1, S1_MEAN, S1_STD)]
+            s1 = [np.clip(img / 10000, 0, 1) for img in s1]
+            # s2 = [normalize(img, mean, std) for img, mean, std in zip(s2, S2C_MEAN, S2C_STD)]
+            s2 = [np.clip(img / 10000, 0, 1) for img in s2]
+            # To Tensor
+            s1 = torch.tensor(s1).unsqueeze(0).to(device=device, dtype=torch.float32, non_blocking=True)
+            s2 = torch.tensor(s2).unsqueeze(0).to(device=device, dtype=torch.float32, non_blocking=True)
 
             with autocast():
-                model_out = model.compute_embeddings(s1, s2)
-                s1_features = model_out["s1_features"].cpu()
-                s2_features = model_out["s2_features"].cpu()
+                s1_features = model["s1"](s1).cpu()
+                s2_features = model["s2"](s2).cpu()
 
             # read metadata
             # read json at filepath
@@ -69,29 +94,29 @@ def extract_embeddings(model, data, args, embedding_output_path):
 
 
 def main(args, start_epoch=0):
-    
+    # Load Model
+    model_s1 = timm.create_model("resnet50", pretrained=False, in_chans=2, num_classes=10)
+    model_s2 = timm.create_model("resnet50", pretrained=False, in_chans=13, num_classes=10)
+    if MODEL_NAME is not None:
+        if MODEL_NAME == "MoCo":
+            weights_s1 = ResNet50_Weights.SENTINEL1_ALL_MOCO
+            weights_s2 = ResNet50_Weights.SENTINEL2_ALL_MOCO
+        elif MODEL_NAME == "DINO":
+            weights_s1 = ResNet50_Weights.SENTINEL1_ALL_DECUR
+            weights_s2 = ResNet50_Weights.SENTINEL2_ALL_DINO
+        model_s1.load_state_dict(weights_s1.get_state_dict(progress=True), strict=False)
+        model_s2.load_state_dict(weights_s2.get_state_dict(progress=True), strict=False)
+    else:
+        print("Continue with Randomly Initialized Weights.")
 
-  
-    model = CIIP(embed_dim=args.embed_dim,
-    s1_resolution=args.s1_resolution,
-    s1_layers=args.s1_layers,
-    s1_width=args.width,
-    s1_patch_size=args.s1_patch_size, # used by transformer 
-    s1_bands=len(args.s1_bands),
-    s2_resolution=args.s2_resolution,
-    s2_layers=args.s2_layers, #Resnet-34
-    s2_width=args.width,
-    s2_patch_size=args.s2_patch_size, # used by transformer
-    s2_bands=len(args.s2_bands),
-    )
+    # Drop Head
+    model_s1 = torch.nn.Sequential(*list(model_s1.children())[:-1])
+    model_s2 = torch.nn.Sequential(*list(model_s2.children())[:-1])
 
-    # load checkpoint
-    checkpoint = torch.load(os.path.join(args.checkpoint_path, LATEST_CHECKPOINT_NAME))
-    model.load_state_dict(checkpoint['state_dict'])
-    print(f"Loaded model from {os.path.join(args.checkpoint_path, LATEST_CHECKPOINT_NAME)}")
+    model_s1 = model_s1.to(args.device)
+    model_s2 = model_s2.to(args.device)
 
-    model = model.to(args.device)
-
+    model = {'s1': model_s1, 's2': model_s2}
   
 #   exclude = lambda n, p: p.ndim < 2 or "bn" in n or "ln" in n or "bias" in n or 'logit_scale' in n
 #   include = lambda n, p: not exclude(n, p)
@@ -120,7 +145,7 @@ def main(args, start_epoch=0):
     scaler = None 
 
 
-    embedding_output_path = os.path.join(args.root, 'extracted_embeddings', f'epoch{CHECKPOINT_EPOCH}_embeddings', 'val')
+    embedding_output_path = os.path.join(args.root, 'extracted_embeddings', f'SSL4EO_{MODEL_NAME}_embeddings', 'val')
     os.makedirs(embedding_output_path, exist_ok=True)
     print(f'Saving embeddings to {embedding_output_path}')
     extract_embeddings(model, val_dataset, args, embedding_output_path=embedding_output_path)
@@ -176,6 +201,9 @@ if __name__ == "__main__":
   import argparse
   parser = argparse.ArgumentParser()
   parser.add_argument('-c', '--config_file', default='ciip/open_clip_train/config_train.ini')
+  # For debug mode
+  # parser.add_argument('-c', '--config_file', default='/home/zhwa7649/ciip/ciip/open_clip_train/config_train.ini')
+
   command_line_args = parser.parse_args()
 
   if os.path.isfile(command_line_args.config_file):
