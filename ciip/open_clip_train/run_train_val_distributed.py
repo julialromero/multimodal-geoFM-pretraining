@@ -92,7 +92,7 @@ def main(args: DictConfig, start_epoch=0):
 
     # fully initialize distributed device environment
     device = init_distributed_device(args.datamodule)
-    print('After distribution: ', args.datamodule)
+    # print('After distribution: ', args.datamodule)
 
     # get the name of the experiments
     if True: #args.train.name is None:
@@ -450,6 +450,21 @@ def main(args: DictConfig, start_epoch=0):
         # return
 
     loss = create_loss(args.datamodule)
+
+    # MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT=100000
+    # torch.cuda.memory._record_memory_history(
+    #    max_entries=MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT
+    # )
+
+    # save random model init weights
+    if args.io.save_logs and is_master(args):
+        # save the model weights before training starts
+        torch.save(
+            original_model.state_dict(),
+            os.path.join(args.io.checkpoint_path, f"epoch_init.pt"),
+        )
+        logging.info(f'Saved initial model weights to {args.io.checkpoint_path}.')
+
 
     for epoch in range(start_epoch, args.train.epochs):
         if is_master(args):

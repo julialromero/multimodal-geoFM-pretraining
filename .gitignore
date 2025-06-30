@@ -17,3 +17,6 @@ dist/
 # don't save the model checkpoints
 checkpoints/ 
 log/
+
+
+*/ciip/open_clip_train/configs/prod_default.yaml

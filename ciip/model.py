@@ -108,7 +108,7 @@ class ResNet50(ResNet):
         self.apply_orthogonal_matrix = False
         # self.W = None 
         # Initialize W as a 512x512 matrix identity matrix
-        # self.register_buffer("W", torch.eye(512, 512))
+        # self.register_buffer("W", None)
         self.conv1 = nn.Conv2d(in_chans, 64, kernel_size=7, stride=2, padding=3, bias=False)
 
     def _forward_impl(self, x: torch.Tensor) -> torch.Tensor:

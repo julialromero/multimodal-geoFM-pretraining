@@ -169,10 +169,14 @@ class EmbeddingDataset(Dataset):
         with self.autocast():
             if self.encoder in ('s1', 'both'):
                 out1 = self.model.encoder_s1(s1)
+                # NORMALIZE
+                out1  = out1 / out1.norm(dim=1, keepdim=True)
                 result['s1'] = out1.cpu()
 
             if self.encoder in ('s2', 'both'):
                 out2 = self.model.encoder_s2(s2)
+                # NORMALIZE
+                out2 = out2 / out2.norm(dim=1, keepdim=True)
                 result['s2'] = out2.cpu()
 
 
@@ -355,19 +359,20 @@ from data import get_data
 def main(args: DictConfig):
     print('----')
 
-    # path to the directory containing the experiment model checkpoints
+    # path to the director
+    # y containing the experiment model checkpoints
     chkpt_path = '/local/ms-data/SSL4EO/model/RandomInit-bs128-fp16-orthogonaloutput/checkpoints/'
     
     # path to the orthogonal matrix (static)
     w_path = '/home/juro4948/ciip/logs/2025_06_08-14_09_50-model_resnet50-lr_0.0001-b_128-j_6-p_fp16/checkpoints/W.pt'
-    num_pairs = 200
+    num_pairs = 10000 
 
     input_dtype = get_input_dtype(args.model.precision)
     autocast = get_autocast(args.model.precision)
     
     data = get_data(args)
     train_dataset = data['train'].dataloader.dataset
-    subset_indices = np.random.RandomState(42).choice(len(train_dataset), 200, replace=False)
+    subset_indices = np.random.RandomState(42).choice(len(train_dataset), num_pairs, replace=False)
     subset_dataset = torch.utils.data.Subset(train_dataset, subset_indices)
     
     models = os.listdir(chkpt_path)
@@ -375,9 +380,8 @@ def main(args: DictConfig):
     # rename epoch_init to epoch_0
     models = [m.replace('epoch_init', 'epoch_0') for m in models]
     models = sorted(models, key=lambda x: int(x.split('_')[1].split('.')[0]))
-    print(models)
 
-    #
+    
     # centroids = []
     paired_l2_norms = []
     centroid_l2_norms = []
@@ -415,7 +419,7 @@ def main(args: DictConfig):
         print(f'---- MODEL {model_epoch_fn} -----')
         # Calculate L2 norm between s1 and s2 
         l2_norm_s1_s2 = np.linalg.norm(s1.values - s2.values, axis=1)
-        print(f'L2 norm bw S1-S2: {l2_norm_s1_s2}')
+        # print(f'L2 norm bw S1-S2: {l2_norm_s1_s2}')
         paired_l2_norms.append(l2_norm_s1_s2)
         
 
@@ -433,26 +437,42 @@ def main(args: DictConfig):
         cosine_sims.append(cos_sim_centroids)
 
     
-
+    print(f'Length of model checkpoints: {len(model_checkpoints)}')
+    print(f'Length of paired L2 norms: {len(paired_l2_norms)}')
+    print(f'Length of centroid L2 norms: {len(centroid_l2_norms)}')
+    print(f'Length of cosine sims: {len(cosine_sims)}')
     # now plot each
-    plt.plot(model_checkpoints, paired_l2_norms)
+    # plt.plot(model_checkpoints, paired_l2_norms)
+    plt.figure()
+    # plt.hist(l2_norm_s1_s2, bins=20, alpha=0.7, label=model_checkpoints, color='blue')
+    # plot mean and std of l2 norms
+    mean_l2_norms = [np.mean(norms) for norms in paired_l2_norms]
+    std_l2_norms = [np.std(norms) for norms in paired_l2_norms]
+    plt.errorbar(model_checkpoints, mean_l2_norms, yerr=std_l2_norms, fmt='o', capsize=5, label='Mean ± Std Dev', color='blue', linestyle='-')
     plt.xlabel('Model checkpoints')
     plt.ylabel('Pairwise L2 Norms')
-    plt.title('Pairwise S1-S2 L2 Norms over Orthogonal Cone Init Model Training Process')
+    plt.title('Pairwise S1-S2 L2 Norms over Orthogonal Cone Init Model Training Process (n={})'.format(num_pairs))
+    plt.grid()
     plt.savefig('pairwise-l2norm.png')
+    plt.show()
 
-    plt.plot(model_checkpoints, centroid_l2_norms)
+    plt.figure()
+    plt.plot(model_checkpoints, centroid_l2_norms, marker='o')
     plt.xlabel('Model checkpoints')
     plt.ylabel('Centroid L2 Norm')
-    plt.title('Centroid S1-S2 L2 Norm over Orthogonal Cone Init Model Training Process')
+    plt.title('Centroid S1-S2 L2 Norm over Orthogonal Cone Init Model Training Process (n={})'.format(num_pairs))
+    plt.grid()
     plt.savefig('centroid-l2norm.png')
+    plt.show()
 
-    plt.plot(model_checkpoints, cosine_sims)
+    plt.figure()
+    plt.plot(model_checkpoints, cosine_sims, marker='o')
     plt.xlabel('Model checkpoints')
     plt.ylabel('Centroid Cosine Sim')
-    plt.title('Centroid S1-S2 Cosine Sim over Orthogonal Cone Init Model Training Process')
+    plt.title('Centroid S1-S2 Cosine Sim over Orthogonal Cone Init Model Training Process (n={})'.format(num_pairs))
+    plt.grid()
     plt.savefig('pairwise-cosine-sim.png')
-
+    plt.show()
 
 
 

@@ -10,6 +10,7 @@ import torch
 import torch.nn.functional as F
 
 from torch.nn.parallel.distributed import DistributedDataParallel
+from torch.autograd.profiler import record_function
 
 try:
     import wandb
@@ -81,6 +82,19 @@ def backward(total_loss, scaler):
         scaler.scale(total_loss).backward()
     else:
         total_loss.backward()
+
+TIME_FORMAT_STR: str = "%b_%d_%H_%M_%S"
+from datetime import datetime, timedelta
+def trace_handler(prof: torch.profiler.profile):
+   # Prefix for file names.
+   timestamp = datetime.now().strftime(TIME_FORMAT_STR)
+   file_prefix = f'/home/juro4948/ciip/mem_snapshots/{timestamp}_{prof.step}'
+
+   # Construct the trace file.
+   prof.export_chrome_trace(f"{file_prefix}.json.gz")
+
+   # Construct the memory timeline file.
+   prof.export_memory_timeline(f"{file_prefix}.html", device="cuda:0")
 
 
 def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist_model, args, tb_writer=None):

@@ -104,9 +104,32 @@ def main(args: DictConfig, start_epoch=0):
         pass
     else:
         checkpoint = torch.load(chkpt_path)
-        checkpoint['state_dict'] = {k.replace('module.', ''): v for k, v in checkpoint['state_dict'].items()}
-        model.load_state_dict(checkpoint['state_dict'])
-        print(f"Loaded model from {chkpt_path}")
+        if 'epoch_init' in chkpt_path:
+            print(f"Loading model from {chkpt_path} for initialization")
+            state_dict = {k.replace('module.', ''): v for k, v in checkpoint.items()}
+            model.load_state_dict(state_dict)
+        else:
+            checkpoint['state_dict'] = {k.replace('module.', ''): v for k, v in checkpoint['state_dict'].items()}
+            # print(checkpoint['state_dict']['encoder_s1.W'])
+            if 'encoder_s1.W' in checkpoint['state_dict']:
+                print(f"removing encoder_s1.W from state_dict")
+                del checkpoint['state_dict']['encoder_s1.W']
+            model.load_state_dict(checkpoint['state_dict'])
+            model.encoder_s1.apply_orthogonal_matrix = True
+            print(f"Loaded model from {chkpt_path}")
+
+        # set W parameter
+  
+    if 'W' in model.state_dict():
+        if  W_PATH is not None: 
+            raise ValueError(f"W is already in the model state dict, but also provided W_PATH: {W_PATH}. Please remove one of them.")
+        W = model.state_dict()['W']
+        print(f"Loaded W from model state dict, shape: {W.shape}")
+    elif W_PATH is not None and os.path.isfile(W_PATH):
+        W = torch.load(W_PATH)
+        model.encoder_s1.register_buffer('W', W)
+        print(f"Loaded W from {W_PATH}, shape: {W.shape}")
+    
 
     model = model.to(args.datamodule.device)
     data = get_data(args)
