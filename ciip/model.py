@@ -108,7 +108,7 @@ class ResNet50(ResNet):
         self.apply_orthogonal_matrix = False
         # self.W = None 
         # Initialize W as a 512x512 matrix identity matrix
-        # self.register_buffer("W", None)
+        self.register_buffer("W", None)
         self.conv1 = nn.Conv2d(in_chans, 64, kernel_size=7, stride=2, padding=3, bias=False)
 
     def _forward_impl(self, x: torch.Tensor) -> torch.Tensor:
@@ -129,28 +129,13 @@ class ResNet50(ResNet):
         x = torch.flatten(x, 1)
         x = self.fc(x)
 
+        x = F.normalize(x, p=2, dim=-1)
 
         if self.compute_orthogonal_matrix:
             print(f"S1:{self.is_s1}: returning embedding without applying orthogonal matrix")
             if self.is_s1:
                 pass
             return x
-        
-        # # --- CRITICAL CHECK 1: Inspect 'x' (features) BEFORE x @ W ---
-        # print(f"  Input 'x' (features) shape: {x.shape}, dtype: {x.dtype}, device: {x.device}")
-        # print(f"  Input 'x' stats: mean={x.mean().item():.6f}, std={x.std().item():.6f}, min={x.min().item():.6f}, max={x.max().item():.6f}")
-        # if x.isnan().any() or x.isinf().any():
-        #     print("!!! ERROR: NaNs/Infs found in 'x' (features) BEFORE x @ W. This means NaNs are coming from earlier ResNet layers. !!!")
-        #     import pdb; pdb.set_trace() # Pause execution
-                
-        # if self.is_s1:
-            
-        #     # --- CRITICAL CHECK 2: Inspect 'self.W' (orthogonal matrix) BEFORE x @ W ---
-        #     print(f"  self.W (matrix) shape: {self.W.shape}, dtype: {self.W.dtype}, device: {self.W.device}")
-        #     print(f"  self.W stats: mean={self.W.mean().item():.6f}, std={self.W.std().item():.6f}, min={self.W.min().item():.6f}, max={self.W.max().item():.6f}")
-        #     if self.W.isnan().any() or self.W.isinf().any():
-        #         print("!!! ERROR: NaNs/Infs found in 'self.W' (orthogonal matrix) BEFORE x @ W. This means W calculation is faulty. !!!")
-        #         import pdb; pdb.set_trace() # Pause execution
 
 
         if self.is_s1 and self.apply_orthogonal_matrix:
@@ -158,16 +143,8 @@ class ResNet50(ResNet):
                 raise ValueError("Orthogonal matrix W is not initialized. Set compute_orthogonal_matrix to True first.")
             x = x @ self.W
 
-
-        # # --- DEBUG CHECK 2: After applying W ---
-        # if torch.isnan(x).any() or torch.isinf(x).any():
-        #     print(f"DEBUG(ResNet50): NaNs/Infs found in S1 encoder output AFTER W application (rank {os.environ.get('LOCAL_RANK', 'N/A')}):")
-        #     print(f"  Output x stats: mean={x.mean().item():.4f}, std={x.std().item():.4f}, min={x.min().item():.4f}, max={x.max().item():.4f}")
-        #     # Optional: print a few values from the tensor
-        #     # print("Sample output values:", x.flatten()[:10]) 
-        #     import pdb; pdb.set_trace() # PAUSE EXECUTION HERE TO INSPECT
-        #     raise ValueError("NaNs/Infs found in the output after applying the orthogonal transformation.")
-
+            # normalize again after applying W
+            x = F.normalize(x, p=2, dim=-1)
         return x
 
 

@@ -125,20 +125,72 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
             #log
             logging.info("Computing optimal orthogonal mapping W for s1 to s2...")
             base_dataset = dataloader.dataset
-            random.seed(42)
-            sample_indices = random.sample(range(len(base_dataset)), 2_000)
-            subset = Subset(base_dataset, sample_indices)
-            loader = DataLoader(subset, batch_size=300, shuffle=False)
-            batch = next(iter(loader))
+            loader = DataLoader(base_dataset, batch_size=1000, shuffle=False, num_workers=args.model.workers, pin_memory=True)
+            it = iter(loader)
+            batch = next(it)
             s1, s2 = batch
             s1 = s1.to(device=device, dtype=input_dtype, non_blocking=True)
             s2 = s2.to(device=device, dtype=input_dtype, non_blocking=True)
+
+
+            
+            ###### COMPUTE TRAINING ORTHOGONAL MAPPING ######
+            ####### WARMUP FOR ORTHOGONAL MAPPING #######
+            logging.info("Computing orthogonal matrix for **TRAIN**...")
+            NUM_WARMUP_BATCHES = 100
+            model.train()
+            for i, (s1, s2) in enumerate(loader):
+                s1 = s1.to(device)
+                s2 = s2.to(device)
+                if hasattr(model, "module"):
+                    _ = model.module.encode_s1(s1)
+                    _ = model.module.encode_s2(s2)
+                else:
+                    _ = model.encode_s1(s1)
+                    _ = model.encode_s2(s2)
+                if i >= NUM_WARMUP_BATCHES:
+                    print(f"Warmup for orthogonal mapping completed after {i} batches.")
+                    break
+
+            
             if hasattr(model, "module"):
                 W, stats = model.module.compute_orthogonal_matrix(s1, s2)
             else:
                 W, stats = model.compute_orthogonal_matrix(s2, s1)
-            logging.info(f"Computed W: {W.shape}")
-            logging.info(f"Orthogonal matrix stats: {stats}")
+            logging.info(f"Orthogonal matrix train stats: {stats}")
+
+            # save stats to log directory
+            if args.io.save_logs:
+                with open(os.path.join(args.io.checkpoint_path, "orthogonal_matrix_stats_train.json"), "w") as f:
+                    json.dump(stats, f, indent=4)
+                W_path = os.path.join(args.io.checkpoint_path, "W_train.pt")
+                torch.save(W, W_path)
+                logging.info(f"Saved orthogonal matrix W to {W_path}")
+
+            # apply orthogonal mapping to modeltorch.save(
+            
+
+            if hasattr(model, "module"):
+                del model.module.encoder_s1._buffers["W"]
+                model.module.encoder_s1.register_buffer("W", None)
+                model.module.encoder_s1.apply_orthogonal_matrix = False
+                
+            else:
+                del model.encoder_s1._buffers["W"]
+                model.encoder_s1.register_buffer("W", None)
+                model.encoder_s1.apply_orthogonal_matrix = False
+            print("W is set to None in the model, so that it does not apply orthogonal mapping during training.")
+
+
+            ###### EVAL ORTHOGOANL MATRIX COMPUTATION ######
+            logging.info("Computing orthogonal matrix for **EVAL**...")
+            model.eval()
+            if hasattr(model, "module"):
+                W, stats = model.module.compute_orthogonal_matrix(s1, s2)
+            else:
+                W, stats = model.compute_orthogonal_matrix(s2, s1)
+            logging.info(f"Orthogonal matrix eval stats: {stats}")
+
             # save stats to log directory
             if args.io.save_logs:
                 with open(os.path.join(args.io.checkpoint_path, "orthogonal_matrix_stats.json"), "w") as f:
@@ -149,6 +201,19 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 logging.info(f"Saved orthogonal matrix W to {W_path}")
 
 
+
+            # save the model weights after the warm up phase -> random weights with appropriate batch norm stats
+            torch.save(
+            model.state_dict(),
+                os.path.join(args.io.checkpoint_path, f"epoch_init.pt"),
+            )
+            logging.info(f'Saved initial model weights to {args.io.checkpoint_path}.')
+
+            # delete  dataloader
+            del loader
+
+            
+    model.train()
     losses_m = {}
     batch_time_m = AverageMeter()
     data_time_m = AverageMeter()

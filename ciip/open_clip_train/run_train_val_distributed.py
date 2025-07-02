@@ -367,6 +367,14 @@ def main(args: DictConfig, start_epoch=0):
             # loading a bare (model only) checkpoint for fine-tune or evaluation
             model.load_state_dict(checkpoint)
             logging.info(f"=> loaded checkpoint '{args.io.resume}' (epoch {start_epoch})")
+    else:
+        logging.info(f"=> no checkpoint found at '{args.io.resume}', starting from scratch.")
+        # save the omegaconf config to a yaml file
+        if is_master(args):
+            config_file = os.path.join(args.io.logs, "prod_default.yaml")
+            with open(config_file, "w") as f:
+                OmegaConf.save(args, f)
+            logging.info(f"Saved config to {config_file}")
 
 
     if args.dataset.use_transforms:
@@ -455,16 +463,6 @@ def main(args: DictConfig, start_epoch=0):
     # torch.cuda.memory._record_memory_history(
     #    max_entries=MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT
     # )
-
-    # save random model init weights
-    if args.io.save_logs and is_master(args):
-        # save the model weights before training starts
-        torch.save(
-            original_model.state_dict(),
-            os.path.join(args.io.checkpoint_path, f"epoch_init.pt"),
-        )
-        logging.info(f'Saved initial model weights to {args.io.checkpoint_path}.')
-
 
     for epoch in range(start_epoch, args.train.epochs):
         if is_master(args):

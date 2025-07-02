@@ -9,7 +9,7 @@ from torch import nn
 from torchgeo.models import resnet18, ResNet18_Weights, ResNet50_Weights, resnet50
 from model import ModifiedResNet, ResNet50 #, S1Transformer, S2Transformer
 # VisionTransformer
-
+import logging
 
 
 ##############################################################
@@ -33,9 +33,10 @@ def compute_optimal_orthogonal_mapping(X: torch.Tensor, Y: torch.Tensor) -> torc
     X = X.T
     Y = Y.T
 
-    # Optional: normalize to unit norm
-    X = X / X.norm(dim=0, keepdim=True).clamp(min=1e-8)
-    Y = Y / Y.norm(dim=0, keepdim=True).clamp(min=1e-8)
+    # Note, these are already be normalized when input, but maybe it doesnt hurt to keep tihs code?
+    # #  normalize to unit norm
+    # X = X / X.norm(dim=0, keepdim=True).clamp(min=1e-8)
+    # Y = Y / Y.norm(dim=0, keepdim=True).clamp(min=1e-8)
 
     # Compute cross-covariance matrix
     A = Y @ X.T  # shape: [dim, dim]
@@ -280,12 +281,6 @@ class CIIP(nn.Module):
 
     def encode_s2(self, s2):
         return self.encoder_s2(s2.type(self.dtype_s2))
-
-    def set_orthogonal_transformation(self, W: torch.Tensor):
-        """Set the orthogonal transformation matrix W for S1 modality."""
-        if W is not None and W.shape[0] != W.shape[1]:
-            raise ValueError("Orthogonal transformation matrix W must be square.")
-        self.W = W
     
     # def encode_text(self, text):
     #     x = self.token_embedding(text).type(self.dtype)  # [batch_size, n_ctx, d_model]
@@ -303,12 +298,13 @@ class CIIP(nn.Module):
     #     return x
 
     def forward(self, s1, s2):
+        # returns normalized logits
         s1_features = self.encode_s1(s1)
         s2_features = self.encode_s2(s2)
 
-        # normalized features
-        s1_features  = s1_features  / s1_features.norm(dim=1, keepdim=True)
-        s2_features = s2_features / s2_features.norm(dim=1, keepdim=True)
+        # # normalized features
+        # s1_features  = s1_features  / s1_features.norm(dim=1, keepdim=True)
+        # s2_features = s2_features / s2_features.norm(dim=1, keepdim=True)
 
         # cosine similarity as logits
         logit_scale = self.logit_scale.exp()
@@ -323,34 +319,18 @@ class CIIP(nn.Module):
             "logit_scale": logit_scale
             }
 
-    
 
         return out_dict
+    
 
     def compute_embeddings(self, s1, s2):
         s1_features = self.encode_s1(s1)
         s2_features = self.encode_s2(s2)
 
-        # # normalized features
+        # these should be normalized already
+        # # # normalized features
         # s1_features  = s1_features  / s1_features.norm(dim=1, keepdim=True)
         # s2_features = s2_features / s2_features.norm(dim=1, keepdim=True)
-
-        out_dict = {
-            "s1_features": s1_features,
-            "s2_features": s2_features,
-            }
-
-    
-        return out_dict
-    
-
-    def compute_embeddings(self, s1, s2):
-        s1_features = self.encode_s1(s1)
-        s2_features = self.encode_s2(s2)
-
-        # # normalized features
-        s1_features  = s1_features  / s1_features.norm(dim=1, keepdim=True)
-        s2_features = s2_features / s2_features.norm(dim=1, keepdim=True)
 
         out_dict = {
             "s1_features": s1_features,
@@ -366,44 +346,32 @@ class CIIP(nn.Module):
         
         s1_layer1_features = self.encode_s1(s1)
         s2_layer1_features = self.encode_s2(s2)
-        # # print dtype
-        # print(f"S1 Layer1 Features dtype: {s1_layer1_features.dtype}, device: {s1_layer1_features.device}")
-        # print(f"S2 Layer1 Features dtype: {s2_layer1_features.dtype}, device: {s2_layer1_features.device}")
 
 
         # Compute centroids BEFORE alignment (mean over batch and spatial dims)
         centroid_s1 = s1_layer1_features.mean(dim=0) # shape (num_samples, num_feats) ## #.mean(dim=[0, 2, 3])  # shape: (feat_dim,)
         centroid_s2 = s2_layer1_features.mean(dim=0) #.mean(dim=[0, 2, 3])
 
+        # normalize the centroids as well (to compare directions)
+        centroid_s1 = centroid_s1 / centroid_s1.norm()
+        centroid_s2 = centroid_s2 / centroid_s2.norm()
+  
         l2_before = torch.norm(centroid_s1 - centroid_s2, p=2).item()
         cos_before = F.cosine_similarity(centroid_s1.unsqueeze(0), centroid_s2.unsqueeze(0)).item()
-
-        print(f"Before alignment - L2 norm between centroids: {l2_before:.6f}")
-        print(f"Before alignment - Cosine similarity between centroids: {cos_before:.6f}")
-
-        s1_flat = s1_layer1_features #.permute(0, 2, 3, 1).reshape(-1, s1_layer1_features.shape[1])  # shape: [300*66*66, 64]
-        s2_flat = s2_layer1_features #.permute(0, 2, 3, 1).reshape(-1, s2_layer1_features.shape[1])  # shape: [300*66*66, 64]
-
-        # # adjust features to be shape (num_samples, featuredim)
-        # print(f"S1 Layer1 Features Shape: {s1_flat.shape}")
-        # print(f"S2 Layer1 Features Shape: {s2_flat.shape}")
-
-        # normalize features
-        s1_flat = s1_flat / s1_flat.norm(dim=1, keepdim=True)
-        s2_flat = s2_flat / s2_flat.norm(dim=1, keepdim=True)
+        logging.info(f"--- Before Orthogonal Transformation ---")
+        logging.info(f"L2 norm between centroids: {l2_before:.6f}")
+        logging.info(f"Cosine similarity between centroids: {cos_before:.6f}")
 
 
-        W = compute_optimal_orthogonal_mapping(s2_flat, s1_flat)
+        W = compute_optimal_orthogonal_mapping(s2_layer1_features, s1_layer1_features)
         W = W.to(device=s1.device, dtype=torch.float32, non_blocking=True)
 
-        s1_flat = s1_flat.to(dtype=torch.float32)
+        s1_layer1_features = s1_layer1_features.to(dtype=torch.float32)
+        s1_aligned = s1_layer1_features @ W
+    
 
-        # print data types and shapes
-        # print(f"S1 Flat Features Shape: {s1_flat.shape}, dtype: {s1_flat.dtype}, device: {s1_flat.device}")
-        # print(f"W  dtype: {W.dtype}, device: {W.device}")
-        s1_transformed_flat = s1_flat @ W
-        s1_aligned = s1_transformed_flat #.reshape(B, H, P, C).permute(0, 3, 1, 2)
-            
+        # Normalize the aligned features
+        s1_aligned = s1_aligned / s1_aligned.norm(dim=1, keepdim=True)
 
         # Compute centroids AFTER alignment
         centroid_s1_aligned = s1_aligned.mean(dim=0) #.mean(dim=[0, 2, 3])
@@ -411,8 +379,9 @@ class CIIP(nn.Module):
         l2_after = torch.norm(centroid_s1_aligned - centroid_s2, p=2).item()
         cos_after = F.cosine_similarity(centroid_s1_aligned.unsqueeze(0), centroid_s2.unsqueeze(0)).item()
 
-        print(f"After alignment - L2 norm between centroids: {l2_after:.6f}")
-        print(f"After alignment - Cosine similarity between centroids: {cos_after:.6f}")
+        logging.info(f"--- After Orthogonal Transformation ---")
+        logging.info(f"L2 norm between centroids: {l2_after:.6f}")
+        logging.info(f"Cosine similarity between centroids: {cos_after:.6f}")
 
 
         self.encoder_s1.compute_orthogonal_matrix = False
