@@ -298,6 +298,15 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
 
                 backward(total_loss, scaler)
 
+        # log gradients
+        # logit_scale_param = unwrap_model(model).logit_scale
+        # if logit_scale_param.grad is not None:
+        #     grad_norm = logit_scale_param.grad.data.norm().item()
+        #     logit_scale_val = logit_scale_param.item()
+        #     logging.info(f"Logit scale: {logit_scale_val:.3f}, grad norm: {grad_norm:.3e}")
+        # else:
+        #     logging.warning("Logit scale grad is None!")
+
         if scaler is not None:
             if args.datamodule.horovod:
                 optimizer.synchronize()

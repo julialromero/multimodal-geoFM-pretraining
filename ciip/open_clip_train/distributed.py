@@ -111,6 +111,11 @@ def init_distributed_device(args):
         device = 'cpu'
     args.device = device
     device = torch.device(device)
+    # print setup
+    if args.distributed:
+        print(f"Distributed training: {args.world_size} GPUs, rank {args.rank}, local rank {args.local_rank}")
+    else:
+        print("Single GPU training")
     return device
 
 

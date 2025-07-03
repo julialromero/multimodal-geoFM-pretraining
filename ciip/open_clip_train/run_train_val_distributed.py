@@ -1,9 +1,12 @@
+import os
+import sys
+from datetime import datetime
+import torch
 import glob
 import logging
-import os
 import re
 import subprocess
-import sys
+import time
 import random
 import hydra
 from datetime import datetime
@@ -40,12 +43,92 @@ from torchvision.transforms import v2
 
 # from open_clip import create_model_and_transforms #, trace_model, get_tokenizer, create_loss
 from open_clip_train.data import get_data
-from open_clip_train.distributed import is_master, init_distributed_device, broadcast_object
+from open_clip_train.distributed import is_master, init_distributed_device, broadcast_object, world_info_from_env
 from open_clip_train.logger import setup_logging
 from open_clip_train.params import parse_args
 from open_clip_train.scheduler import cosine_lr, const_lr, const_lr_cooldown
 from open_clip_train.train import train_one_epoch, evaluate
 from open_clip_train.file_utils import pt_load, check_exists, start_sync_process, remote_sync
+
+
+
+def allocate_gpu_memory_for_fragmentation(device: torch.device, current_rank: int = 0):
+    """
+    Attempts to allocate a large tensor to manage GPU memory fragmentation.
+    The allocated tensor is returned and *must be kept in scope* by the caller
+    for the memory to remain reserved.
+    """
+    allocated_tensor = None
+    allocation_sizes_gb = [80, 70, 64, 55] # Example sizes
+
+    print(f"Rank {current_rank}: Attempting to pre-allocate GPU memory on {device} for fragmentation management.")
+
+    for size_gb in allocation_sizes_gb:
+        try:
+            num_elems = size_gb * 1024**3 // 4 # Convert GB to number of float32 elements
+            print(f"Rank {current_rank}: Attempting to allocate {size_gb:.2f} GB ({num_elems * 4 / 1024**3:.2f} GiB) on {device}...")
+            
+            # Allocate on the specific device for this process
+            temp_tensor = torch.empty(num_elems, dtype=torch.float32, device=device)
+            # Perform a small operation to ensure memory is truly committed, if desired
+            temp_tensor.zero_() 
+
+            allocated_tensor = temp_tensor # Store the reference
+            print(f"Rank {current_rank}: Successfully allocated {size_gb:.2f} GB on {device}. Holding memory.")
+            
+            # Run nvidia-smi after successful allocation
+            print(f"Rank {current_rank}: nvidia-smi after successful allocation:")
+            if os.environ.get("SLURM_PROCID", "0") == "0":
+                os.system("nvidia-smi")
+            break # Exit loop if allocation is successful
+        except torch.cuda.OutOfMemoryError:
+            print(f"Rank {current_rank}: Failed to allocate {size_gb:.2f} GB on {device}. GPU out of memory (fragmentation likely). Trying smaller size.")
+        except Exception as e:
+            print(f"Rank {current_rank}: An unexpected error occurred during allocation: {e}")
+            break # Exit loop on other unexpected errors
+
+    if allocated_tensor is None:
+        print(f"Rank {current_rank}: Unable to allocate any substantial memory on {device}. Proceeding without explicit large reservation.")
+        # os.system("nvidia-smi")
+ 
+    if os.environ.get("SLURM_PROCID", "0") == "0":
+        print(f"Rank {current_rank} | Allocated: {torch.cuda.memory_allocated()/1024**2:.1f} MB | Reserved: {torch.cuda.memory_reserved()/1024**2:.1f} MB")
+    
+    return allocated_tensor # Return the tensor so it stays in scope in the main function
+
+
+torch.cuda.current_device()  # <-- or torch.empty(1, device='cuda')
+torch.cuda.synchronize()
+
+
+def setup_slurm_logging():
+    local_rank, global_rank, world_size = world_info_from_env()
+    date_dir = os.environ.get('MY_LOG_BASE_DIR')
+    log_dir = os.path.join(date_dir, 'torchrun_logs')
+    os.makedirs(log_dir, exist_ok=True)
+    stdout_log = os.path.join(log_dir, f"stdout_rank{global_rank}.log")
+    stderr_log = os.path.join(log_dir, f"stderr_rank{global_rank}.log")
+
+    if global_rank == 0:
+        # Tee output to both SLURM .out and file
+        class Tee:
+            def __init__(self, *streams):
+                self.streams = streams
+            def write(self, data):
+                for s in self.streams:
+                    s.write(data)
+                    s.flush()
+            def flush(self):
+                for s in self.streams:
+                    s.flush()
+        sys.stdout = Tee(open(stdout_log, "w", buffering=1), sys.__stdout__)
+        sys.stderr = Tee(open(stderr_log, "w", buffering=1), sys.__stderr__)
+    else:
+        # Only log to file for other ranks
+        sys.stdout = open(stdout_log, "w", buffering=1)
+        sys.stderr = open(stderr_log, "w", buffering=1)
+
+    print(f"[Rank {global_rank}] Logging started.", flush=True)
 
 
 LATEST_CHECKPOINT_NAME = "epoch_latest.pt"
@@ -80,7 +163,20 @@ def get_latest_checkpoint(path: str, remote : bool):
 @hydra.main(config_path="configs", config_name=CONF)
 # def main(args):
 def main(args: DictConfig, start_epoch=0):
+
+#     # record memory
+#     MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT=10000
+#     torch.cuda.memory._record_memory_history(
+#        max_entries=MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT
+#    )
+
+
     # args = parse_args(args)
+    args.io.logs = os.environ.get('MY_LOG_BASE_DIR')
+    device = init_distributed_device(args.datamodule)
+    local_rank, global_rank, world_size = world_info_from_env()
+
+    setup_slurm_logging()
 
     if torch.cuda.is_available():
         # This enables tf32 on Ampere GPUs which is only 8% slower than
@@ -89,10 +185,35 @@ def main(args: DictConfig, start_epoch=0):
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.benchmark = True
         torch.backends.cudnn.deterministic = False
+        
+        
+    _reserved_memory_tensor = allocate_gpu_memory_for_fragmentation(device, current_rank=global_rank)
+    file_monitor_dir = os.environ.get('MY_LOG_BASE_DIR')
+    check_path = os.path.join(file_monitor_dir, 'data_extraction_done.txt')
+    temp_path = f'/tmp/jromero5/allocated_{local_rank}.txt'
+    os.makedirs(os.path.dirname(temp_path), exist_ok=True)
+    with open(temp_path, 'w') as f:
+        f.write(f"Allocated {os.environ.get('SLURM_PROCID', '-1')} {os.environ.get('CUDA_VISIBLE_DEVICES', '-1')}")
+    
+    extracting_data = True
+    while extracting_data:
+        time.sleep(30)
+        now =datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        if os.path.exists(check_path):
+            extracting_data = False
+            print(f'{now} | File found, continuing with training')
+        else:
+            print(f'{now} | File not found, waiting for data extraction to finish: {check_path}')
+            # os.system("nvidia-smi")
 
-    # fully initialize distributed device environment
-    device = init_distributed_device(args.datamodule)
-    # print('After distribution: ', args.datamodule)
+    # delete the allocatd tensor to free up memory
+    if os.environ.get("SLURM_PROCID", "0") == "0":
+        print(f"BEFORE FREEING TENSOR: Rank {args.datamodule.rank} | Allocated: {torch.cuda.memory_allocated()/1024**2:.1f} MB | Reserved: {torch.cuda.memory_reserved()/1024**2:.1f} MB")
+        print('####### DELETING 80GB ALLOCATED TENSOR #######')
+    del _reserved_memory_tensor
+    # torch.cuda.empty_cache()
+
+    
 
     # get the name of the experiments
     if True: #args.train.name is None:
@@ -459,6 +580,12 @@ def main(args: DictConfig, start_epoch=0):
 
     loss = create_loss(args.datamodule)
 
+    
+    date_str = datetime.now().strftime("%Y_%m_%d-%H_%M")
+    if is_master(args):
+        print(f'Before training: Rank {args.datamodule.rank} {os.system("nvidia-smi")}', flush=True)
+
+    
     # MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT=100000
     # torch.cuda.memory._record_memory_history(
     #    max_entries=MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT
@@ -468,7 +595,28 @@ def main(args: DictConfig, start_epoch=0):
         if is_master(args):
             logging.info(f'Start epoch {epoch}')
 
+        # Right before training each epoch
+        # torch.cuda.empty_cache()
+
+        # print(torch.cuda.memory_summary())
         train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist_model, args, tb_writer=writer)
+        # print time, rank
+        print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} | Rank {args.datamodule.rank} finished epoch {epoch} |  Allocated: {torch.cuda.memory_allocated()/1024**2:.1f} MB | Reserved: {torch.cuda.memory_reserved()/1024**2:.1f} MB | Memory summary: {torch.cuda.memory_summary(device=0, abbreviated=True)}', flush=True)
+       
+   
+        # if epoch < 10: 
+        #     try:
+        #         save_dir = os.path.join(args.io.mem_snapshots, date_str)
+        #         os.makedirs(save_dir, exist_ok=True)
+        #         save_path = os.path.join(save_dir, F'rank{args.datamodule.rank}_gpu{args.datamodule.local_rank}_epoch{epoch}.pickle')
+        #         torch.cuda.memory._dump_snapshot(save_path)
+        #         logging.info(f"Captured memory snapshot {save_path}")
+        #         print(f"Captured memory snapshot {save_path}")
+        #     except Exception as e:
+        #         logging.error(f"Failed to capture memory snapshot {e}")
+        #         print(f'Failed to capture memory snapshot {e}')
+        # else:
+        #     torch.cuda.memory._record_memory_history(enabled=None)
         completed_epoch = epoch + 1
 
         # if any(v in data for v in ('val', 'imagenet-val', 'imagenet-v2')):
@@ -496,9 +644,10 @@ def main(args: DictConfig, start_epoch=0):
 
                 # log out via comet
                 # TBD if we want the whole checkpoint dict or just some specific hyper-params . . .
-                # if(args.io.comet_ml):
-                #     experiment.log_parameters(checkpoint_dict)
-                #     log_model(experiment, model=original_model, model_name="CIIP!")
+                if is_master(args, local=args.log_local):
+                    if(args.io.comet_ml):
+                        experiment.log_parameters(checkpoint_dict)
+                        log_model(experiment, model=original_model, model_name="CIIP!")
 
         if args.train.delete_previous_checkpoint:
             previous_checkpoint = os.path.join(args.io.checkpoint_path, f"epoch_{completed_epoch - 1}.pt")

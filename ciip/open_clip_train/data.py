@@ -11,7 +11,7 @@ from multiprocessing import Value
 import rasterio
 import hydra
 import torch
-
+import time
 import numpy as np
 # import pandas as pd
 # import torch
@@ -63,7 +63,7 @@ class SSL4EODataset(Dataset):
         s1_samples = os.listdir(self.s1_dir)
         s2_samples = os.listdir(self.s2_dir)
 
-        assert len(s1_samples) == len(s2_samples), 'Number of locations in S1 and S2 should be the same'
+        assert len(s1_samples) == len(s2_samples), f'Number of locations in S1 and S2 should be the same: {s1: {len(s1_samples)}} vs {s2: {len(s2_samples)}}'
 
         self.num_locations = len(s1_samples)
         self.length = self.num_locations * 4
@@ -252,7 +252,9 @@ def get_ssl4eo_dataset(args, is_train, transforms):
 
 def dataset_to_datainfo(args, dataset, is_train):
     num_samples = len(dataset)
-    sampler = DistributedSampler(dataset) if args.datamodule.distributed and is_train else None
+    print(f'DistributedSampler: Distributed:{args.datamodule.distributed} | cuda device count: {torch.cuda.device_count()} | local rank: {args.datamodule.local_rank} | Node global rank {args.datamodule.rank} | Dataset size/n-samples: {len(dataset)} ')
+
+    sampler = DistributedSampler(dataset, num_replicas=torch.cuda.device_count(), rank=args.datamodule.local_rank) if args.datamodule.distributed and is_train else None
     shuffle = is_train and sampler is None
 
     dataloader = DataLoader(
@@ -262,9 +264,31 @@ def dataset_to_datainfo(args, dataset, is_train):
         num_workers=args.model.workers,
         pin_memory=True,
         sampler=sampler,
+        persistent_workers=True,
         # drop_last=is_train,
         drop_last=True,
     )
+    # print('---------------------')
+    # print(f'Testing num_workers for DataLoader with {args.datamodule.batch_size} batch size:')
+    # for nw in [4, 6, 8, 10, 16]:
+    #     start = time.time()
+    #     dataloader = DataLoader(
+    #         dataset,
+    #         batch_size=args.datamodule.batch_size,
+    #         shuffle=shuffle,
+    #         num_workers=nw,
+    #         pin_memory=True,
+    #         sampler=sampler,
+    #         persistent_workers=True,
+    #         drop_last=True,
+    #     )
+    #     for i, data in enumerate(dataloader):
+    #         if i == 3:  # adjust depending on size
+    #             break
+    #         print(f"batch: {i}; num_workers={nw}, time: {time.time() - start:.2f}s")
+
+
+
     dataloader.num_samples = num_samples
     dataloader.num_batches = len(dataloader)
 
