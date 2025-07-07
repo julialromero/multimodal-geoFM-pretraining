@@ -302,7 +302,12 @@ def main(args: DictConfig):
     # print(f"Loaded args: {args}")
 
     # path to the directory containing the experiment model checkpoints
-    chkpt_path = '/home/juro4948/ciip/logs/2025_07_02-12_18_14-model_resnet50-lr_0.0001-b_128-j_6-p_fp16/checkpoints'
+    chkpt_path = '/local/ms-data/SSL4EO/model/2025_07_03-RandomInit-bs4096/checkpoints'
+   
+    experiment_name = chkpt_path.split('/')[-2]
+    print(f'Experiment name: {experiment_name}')
+
+    # orthogonal experiment -> '/home/juro4948/ciip/logs/2025_07_02-12_18_14-model_resnet50-lr_0.0001-b_128-j_6-p_fp16/checkpoints'
  
     # path to the orthogonal matrix (static)
     w_path = os.path.join(chkpt_path, 'W.pt') if os.path.exists(os.path.join(chkpt_path, 'W.pt')) else None
@@ -335,6 +340,7 @@ def main(args: DictConfig):
     centroid_l2_norms = []
     model_checkpoints = []
     cosine_sims = []
+    paired_cosine_sims = []
 
     for model_epoch_fn in models:
         print(f'-----Processing model: {model_epoch_fn}------')
@@ -395,6 +401,11 @@ def main(args: DictConfig):
         s1 = s1.to_numpy()
         s2 = s2.to_numpy()
 
+        # calculate paired cosine similarity
+        cos_sim_s1_s2 = F.cosine_similarity(torch.tensor(s1), torch.tensor(s2), dim=1).cpu().numpy()
+        paired_cosine_sims.append(cos_sim_s1_s2)
+        
+
         # calculate centroids and normalize them 
         s1_centroid = s1.mean(axis=0)
         s2_centroid = s2.mean(axis=0)
@@ -417,31 +428,12 @@ def main(args: DictConfig):
             logging.info(f'L2 Norm between centroids for {model_epoch_fn}: {l2_norm_centroids}')
             logging.info(f'Cosine Similarity between centroids of S1 and S2 for {model_epoch_fn}: {cos_sim_centroids}')
 
-
-        # # now apply orthogonal matrix W if it exists
-        # if hasattr(model.encoder_s1, 'W'):
-        #     s1 = torch.tensor(s1).unsqueeze(0).to(device=device, dtype=input_dtype, non_blocking=True)
-        #     s1 = s1 @ model.encoder_s1.W
-        #     logging.info(f"Applied orthogonal matrix W to S1 embeddings, shape: {model.encoder_s1.W.shape}")
-
-        #     s1 = s1.squeeze(0).cpu().numpy()
-        #     s1_centroid = s1.mean(axis=0)
-        #     s2_centroid = s2.mean(axis=0)
-
-        #     l2_norm_centroids = np.linalg.norm(s1_centroid - s2_centroid)
-            
-
-        #     cos_sim_centroids = F.cosine_similarity(torch.tensor(s1_centroid).unsqueeze(0), torch.tensor(s2_centroid).unsqueeze(0)).item()
-        #     if int(os.environ.get("RANK", "0")) == 0:
-        #         logging.info(f'L2 Norm between centroids {l2_norm_centroids}')
-        #         logging.info(f'Cosine Similarity between centroids of S1 and S2 {cos_sim_centroids}')
-
   
     
-    print(f'Length of model checkpoints: {len(model_checkpoints)}')
-    print(f'Length of paired L2 norms: {len(paired_l2_norms)}')
-    print(f'Length of centroid L2 norms: {len(centroid_l2_norms)}')
-    print(f'Length of cosine sims: {len(cosine_sims)}')
+    # print(f'Length of model checkpoints: {len(model_checkpoints)}')
+    # print(f'Length of paired L2 norms: {len(paired_l2_norms)}')
+    # print(f'Length of centroid L2 norms: {len(centroid_l2_norms)}')
+    # print(f'Length of cosine sims: {len(cosine_sims)}')
     print(f'Model checkpoints: {model_checkpoints}')
 
     # now plot each
@@ -454,16 +446,30 @@ def main(args: DictConfig):
     plt.errorbar(model_checkpoints, mean_l2_norms, yerr=std_l2_norms, fmt='o', capsize=5, label='Mean ± Std Dev', color='blue', linestyle='-')
     plt.xlabel('Model checkpoints')
     plt.ylabel('Pairwise L2 Norms')
-    plt.title('Pairwise S1-S2 L2 Norms over Orthogonal Cone Init Model Training Process (n={})'.format(num_pairs))
+    plt.title(f'Pairwise S1-S2 L2 Norms - {experiment_name} (n={num_pairs})')
     plt.grid()
     plt.savefig('pairwise-l2norm.png', bbox_inches='tight')
     plt.show()
+
+    # plot paired cosine sims
+    plt.plot(model_checkpoints, paired_cosine_sims)
+    plt.figure()
+    mean_cosine_sims = [np.mean(sims) for sims in paired_cosine_sims]
+    std_cosine_sims = [np.std(sims) for sims in paired_cosine_sims]
+    plt.errorbar(model_checkpoints, mean_cosine_sims, yerr=std_cosine_sims, fmt='o', capsize=5, label='Mean ± Std Dev', color='blue', linestyle='-')
+    plt.xlabel('Model checkpoints')
+    plt.ylabel('Pairwise Cosine Similarities')
+    plt.title(f'Pairwise S1-S2 Cosine Similarities - {experiment_name} (n={num_pairs})')
+    plt.grid()
+    plt.savefig('pairwise-cosine-sim.png', bbox_inches='tight')
+    plt.show()
+
 
     plt.figure()
     plt.plot(model_checkpoints, centroid_l2_norms, marker='o')
     plt.xlabel('Model checkpoints')
     plt.ylabel('Centroid L2 Norm')
-    plt.title('Centroid S1-S2 L2 Norm over Orthogonal Cone Init Model Training Process (n={})'.format(num_pairs))
+    plt.title(f'Centroid S1-S2 L2 Norm - {experiment_name} (n={num_pairs})')
     plt.grid()
     plt.savefig('centroid-l2norm.png', bbox_inches='tight')
     plt.show()
@@ -472,7 +478,7 @@ def main(args: DictConfig):
     plt.plot(model_checkpoints, cosine_sims, marker='o')
     plt.xlabel('Model checkpoints')
     plt.ylabel('Centroid Cosine Sim')
-    plt.title('Centroid S1-S2 Cosine Sim over Orthogonal Cone Init Model Training Process (n={})'.format(num_pairs))
+    plt.title(f'Centroid S1-S2 Cosine Sim - {experiment_name} (n={num_pairs})')
     plt.grid()
     plt.savefig('centroid-cosine-sim.png', bbox_inches='tight')
     plt.show()
