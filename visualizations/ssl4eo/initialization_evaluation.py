@@ -18,13 +18,12 @@ import umap
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from sklearn.metrics.pairwise import euclidean_distances
-from open_clip_train.precision import get_autocast
-from open_clip import get_input_dtype
 import ast
 from omegaconf import OmegaConf, DictConfig
 import hydra
 import sys
-parent_dir = '/home/juro4948/ciip/ciip/open_clip_train/'
+# parent_dir = '/home/juro4948/ciip/ciip/open_clip_train/'
+parent_dir = '/home/jema2085/ciip/ciip/open_clip_train/'
 sys.path.insert(0, parent_dir)
 from open_clip import get_input_dtype
 from open_clip_train.precision import get_autocast
@@ -32,6 +31,10 @@ from open_clip_train.distributed import is_master
 from open_clip_train.distributed import is_master, init_distributed_device
 from utils import create_model
 import logging
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+from sklearn.metrics.pairwise import cosine_similarity
 
 def compare_keys(model, state_dict):
     model_keys = set(model.state_dict().keys())
@@ -81,7 +84,7 @@ def load_model(args, chkpt_path, w_path, device='cuda'):
                 print("Unexpected keys in checkpoint:", unexpected)
             if not missing and not unexpected:
                 print("All keys match between model and checkpoint state_dict.")
-                    
+
             model.load_state_dict(state_dict, strict=True)
 
 
@@ -94,6 +97,41 @@ def load_model(args, chkpt_path, w_path, device='cuda'):
 
     return model
 
+# From "It's Not a Modality Gap": Linear Separability (from Welle (2023)) is the percentage of image and text
+# [or in our case, image and image] embeddings that can be distinguished by a linear classifier operating in
+# CLIP space. We used 80% of the dataset to train a linear model to classify CLIP embeddings as originating from
+# either "image" of "text" input. We then tested the performance of the classifier on the remaining 20% of the
+# dataset and reported the accuracy. If a set of embeddings are 100% linearly separable, this means that the
+# space occupied by each modality is completely disjoint. Conversely, 50% linear separability means that the
+# image and text embeddings are overlapping in CLIP space, meaning that they occupy the same region of the
+# latent space; i.e. there is no gap between the embeddings. To summarize, if we can effectively close the gap
+# we will find that the distance between centroids is small and linear separability is close to 50%.
+def calc_linear_separability(s1_embeddings, s2_embeddings):
+    combined_embeddings = np.vstack([s1_embeddings, s2_embeddings])
+    labels = np.array([0] * len(s1_embeddings) + [1] * len(s2_embeddings))
+
+    X_train, X_test, y_train, y_test = train_test_split(combined_embeddings, labels, test_size=0.2, random_state=42)
+
+    clf = LogisticRegression(max_iter=1000)
+    clf.fit(X_train, y_train)
+    y_pred = clf.predict(X_test)
+    separability = accuracy_score(y_test, y_pred)
+
+    return separability
+
+# From Two Effects, One Trigger
+def calc_relative_modality_gap(s1_embeddings, s2_embeddings):
+    # Cross-modal dissimilarity (d(x_i, y_i))
+    cross_dissim = 1 - np.sum(s1_embeddings * s2_embeddings, axis=1)
+    avg_cross_dissim = np.mean(cross_dissim)
+
+    # Intra-modal dissimilarities
+    avg_s1_dissim = np.mean(1 - cosine_similarity(s1_embeddings))
+    avg_s2_dissim = np.mean(1 - cosine_similarity(s2_embeddings))
+
+    rmg = avg_cross_dissim / (avg_s1_dissim + avg_s2_dissim + avg_cross_dissim)
+
+    return rmg
 
 class EmbeddingDataset(torch.utils.data.Dataset):
     def __init__(
@@ -295,14 +333,16 @@ class Subset(Dataset):
 CONF = "prod_default"
 
 from data import get_data
-@hydra.main(config_path="/home/juro4948/ciip/ciip/open_clip_train/configs", config_name=CONF)
+# @hydra.main(config_path="/home/juro4948/ciip/ciip/open_clip_train/configs", config_name=CONF)
+@hydra.main(config_path="/home/jema2085/ciip/ciip/open_clip_train/configs", config_name=CONF)
 
 def main(args: DictConfig):
     print('----')
     # print(f"Loaded args: {args}")
 
     # path to the directory containing the experiment model checkpoints
-    chkpt_path = '/local/ms-data/SSL4EO/model/2025_07_03-RandomInit-bs4096/checkpoints'
+    # chkpt_path = '/local/ms-data/SSL4EO/model/2025_07_03-RandomInit-bs4096/checkpoints'
+    chkpt_path = '/home/juro4948/ciip/logs/2025_07_02-12_18_14-model_resnet50-lr_0.0001-b_128-j_6-p_fp16/checkpoints'
    
     experiment_name = chkpt_path.split('/')[-2]
     print(f'Experiment name: {experiment_name}')
@@ -341,6 +381,8 @@ def main(args: DictConfig):
     model_checkpoints = []
     cosine_sims = []
     paired_cosine_sims = []
+    linear_separabilities = []
+    relative_modality_gaps = []
 
     for model_epoch_fn in models:
         print(f'-----Processing model: {model_epoch_fn}------')
@@ -424,11 +466,17 @@ def main(args: DictConfig):
         
         cosine_sims.append(cos_sim_centroids)
 
+        linear_separability = calc_linear_separability(s1, s2)
+        linear_separabilities.append(linear_separability)
+
+        relative_modality_gap = calc_relative_modality_gap(s1, s2)
+        relative_modality_gaps.append(relative_modality_gap)
+
         if int(os.environ.get("RANK", "0")) == 0:
             logging.info(f'L2 Norm between centroids for {model_epoch_fn}: {l2_norm_centroids}')
             logging.info(f'Cosine Similarity between centroids of S1 and S2 for {model_epoch_fn}: {cos_sim_centroids}')
-
-  
+            logging.info(f'Linear separability of S1 and S2 for {model_epoch_fn}: {linear_separability}')
+            logging.info(f'Relative Modality Gap (RMG) of S1 and S2 for {model_epoch_fn}: {relative_modality_gap}')
     
     # print(f'Length of model checkpoints: {len(model_checkpoints)}')
     # print(f'Length of paired L2 norms: {len(paired_l2_norms)}')
@@ -483,7 +531,25 @@ def main(args: DictConfig):
     plt.savefig('centroid-cosine-sim.png', bbox_inches='tight')
     plt.show()
 
+    # Linear Separability Plot
+    plt.figure()
+    plt.plot(model_checkpoints, linear_separabilities, marker='o')
+    plt.xlabel('Model checkpoints')
+    plt.ylabel('Linear Separability')
+    plt.title(f'Linear Separability S1-S2 - {experiment_name} (n={num_pairs})')
+    plt.grid()
+    plt.savefig('linear-separability.png', bbox_inches='tight')
+    plt.show()
 
+    # RMG Plot
+    plt.figure()
+    plt.plot(model_checkpoints, relative_modality_gaps, marker='o')
+    plt.xlabel('Model checkpoints')
+    plt.ylabel('Relative Modality Gap (RMG)')
+    plt.title(f'Relative Modality Gap (RMG) S1-S2 - {experiment_name} (n={num_pairs})')
+    plt.grid()
+    plt.savefig('rmg.png', bbox_inches='tight')
+    plt.show()
 
  
 
