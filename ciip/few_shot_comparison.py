@@ -17,7 +17,11 @@ from sklearn.metrics import accuracy_score, f1_score
 from tqdm import tqdm
 import torch.nn as nn
 import torch.optim as optim
-from eval_utils import create_ciip_model, modify_ciip_for_eurosat, load_ciip_model_checkpoint, CustomTransform
+from eval_utils import create_ciip_model, load_ciip_model_checkpoint, CustomTransform
+
+from model import ResNet50
+import json
+from datetime import datetime
 
 # seed = 42
 # random.seed(seed)
@@ -28,6 +32,38 @@ from eval_utils import create_ciip_model, modify_ciip_for_eurosat, load_ciip_mod
 # torch.backends.cudnn.benchmark = False
 
 # Define the updated band-wise statistics
+# MEAN = {
+#     'B01': 1354.40546513,
+#     'B02': 1118.24399958,
+#     'B03': 1042.92983953,
+#     'B04': 947.62620298,
+#     'B05': 1199.47283961,
+#     'B06': 1999.79090914,
+#     'B07': 2369.22292565,
+#     'B08': 2296.82608323,
+#     'B09': 12.11327804,
+#     'B10': 1819.01027855,
+#     'B11': 1118.92391149,
+#     'B12': 2594.14080798,
+#     'B8A': 732.08340178,
+# }
+
+# STD = {
+#     'B01': 245.71762908,
+#     'B02': 333.00778264,
+#     'B03': 395.09249139,
+#     'B04': 593.75055589,
+#     'B05': 566.4170017,
+#     'B06': 861.18399006,
+#     'B07': 1086.63139075,
+#     'B08': 1117.98170791,
+#     'B09': 4.77584468,
+#     'B10': 1002.58768311,
+#     'B11': 761.30323499,
+#     'B12': 1231.58581042,
+#     'B8A': 404.91978886,
+# }
+
 MEAN = {
     'B01': 1354.40546513,
     'B02': 1118.24399958,
@@ -37,11 +73,11 @@ MEAN = {
     'B06': 1999.79090914,
     'B07': 2369.22292565,
     'B08': 2296.82608323,
-    'B08A': 732.08340178,
-    'B09': 12.11327804,
-    'B10': 1819.01027855,
-    'B11': 1118.92391149,
-    'B12': 2594.14080798,
+    'B09': 732.08340178,
+    'B10': 12.11327804,
+    'B11': 1819.01027855,
+    'B12': 1118.92391149,
+    'B8A': 2594.14080798,
 }
 
 STD = {
@@ -53,26 +89,43 @@ STD = {
     'B06': 861.18399006,
     'B07': 1086.63139075,
     'B08': 1117.98170791,
-    'B08A': 404.91978886,
-    'B09': 4.77584468,
-    'B10': 1002.58768311,
-    'B11': 761.30323499,
-    'B12': 1231.58581042,
+    'B09': 404.91978886,
+    'B10': 4.77584468,
+    'B11': 1002.58768311,
+    'B12': 761.30323499,
+    'B8A': 1231.58581042,
 }
 
-BANDS = ("B01", "B02", "B03", "B04", "B05", "B06", "B07", "B08", "B08A", "B09", "B10", "B11", "B12")
+BANDS = ("B01", "B02", "B03", "B04", "B05", "B06", "B07", "B08", "B8A", "B09", "B10", "B11", "B12")
+
+
+
+
+# BANDS_CIIP = ("B01", "B10", "B11", "B12", "B02", "B03", "B04", "B05", "B06", "B07", "B08", "B8A", "B09")
+# # create int mapping from Bands to bands_ciip
+# BANDS_CIIP = {b: i for i, b in enumerate(BANDS_CIIP)}
+# # # map BANDS to BANDS_CIIP_INT
+# BANDS_CIIP_INT = [0, 10, 11, 12, 1, 2, 3, 4, 5, 6, 7, 8, 9] #[BANDS_CIIP[b] for b in BANDS]
+
 
 # Generate mean and std lists in the desired order
 mean_list = [MEAN[b] for b in BANDS]
 std_list = [STD[b] for b in BANDS]
 
-transform_pipeline = transforms.Compose([
-    transforms.Resize((224, 224)),  # CIIP is 264 and Vit is 224
-    # transforms.ToTensor(),         # Seems like TorchGeo is already loadedd as tensor
-    transforms.Normalize(mean=mean_list, std=std_list), # Normalize with band-wise stats
-])
+ciip_band_indices = [0, 10, 11, 12, 1, 2, 3, 4, 5, 6, 7, 8, 9]
 
-custom_transform = CustomTransform(transform_pipeline)
+# Define two pipelines: CIIP (with reordering) and others (no reordering)
+ciip_transform_pipeline = transforms.Compose([
+        transforms.Lambda(lambda x: x[ciip_band_indices, :, :]),
+        transforms.Resize((224, 224)),
+        transforms.Normalize(mean=mean_list, std=std_list),
+])
+other_transform_pipeline = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.Normalize(mean=mean_list, std=std_list),
+])
+custom_transform = CustomTransform(other_transform_pipeline)
+custom_transform_ciip = CustomTransform(ciip_transform_pipeline)
 
 def drop_last_linear_layer(model):
     """
@@ -152,7 +205,7 @@ def train_pytorch_classifier(features, labels, num_classes, device):
     # Training loop
     model.train()
     best_loss = float('inf')
-    patience = 5
+    patience = 10
     trigger_times = 0
     for epoch in range(50):
         optimizer.zero_grad()
@@ -235,12 +288,13 @@ def extract_features(model, dataloader, device, use_s2_only=False):
 
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Extracting features"):
-            images = batch["image"].to(device)
+            images = batch["image"].to(device)            
             labels = batch["label"]
             # print(f"Image Tensor Shape Sent to Model: {images.shape}")  # Debugging
 
             if use_s2_only:
                 # Use only the S2 encoder for feature extraction
+                # print(f'Shape of images sent to S2 encoder: {images.shape}')
                 features = model.encoder_s2(images)
             else:
                 # Use the full model if required in other scenarios
@@ -259,18 +313,35 @@ def get_deterministic_seed_for_experiment(k, exp):
 
 
 # Few-Shot Comparison Pipeline
-def few_shot_comparison_pipeline_optimized(data_path, k_values, models, bands, batch_size=16, num_workers=4,
+def few_shot_comparison_pipeline_optimized(data_path, k_values, models, bands, batch_size=16, num_workers=18,
                                            task="classification", num_experiments=5):
-    transformed_dataset_train = EuroSAT(data_path, split="train", bands=bands, transforms=custom_transform, download=True)
-    transformed_dataset_test = EuroSAT(data_path, split="test", bands=bands, transforms=custom_transform, download=True)
 
-    # Preprocess class indices for the training dataset
-    class_indices_train = preprocess_class_indices(transformed_dataset_train)
+    print('******************* NEW FEW-SHOT COMPARISON PIPELINE *******************')
+
+   
+
+    
 
     results = {}
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    print(device)
 
-    for model_name, model in models.items():
+    for model_config in models:
+        model_name = model_config["name"]
+        model = model_config["model"]
+        apply_band_correction = model_config.get("apply_band_correction", False)
+
+        if apply_band_correction: 
+            use_transform = custom_transform_ciip
+        else:
+            use_transform = custom_transform
+
+        transformed_dataset_train = EuroSAT(data_path, split="train", bands=BANDS, transforms=use_transform, download=True)
+        transformed_dataset_test = EuroSAT(data_path, split="test", bands=BANDS, transforms=use_transform, download=True)
+
+        # Preprocess class indices for the training dataset
+        class_indices_train = preprocess_class_indices(transformed_dataset_train)
+        
         model_results = {}
         model.to(device).eval()
 
@@ -293,8 +364,10 @@ def few_shot_comparison_pipeline_optimized(data_path, k_values, models, bands, b
                 dataloader_test = DataLoader(transformed_dataset_test, batch_size=batch_size, shuffle=False,
                                              num_workers=num_workers)
 
-                # Use S2 encoder only for CIIP, full models for others
-                use_s2_only = model_name == "CIIP_Model"
+                # Use S2 encoder only for CIIP
+                use_s2_only = (model.__class__.__name__ == "CIIP")
+                if use_s2_only:
+                    print(f"Using S2 encoder only for model: {model_name}")
 
                 # For zero-shot (k==0), use the full model (with fc)
                 # For few-shot (k > 0), create a deep copy and drop the last linear layer.
@@ -306,6 +379,10 @@ def few_shot_comparison_pipeline_optimized(data_path, k_values, models, bands, b
 
                 train_features, train_labels = extract_features(current_model, dataloader_train, device, use_s2_only=use_s2_only)
                 test_features, test_labels = extract_features(current_model, dataloader_test, device, use_s2_only=use_s2_only)
+
+                # normalize all features (they are np)
+                train_features = train_features / (np.linalg.norm(train_features, axis=1, keepdims=True) + 1e-8)
+                test_features = test_features / (np.linalg.norm(test_features, axis=1, keepdims=True) + 1e-8)
 
                 if k == 0:
                     # Zero-shot: use nearest-prototype classification on features.
@@ -380,21 +457,22 @@ def plot_results(results, k_values, metric="accuracy", output_file="few_shot_res
     plt.show()
 
 
-def output_results_to_csv(results, k_values, metric="accuracy"):
+def output_results_to_csv(results, k_values, metric="accuracy", output_dir="."):
     """
     Write the results to a CSV file with model names as rows and k values as columns.
     Each cell contains the metric value (accuracy or F1 score).
     The filename includes the timestamp.
     """
     # Get the current timestamp
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    output_file = f"./few_shot_eval/results_{metric}_{timestamp}.csv"
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    os.makedirs("./few_shot_eval", exist_ok=True)  # Ensure the directory exists
+    output_file = os.path.join(output_dir, f"results_{metric}_{timestamp}.csv")
 
     with open(output_file, mode='w', newline='') as file:
         writer = csv.writer(file)
 
         # Write header row: "Model Name" followed by k values
-        header = ["Model Name"] + [f"k={k}" for k in k_values]
+        header = ["Model Name"] + [f"k={k}" for k in k_values] + [f"Std k={k}" for k in k_values]
         writer.writerow(header)
 
         # Write rows: model name followed by metric values for each k
@@ -402,41 +480,201 @@ def output_results_to_csv(results, k_values, metric="accuracy"):
             row = [model_name]  # Start the row with the model name
             for k in k_values:
                 row.append(model_results[k][f'{metric}_mean'])  # Add the metric value for each k
+            for k in k_values:
+                row.append(model_results[k][f'{metric}_std'])
             writer.writerow(row)
 
     print(f"Results saved to {output_file}")
 
 
+def load_model(model_type, weights_path):
+    # You can adapt this to your architecture loading logic
+    if model_type == "vit16":
+        raise NotImplementedError("ViT16 model loading is not implemented in this example.")
+        # model = load_vit16(weights_path)
+    elif model_type == "resnet50":
+        if weights_path is None:
+            model = resnet50(weights=None, num_classes=10, in_chans=13, pretrained=False)
+        else:    
+            model = resnet50(weights_path)
+    elif model_type == "ciip":
+        model = load_ciip_model_checkpoint(weights_path)
+    else:
+        raise ValueError(f"Unknown model type: {model_type}")
+    return model
+
+
+
+
 if __name__ == "__main__":
-    # DATA_PATH = "./data"
-    DATA_PATH = "./eurosat_data"
-    BANDS = ("B01", "B02", "B03", "B04", "B05", "B06", "B07", "B08", "B08A", "B09", "B10", "B11", "B12")
 
-    K_VALUES = [0, 1, 2, 4, 8, 16, 32]
-    # K_VALUES = [0, 10, 20, 40, 60, 80, 100]
+    MODEL_ROOT = "/local/ms-data/SSL4EO/model"
 
-    ciip_checkpoint_path = "/local/ms-data/SSL4EO/model/2025_03_18-17_19_03-model_resnet50-lr_0.0001-b_128-j_6-p_fp16/epoch_85.pt"
-
-    # Load CIIP model and modify for EuroSAT
-    ciip_model = load_ciip_model_checkpoint(ciip_checkpoint_path)
-    # ciip_model = modify_ciip_for_eurosat(ciip_model, num_classes=10, freeze_encoder=True)
-
-    models = {
-        "CIIP_Model": ciip_model,
-        # "SSL4EO-vit_small16": vit_small_patch16_224(weights=ViTSmall16_Weights.SENTINEL2_ALL_MOCO)
-        "SSL4EO-ResNet18_MoCo": resnet18(weights=ResNet18_Weights.SENTINEL2_ALL_MOCO),
-        "SSL4EO-ResNet50_DINO": resnet50(weights=ResNet50_Weights.SENTINEL2_ALL_DINO),
-        "SSL4EO-ResNet50_MoCo": resnet50(weights=ResNet50_Weights.SENTINEL2_ALL_MOCO),
+    MODEL_CONFIGS = {
+        "2025_4_14-MoCoInit-bs128-amp-bandsrearranged": {
+            "type": "ciip",
+            "weights": f"{MODEL_ROOT}/2025_4_14-MoCoInit-bs128-amp/checkpoints/epoch_100.pt",
+            "apply_band_correction": True,
+        },
+        "2025_4_14-MoCoInit-bs128-amp": {
+            "type": "ciip",
+            "weights": f"{MODEL_ROOT}/2025_4_14-MoCoInit-bs128-amp/checkpoints/epoch_100.pt",
+            "apply_band_correction": False,
+        },
+        "2025_07_09-16-RandomInit-bs4096-epoch45": {
+            "type": "ciip",
+            "weights": f"{MODEL_ROOT}/2025_07_09-16-RandomInit-bs4096-FIXEDBANDS/checkpoints/epoch_45.pt", #",
+            "apply_band_correction": False,
+        },
+        "2025_07_03-RandomInit-bs4096-epoch75": {
+            "type": "ciip",
+            "weights": f"{MODEL_ROOT}/2025_07_03-RandomInit-bs4096/checkpoints/epoch_75.pt",
+            "apply_band_correction": True,
+        },
+         "2025_07_03-RandomInit-bs4096-epoch45": {
+            "type": "ciip",
+            "weights": f"{MODEL_ROOT}/2025_07_03-RandomInit-bs4096/checkpoints/epoch_45.pt",
+            "apply_band_correction": True,
+        },
+        "2025_03_31-MoCoInit-bs256-amp": {
+            "type": "ciip",
+            "weights": f"{MODEL_ROOT}/2025_03_31-MoCoInit-bs256-amp/checkpoints/epoch_100.pt",
+            "apply_band_correction": True,
+        },
+        "2025-03-18-MoCoInit-bs128-fp16": {
+            "type": "ciip",
+            "weights": f"{MODEL_ROOT}/2025-03-18-MoCoInit-bs128-fp16/17-19-02/log/2025_03_18-17_19_03-model_resnet50-lr_0.0001-b_128-j_6-p_fp16/checkpoints/epoch_100.pt",
+            "apply_band_correction": True,
+        },
+        "2025-07-25-MoCoInit-bs128-amp": {
+            "type": "ciip",
+            "weights": f"{MODEL_ROOT}/2025-07-25-MoCoInit-bs128-amp/checkpoints/epoch_100.pt",
+            "apply_band_correction": False,
+        },
+        "SSL4EO-ResNet50_MoCo": {
+            "type": "resnet50",
+            "weights": ResNet50_Weights.SENTINEL2_ALL_MOCO,
+            "apply_band_correction": False,
+        },
+        "SSL4EO-ResNet50_DINO": {   
+            "type": "resnet50",
+            "weights": ResNet50_Weights.SENTINEL2_ALL_DINO,
+            "apply_band_correction": False,
+        },
+        "ResNet50_Random": {
+            "type": "resnet50",
+            'weights': None,
+            "apply_band_correction": False,
+        }
     }
 
+    
+
+    CONFIG = {
+        "data_path": "./local/ms-data/eurosat_data",
+        "k_values": [0, 1, 8, 32],
+        "batch_size": 64,
+        "num_workers": 32,
+        "num_experiments": 10,
+        "bands": BANDS,  # assuming BANDS is defined elsewhere
+        "include_models": ['2025_4_14-MoCoInit-bs128-amp', "2025_07_03-RandomInit-bs4096-epoch45",
+         "2025-03-18-MoCoInit-bs128-fp16", "SSL4EO-ResNet50_MoCo", "SSL4EO-ResNet50_DINO", "ResNet50_Random"]
+        # ["2025-07-25-MoCoInit-bs128-amp", "2025_07_09-16-RandomInit-bs4096-epoch45",
+        #                         "SSL4EO-ResNet50_MoCo", "SSL4EO-ResNet50_DINO", "ResNet50_Random"]
+        # ['2025_4_14-MoCoInit-bs128-amp', "2025_07_03-RandomInit-bs4096-epoch45", "2025_03_31-MoCoInit-bs256-amp",
+        #  "2025-03-18-MoCoInit-bs128-fp16"]
+        # ["2025-07-25-MoCoInit-bs128-amp", "2025_07_09-16-RandomInit-bs4096-epoch45",
+        #                         "SSL4EO-ResNet50_MoCo", "SSL4EO-ResNet50_DINO", "ResNet50_Random"]
+    }
+
+
+    models = []
+    model_info = []
+    for model_name, config in MODEL_CONFIGS.items():
+        if model_name not in CONFIG["include_models"]:
+            continue
+        model = load_model(config["type"], config["weights"])
+        models.append({
+            "name": model_name,
+            "model": model,
+            "apply_band_correction": False,
+        })
+        model_info.append({
+            "name": model_name,
+            "type": config["type"],
+            "weights": str(config["weights"]),
+            "apply_band_correction": False,
+        })
+
+    # add model dict to config
+    CONFIG["models"] = model_info
+
+
+    # load epochs
+    # import glob
+
+    # models = []
+    # epochs = [5, 10, 20, 45, 75, 100]
+    # for model_name, config in MODEL_CONFIGS.items():
+    #     if model_name not in CONFIG["include_models"]:
+    #         continue
+
+    #     weights_path = config["weights"]
+        
+    #     if isinstance(weights_path, str) and os.path.isdir(weights_path):
+    #         # Load all checkpoint files in that directory
+    #         ckpt_paths = sorted(glob.glob(os.path.join(weights_path, "epoch_*.pt")))
+    #         for ckpt_path in ckpt_paths:
+    #             epoch = os.path.splitext(os.path.basename(ckpt_path))[0].split("_")[-1]
+    #             if int(epoch) not in epochs:
+    #                 continue
+    #             model = load_model(config["type"], ckpt_path)
+    #             models.append({
+    #                 "name": f"{model_name}_epoch{epoch}",
+    #                 "model": model,
+    #                 "apply_band_correction": config["apply_band_correction"],
+    #                 "epoch": int(epoch),
+    #             })
+    #     else:
+    #         model = load_model(config["type"], weights_path)
+    #         models.append({
+    #             "name": model_name,
+    #             "model": model,
+    #             "apply_band_correction": config["apply_band_correction"],
+    #             "epoch": None,
+    #         })
+
+
     for model in models:
-        for param in models[model].parameters():
+        for param in model['model'].parameters():
             param.requires_grad = False
 
-    # Run Few-Shot Comparison
-    results = few_shot_comparison_pipeline_optimized(DATA_PATH, K_VALUES, models, BANDS,
-                                                     batch_size=16, num_experiments=10)
-    output_results_to_csv(results, K_VALUES, metric="accuracy")
-    output_results_to_csv(results, K_VALUES, metric="f1")
-    plot_results(results, K_VALUES, metric="accuracy", output_file="few_shot_eval/few_shot_accuracy.png")
-    plot_results(results, K_VALUES, metric="f1", output_file="few_shot_eval/few_shot_f1.png")
+   
+
+    timestamp = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
+    experiment_name = f"{timestamp}-no-bandcorrection"
+    output_dir = os.path.join("few_shot_eval", experiment_name)
+    os.makedirs(output_dir, exist_ok=True)
+
+    with open(os.path.join(output_dir, "config.json"), "w") as f:
+        json.dump(CONFIG, f, indent=4)
+
+    results = few_shot_comparison_pipeline_optimized(
+        CONFIG["data_path"],
+        CONFIG["k_values"],
+        models,
+        CONFIG["bands"],
+        batch_size=CONFIG["batch_size"],
+        num_workers=CONFIG["num_workers"],
+        num_experiments=CONFIG["num_experiments"],
+        # apply_band_correction=CONFIG["apply_band_correction"],  # Pass to pipeline
+    )
+
+    # Save metrics
+    output_results_to_csv(results, CONFIG["k_values"], metric="accuracy", output_dir=output_dir)
+    output_results_to_csv(results, CONFIG["k_values"], metric="f1", output_dir=output_dir)
+
+    # Save plots
+    plot_results(results, CONFIG["k_values"], metric="accuracy", output_file=os.path.join(output_dir, "few_shot_accuracy.png"))
+    plot_results(results, CONFIG["k_values"], metric="f1", output_file=os.path.join(output_dir, "few_shot_f1.png"))
+

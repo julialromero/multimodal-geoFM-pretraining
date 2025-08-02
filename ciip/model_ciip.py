@@ -1,5 +1,5 @@
 from collections import OrderedDict
-from typing import Tuple, Union
+from typing import Tuple, Union, Optional
 
 import numpy as np
 import torch
@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from torchgeo.models import resnet18, ResNet18_Weights, ResNet50_Weights, resnet50
-from model import ModifiedResNet, ResNet50 #, S1Transformer, S2Transformer
+from model import ModifiedResNet #, ResNet50 #, S1Transformer, S2Transformer
 # VisionTransformer
 import logging
 
@@ -71,7 +71,7 @@ class CIIP(nn.Module):
                  s2_width: int,
                  s2_patch_size: int,
                  s2_bands: int,
-                 framework: str = "modified_resnet",
+                 framework: None,
                 #  # text
                 #  context_length: int,
                 #  vocab_size: int,
@@ -81,8 +81,12 @@ class CIIP(nn.Module):
                  pretrain: bool = False,
                  s1_weights: str = "MOCO",
                  s2_weights: str = "MOCO",
+                 init_logit_scale: float = np.log(1 / 0.07),
+                 init_logit_bias: Optional[float] = None,
                  ):
         super().__init__()
+        if framework is None:
+            raise ValueError("Framework must be specified. Options: 'modified_resnet', 'transformer', 'resnet18', 'resnet50'.")
 
         # self.context_length = context_length
 
@@ -117,14 +121,32 @@ class CIIP(nn.Module):
             if pretrain:
                 print("Warning: Pretrained weights are not supported for ResNet18 (S1). Ignoring pretrain flag for S1.")
         elif framework == "resnet50":
-            # self.encoder_s1 = resnet50(
+            if not pretrain:
+                self.encoder_s1 = resnet50(
+                    in_chans=s1_bands,
+                    num_classes=embed_dim
+                )
+                logging.info("Using ResNet50 for S1 without pretrained weights.")
+            else:
+                if s1_weights == "MOCO":
+                    self.encoder_s1 = resnet50(
+                        in_chans=s1_bands,
+                        num_classes=embed_dim,
+                        weights=ResNet50_Weights.SENTINEL1_ALL_MOCO
+                    )
+                elif s1_weights == "DINO":
+                    self.encoder_s1 = resnet50(
+                        in_chans=s1_bands,
+                        num_classes=embed_dim,
+                        weights=ResNet50_Weights.SENTINEL1_ALL_DINO
+                    )
+                else:
+                    raise ValueError(f"Unsupported S1 weights: {s1_weights}. Use 'MOCO' or 'DINO'.")
+                logging.info(f"Loaded pretrained weights for S1 encoder: {s1_weights}")
+            # self.encoder_s1 = ResNet50(
             #     in_chans=s1_bands,
             #     num_classes=embed_dim
             # )
-            self.encoder_s1 = ResNet50(
-                in_chans=s1_bands,
-                num_classes=embed_dim
-            )
         else:
             print("Framework not supported for S1")
 
@@ -159,41 +181,61 @@ class CIIP(nn.Module):
             if pretrain:
                 print("Warning: Pretrained weights are not supported for ResNet18 (S1). Ignoring pretrain flag for S1.")
         elif framework == "resnet50":
-            # self.encoder_s2 = resnet50(
-            #     c=s2_bands,
+            if not pretrain:
+                self.encoder_s2 = resnet50(
+                    in_chans=s2_bands,
+                    num_classes=embed_dim
+                )
+                logging.info("Using ResNet50 for S2 without pretrained weights.")
+            else:
+                if s2_weights == "MOCO":
+                    self.encoder_s2 = resnet50(
+                        in_chans=s2_bands,
+                        num_classes=embed_dim,
+                        weights=ResNet50_Weights.SENTINEL2_ALL_MOCO
+                    )
+                elif s2_weights == "DINO":
+                    self.encoder_s2 = resnet50(
+                        in_chans=s2_bands,
+                        num_classes=embed_dim,
+                        weights=ResNet50_Weights.SENTINEL2_ALL_DINO
+                    )
+                else:
+                    raise ValueError(f"Unsupported S2 weights: {s2_weights}. Use 'MOCO' or 'DINO'.")
+                logging.info(f"Loaded pretrained weights for S2 encoder: {s2_weights}")
+            # self.encoder_s2 = ResNet50(
+            #     in_chans=s2_bands,
             #     num_classes=embed_dim
             # )
-            self.encoder_s2 = ResNet50(
-                in_chans=s2_bands,
-                num_classes=embed_dim
-            )
         else:
             print("Framework not supported for S1")
 
-        # Load pretrained weights
-        if pretrain:
-            if framework != "resnet50":
-                print("Warning: Pretrained weights only support for ResNet50 framework.")
-            else:
-                # Load S1 pretrained weights (only "MOCO" is allowed)
-                if self.encoder_s1 is not None:
-                    if s1_weights != "MOCO":
-                        raise ValueError("For ResNet50 S1 encoder, only 'MOCO' pretrained weights are supported.")
-                    else:
-                        # Load S1 weights using ResNet50_Weights (for example, SENTINEL1_ALL_MOCO)
-                        weights_obj = ResNet50_Weights.SENTINEL1_ALL_MOCO
-                        self.encoder_s1.load_state_dict(weights_obj.get_state_dict(progress=True), strict=False)
-                # Load S2 pretrained weights ("MOCO" or "DINO" are allowed)
-                if self.encoder_s2 is not None:
-                    if s2_weights not in ["MOCO", "DINO"]:
-                        raise ValueError(
-                            "For ResNet50 S2 encoder, pretrained weights should be either 'MOCO' or 'DINO'.")
-                    else:
-                        if s2_weights == "MOCO":
-                            weights_obj = ResNet50_Weights.SENTINEL2_ALL_MOCO
-                        else:
-                            weights_obj = ResNet50_Weights.SENTINEL2_ALL_DINO
-                        self.encoder_s2.load_state_dict(weights_obj.get_state_dict(progress=True), strict=False)
+        # # Load pretrained weights
+        # if pretrain:
+        #     if framework != "resnet50":
+        #         print("Warning: Pretrained weights only support for ResNet50 framework.")
+        #     else:
+        #         # Load S1 pretrained weights (only "MOCO" is allowed)
+        #         if self.encoder_s1 is not None:
+        #             if s1_weights != "MOCO":
+        #                 raise ValueError("For ResNet50 S1 encoder, only 'MOCO' pretrained weights are supported.")
+        #             else:
+        #                 # Load S1 weights using ResNet50_Weights (for example, SENTINEL1_ALL_MOCO)
+        #                 weights_obj = ResNet50_Weights.SENTINEL1_ALL_MOCO
+        #                 self.encoder_s1.load_state_dict(weights_obj.get_state_dict(progress=True), strict=True)
+        #                 logging.info(f"Loaded pretrained weights for S1 encoder: {s1_weights}")
+        #         # Load S2 pretrained weights ("MOCO" or "DINO" are allowed)
+        #         if self.encoder_s2 is not None:
+        #             if s2_weights not in ["MOCO", "DINO"]:
+        #                 raise ValueError(
+        #                     "For ResNet50 S2 encoder, pretrained weights should be either 'MOCO' or 'DINO'.")
+        #             else:
+        #                 if s2_weights == "MOCO":
+        #                     weights_obj = ResNet50_Weights.SENTINEL2_ALL_MOCO
+        #                 else:
+        #                     weights_obj = ResNet50_Weights.SENTINEL2_ALL_DINO
+        #                 self.encoder_s2.load_state_dict(weights_obj.get_state_dict(progress=True), strict=True)
+        #                 logging.info(f"Loaded pretrained weights for S2 encoder: {s2_weights}")
 
 
         ##### Text transformer is removed #####
@@ -210,7 +252,13 @@ class CIIP(nn.Module):
         # self.ln_final = LayerNorm(transformer_width)
 
         # self.text_projection = nn.Parameter(torch.empty(transformer_width, embed_dim))
-        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+        nonscalar_logit_scale = False
+        lshape = [1] if nonscalar_logit_scale else []
+        self.logit_scale = nn.Parameter(torch.ones(lshape) * init_logit_scale)
+        if init_logit_bias is not None:
+            self.logit_bias = nn.Parameter(torch.ones(lshape) * init_logit_bias)
+        else:
+            self.logit_bias = None
 
         self.initialize_parameters()
 
@@ -302,25 +350,36 @@ class CIIP(nn.Module):
         s1_features = self.encode_s1(s1)
         s2_features = self.encode_s2(s2)
 
-        # # normalized features
-        # s1_features  = s1_features  / s1_features.norm(dim=1, keepdim=True)
-        # s2_features = s2_features / s2_features.norm(dim=1, keepdim=True)
+        # normalized features
+        s1_features  = s1_features  / s1_features.norm(dim=-1, keepdim=True)
+        s2_features = s2_features / s2_features.norm(dim=-1, keepdim=True)
 
-        # cosine similarity as logits
+        # # cosine similarity as logits
         logit_scale = self.logit_scale.exp()
-        logits_per_s1 = logit_scale * s1_features @ s2_features.t()   # May have to check that these dimensions align
-        logits_per_s2 = logits_per_s1.t()
+        # logits_per_s1 = logit_scale * s1_features @ s2_features.t()   # May have to check that these dimensions align
+        # logits_per_s2 = logits_per_s1.t()
 
         # shape = [global_batch_size, global_batch_size]
  
         out_dict = {
-            "s1_features": logits_per_s1,
-            "s2_features": logits_per_s2,
+            "s1_features": s1_features,
+            "s2_features": s2_features,
             "logit_scale": logit_scale
             }
 
+        if self.logit_bias is not None:
+            out_dict['logit_bias'] = self.logit_bias
 
         return out_dict
+
+    def get_logits(self, s1, s2):
+        s1_features = self.encode_s1(s1, normalize=True)
+        s2_features = self.encode_s2(s2, normalize=True)
+        s1_logits = self.logit_scale.exp() * s1_features @ s2_features.T
+        if self.logit_bias is not None:
+            s1_logits += self.logit_bias
+        s2_logits = s1_logits.T
+        return s1_logits, s2_logits
     
 
     def compute_embeddings(self, s1, s2):
@@ -437,42 +496,42 @@ def convert_weights(model: nn.Module):
 
     model.apply(_convert_weights_to_fp16)
 
-## TODO: adjust this function
-def build_model(state_dict: dict):
-    vit = "s1.proj" in state_dict
+# ## TODO: adjust this function
+# def build_model(state_dict: dict):
+#     vit = "s1.proj" in state_dict
 
-    if vit:
-        s1_width = state_dict["s1.conv1.weight"].shape[0]
-        s1_layers = len([k for k in state_dict.keys() if k.startswith("s1.") and k.endswith(".attn.in_proj_weight")])
-        s1_patch_size = state_dict["s1.conv1.weight"].shape[-1]
-        grid_size = round((state_dict["s1.positional_embedding"].shape[0] - 1) ** 0.5)
-        image_resolution = s1_patch_size * grid_size
-    else:
-        counts: list = [len(set(k.split(".")[2] for k in state_dict if k.startswith(f"s1.layer{b}"))) for b in [1, 2, 3, 4]]
-        s1_layers = tuple(counts)
-        s1_width = state_dict["s1.layer1.0.conv1.weight"].shape[0]
-        output_width = round((state_dict["s1.attnpool.positional_embedding"].shape[0] - 1) ** 0.5)
-        s1_patch_size = None
-        assert output_width ** 2 + 1 == state_dict["s1.attnpool.positional_embedding"].shape[0]
-        image_resolution = output_width * 32
+#     if vit:
+#         s1_width = state_dict["s1.conv1.weight"].shape[0]
+#         s1_layers = len([k for k in state_dict.keys() if k.startswith("s1.") and k.endswith(".attn.in_proj_weight")])
+#         s1_patch_size = state_dict["s1.conv1.weight"].shape[-1]
+#         grid_size = round((state_dict["s1.positional_embedding"].shape[0] - 1) ** 0.5)
+#         image_resolution = s1_patch_size * grid_size
+#     else:
+#         counts: list = [len(set(k.split(".")[2] for k in state_dict if k.startswith(f"s1.layer{b}"))) for b in [1, 2, 3, 4]]
+#         s1_layers = tuple(counts)
+#         s1_width = state_dict["s1.layer1.0.conv1.weight"].shape[0]
+#         output_width = round((state_dict["s1.attnpool.positional_embedding"].shape[0] - 1) ** 0.5)
+#         s1_patch_size = None
+#         assert output_width ** 2 + 1 == state_dict["s1.attnpool.positional_embedding"].shape[0]
+#         image_resolution = output_width * 32
 
 
-    ## Added s2 parameters
-    vit = "s2.proj" in state_dict
-    if vit:
-        s2_width = state_dict["s2.conv1.weight"].shape[0]
-        s2_layers = len([k for k in state_dict.keys() if k.startswith("s2.") and k.endswith(".attn.in_proj_weight")])
-        s2_patch_size = state_dict["s2.conv1.weight"].shape[-1]
-        grid_size = round((state_dict["s2.positional_embedding"].shape[0] - 1) ** 0.5)
-        image_resolution = s1_patch_size * grid_size
-    else:
-        counts: list = [len(set(k.split(".")[2] for k in state_dict if k.startswith(f"s2.layer{b}"))) for b in [1, 2, 3, 4]]
-        s2_layers = tuple(counts)
-        s2_width = state_dict["s2.layer1.0.conv1.weight"].shape[0]
-        output_width = round((state_dict["s2.attnpool.positional_embedding"].shape[0] - 1) ** 0.5)
-        s2_patch_size = None
-        assert output_width ** 2 + 1 == state_dict["s2.attnpool.positional_embedding"].shape[0]
-        image_resolution = output_width * 32
+#     ## Added s2 parameters
+#     vit = "s2.proj" in state_dict
+#     if vit:
+#         s2_width = state_dict["s2.conv1.weight"].shape[0]
+#         s2_layers = len([k for k in state_dict.keys() if k.startswith("s2.") and k.endswith(".attn.in_proj_weight")])
+#         s2_patch_size = state_dict["s2.conv1.weight"].shape[-1]
+#         grid_size = round((state_dict["s2.positional_embedding"].shape[0] - 1) ** 0.5)
+#         image_resolution = s1_patch_size * grid_size
+#     else:
+#         counts: list = [len(set(k.split(".")[2] for k in state_dict if k.startswith(f"s2.layer{b}"))) for b in [1, 2, 3, 4]]
+#         s2_layers = tuple(counts)
+#         s2_width = state_dict["s2.layer1.0.conv1.weight"].shape[0]
+#         output_width = round((state_dict["s2.attnpool.positional_embedding"].shape[0] - 1) ** 0.5)
+#         s2_patch_size = None
+#         assert output_width ** 2 + 1 == state_dict["s2.attnpool.positional_embedding"].shape[0]
+#         image_resolution = output_width * 32
 
     # embed_dim = state_dict["text_projection"].shape[1]
     # context_length = state_dict["positional_embedding"].shape[0]

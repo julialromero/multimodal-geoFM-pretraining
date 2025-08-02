@@ -39,13 +39,13 @@ S2C_STD = [786.78685367, 850.34818441, 875.06484736, 1138.84957046, 1122.1777565
 
 # ssl4eo
 class SSL4EODataset(Dataset):
-    def __init__(self, root, s2_tier, s2_bands,transforms=None, target_image_dimension=(264, 264)):
+    def __init__(self, root, s2_tier, s2_bands, transforms=None, target_image_dimension=(264, 264)):
         self.root = root
         self.num_locations = None
         self.length = None
         self.s1_paths = []
         self.s2_paths = []
-        self.s2_bands = sorted(s2_bands)
+        self.s2_bands = s2_bands
         # https://pytorch.org/vision/main/generated/torchvision.transforms.Resize.html
         self.resize_transform = Resize(target_image_dimension)
 
@@ -242,7 +242,7 @@ def get_ssl4eo_dataset(args, is_train, transforms):
     dataset = SSL4EODataset(
         root, # root file path
         args.dataset.s2_tier,
-        args.model.s2_bands if hasattr(args, 'dataset.s2_bands') else default_bands,  # from config file
+        default_bands,  # from config file
         transforms=transforms,  # transforms
         target_image_dimension=(args.dataset.dimension, args.dataset.dimension)
     )

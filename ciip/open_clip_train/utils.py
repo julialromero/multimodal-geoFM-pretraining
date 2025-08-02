@@ -12,9 +12,10 @@ import sys
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 sys.path.insert(0, parent_dir)
 from model_ciip import CIIP
-from loss import CiipLoss
+from loss import CiipLoss, SigLipLoss
 from torch import nn
 from omegaconf import DictConfig, OmegaConf
+import numpy as np
 
 
 def get_cast_dtype(precision: str):
@@ -85,12 +86,12 @@ def create_loss(args):
         #     use_horovod=args.horovod,
         # )
     elif args.siglip:
-        raise NotImplementedError("SigLip not currently supported")
+        # raise NotImplementedError("SigLip not currently supported")
         # assert not args.horovod, "Horovod not currently supported for SigLip"
-        # return SigLipLoss(
-        #     rank=args.rank,
-        #     world_size=args.world_size,
-        # )
+        return SigLipLoss(
+            rank=args.rank,
+            world_size=args.world_size,
+        )
     return CiipLoss(
         local_loss=args.local_loss,
         gather_with_grad=args.gather_with_grad,
@@ -101,7 +102,7 @@ def create_loss(args):
     )
 
 
-def create_model(args, device):
+def create_model(args, device, **model_kwargs):
 
 # (
 #         model_name: str,
@@ -124,6 +125,18 @@ def create_model(args, device):
     model_name = "CIIP"
     precision = args.model.precision
     pretrained = args.model.pretrain.load
+    # check if kwargs
+    if "init_logit_scale" in model_kwargs:
+        init_logit_scale = model_kwargs['init_logit_scale']
+    else:
+        init_logit_scale = np.log(1 / 0.07)
+    
+    if 'init_logit_bias' in model_kwargs:
+            init_logit_bias = model_kwargs['init_logit_bias']
+    else:
+        init_logit_bias = None
+
+
 
     # force_preprocess_cfg = force_preprocess_cfg or {}
     # preprocess_cfg = asdict(PreprocessCfg())
@@ -161,7 +174,9 @@ def create_model(args, device):
         framework=args.model.framework,
         pretrain=args.model.pretrain.load,
         s1_weights=args.model.pretrain.s1_weights,
-        s2_weights=args.model.pretrain.s2_weights)
+        s2_weights=args.model.pretrain.s2_weights,
+        init_logit_scale=init_logit_scale,
+        init_logit_bias=init_logit_bias)
     # , 
         # cast_dtype=cast_dtype)
 
