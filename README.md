@@ -197,3 +197,27 @@ Note that the `C` value should be determined via a hyperparameter sweep using a 
 
 * [OpenCLIP](https://github.com/mlfoundations/open_clip): includes larger and independently trained CLIP models up to ViT-G/14
 * [Hugging Face implementation of CLIP](https://huggingface.co/docs/transformers/model_doc/clip): for easier integration with the HF ecosystem
+
+## Debugging
+### General environment install
+Try using the temp.yml file for installation
+```bash
+$ conda env create -f temp.yml --name <your-name>
+```
+
+### Pyproj/rasterio error
+When installing and setting up your environment, if you see an error like
+```
+CRSError: The EPSG code is unknown. PROJ: proj_create_from_database: ...\proj\proj.db contains ... whereas a number >= 2 is expected. It comes from another PROJ installation.
+```
+you may need to check that your PROJ_DATA and PROJ_LIB variables are pointing to places with a shared parent folder. You can check this by opening up a python interpreter and
+typing:
+```bash
+>>> import rasterio
+>>> rasterio.show_versions()
+```
+PROJ DATA and GDAL DATA should be in the same rasterio folder. If they aren't, move one (probably the one that is not in your current conda environment) with
+```bash
+$ export PROJ_DATA=/home/jema2085/miniconda3/envs/ciip-jen/lib/python3.12/site-packages/rasterio/proj_data
+```
+for example.
