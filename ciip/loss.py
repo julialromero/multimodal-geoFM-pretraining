@@ -99,7 +99,7 @@ class CiipLoss(nn.Module):
             labels = self.labels[device]
         return labels
 
-    def get_logits(self, s1_features, s2_features, logit_scale):
+    def get_logits(self, s1_features, s2_features, logit_scale, logit_bias=None):
         if self.world_size > 1:
             all_s1_features, all_s2_features = gather_features(
                 s1_features, s2_features,
@@ -114,12 +114,16 @@ class CiipLoss(nn.Module):
         else:
             logits_per_s1 = logit_scale * s1_features @ s2_features.T
             logits_per_s2 = logit_scale * s2_features @ s1_features.T
+
+        if logit_bias is not None:
+            logits_per_image += logit_bias
+            logits_per_text += logit_bias
         
         return logits_per_s1, logits_per_s2
 
-    def forward(self, s1_features, s2_features, logit_scale, output_dict=False):
+    def forward(self, s1_features, s2_features, logit_scale, logit_bias=None, output_dict=False):
         device = s1_features.device
-        logits_per_s1, logits_per_s2 = self.get_logits(s1_features, s2_features, logit_scale)
+        logits_per_s1, logits_per_s2 = self.get_logits(s1_features, s2_features, logit_scale, logit_bias=logit_bias,)
 
         labels = self.get_ground_truth(device, logits_per_s1.shape[0])
 

@@ -119,34 +119,34 @@ def load_ciip_model_checkpoint(checkpoint_path):
 
 
 
-def adjust_positional_embedding(encoder, resolution=264, patch_size=16):
-    """
-    Adjust the positional embedding in the attention pooling layer to match the new resolution and patch size.
-    """
-    if not hasattr(encoder, "attnpool") or encoder.attnpool is None:
-        print("No attention pooling layer found; skipping positional embedding adjustment.")
-        return
+# def adjust_positional_embedding(encoder, resolution=264, patch_size=16):
+#     """
+#     Adjust the positional embedding in the attention pooling layer to match the new resolution and patch size.
+#     """
+#     if not hasattr(encoder, "attnpool") or encoder.attnpool is None:
+#         print("No attention pooling layer found; skipping positional embedding adjustment.")
+#         return
 
-    # Calculate the expected number of patches
-    num_patches = (resolution // patch_size) ** 2  # For a 264x264 image with 16x16 patches, this should be 256
-    expected_embedding_size = num_patches + 1  # +1 for the [CLS] token
+#     # Calculate the expected number of patches
+#     num_patches = (resolution // patch_size) ** 2  # For a 264x264 image with 16x16 patches, this should be 256
+#     expected_embedding_size = num_patches + 1  # +1 for the [CLS] token
 
-    # Get the current positional embedding
-    positional_embedding = encoder.attnpool.positional_embedding
-    current_size = positional_embedding.size(0)
+#     # Get the current positional embedding
+#     positional_embedding = encoder.attnpool.positional_embedding
+#     current_size = positional_embedding.size(0)
 
-    if current_size != expected_embedding_size:
-        print(f"Adjusting positional embeddings: {current_size} -> {expected_embedding_size}")
-        # Interpolate to the new size
-        new_positional_embedding = F.interpolate(
-            positional_embedding.unsqueeze(0).unsqueeze(0),  # Add batch and channel dimensions
-            size=(expected_embedding_size,),
-            mode="linear",
-            align_corners=False,
-        ).squeeze(0).squeeze(0)  # Remove added dimensions
+#     if current_size != expected_embedding_size:
+#         print(f"Adjusting positional embeddings: {current_size} -> {expected_embedding_size}")
+#         # Interpolate to the new size
+#         new_positional_embedding = F.interpolate(
+#             positional_embedding.unsqueeze(0).unsqueeze(0),  # Add batch and channel dimensions
+#             size=(expected_embedding_size,),
+#             mode="linear",
+#             align_corners=False,
+#         ).squeeze(0).squeeze(0)  # Remove added dimensions
 
-        # Update the positional embedding in the model
-        encoder.attnpool.positional_embedding = nn.Parameter(new_positional_embedding)
-    else:
-        print("Positional embeddings already match the expected size; no adjustment needed.")
+#         # Update the positional embedding in the model
+#         encoder.attnpool.positional_embedding = nn.Parameter(new_positional_embedding)
+#     else:
+#         print("Positional embeddings already match the expected size; no adjustment needed.")
 

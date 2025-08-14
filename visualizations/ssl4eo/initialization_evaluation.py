@@ -35,6 +35,8 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 from sklearn.metrics.pairwise import cosine_similarity
+import torch.nn as nn
+
 
 def compare_keys(model, state_dict):
     model_keys = set(model.state_dict().keys())
@@ -110,7 +112,7 @@ def calc_linear_separability(s1_embeddings, s2_embeddings):
     combined_embeddings = np.vstack([s1_embeddings, s2_embeddings])
     labels = np.array([0] * len(s1_embeddings) + [1] * len(s2_embeddings))
 
-    X_train, X_test, y_train, y_test = train_test_split(combined_embeddings, labels, test_size=0.2, random_state=42)
+    X_train, X_test, y_train, y_test = train_test_split(combined_embeddings, labels, test_size=0.90, random_state=42)
 
     clf = LogisticRegression(max_iter=1000)
     clf.fit(X_train, y_train)
@@ -121,6 +123,12 @@ def calc_linear_separability(s1_embeddings, s2_embeddings):
 
 # From Two Effects, One Trigger
 def calc_relative_modality_gap(s1_embeddings, s2_embeddings):
+    # # normalize s1
+    # s1_embeddings = s1_embeddings / (torch.norm(s1_embeddings, dim=1, keepdim=True) + 1e-8)
+    # s2_embeddings = s2_embeddings / (torch.norm(s2_embeddings, dim=1, keepdim=True) + 1e-8)
+    s1_embeddings = np.array(s1_embeddings)
+    s2_embeddings = np.array(s2_embeddings)
+
     # Cross-modal dissimilarity (d(x_i, y_i))
     cross_dissim = 1 - np.sum(s1_embeddings * s2_embeddings, axis=1)
     avg_cross_dissim = np.mean(cross_dissim)
@@ -206,7 +214,9 @@ class EmbeddingDataset(torch.utils.data.Dataset):
         # print(sample)
         with self.autocast():
             if self.encoder in ('s1', 'both'):
-                out1 = self.model.encode_s1(s1)
+                out1 = self.model.encode_s1(s1, normalize=True)
+
+
                 # apply orthogonal matrix W if it exists
                 # if hasattr(self.model.encoder_s1, 'W'):
                 #     out1 = out1 @ self.model.encoder_s1.W
@@ -216,7 +226,7 @@ class EmbeddingDataset(torch.utils.data.Dataset):
                 result['s1'] = out1.cpu()
 
             if self.encoder in ('s2', 'both'):
-                out2 = self.model.encode_s2(s2)
+                out2 = self.model.encode_s2(s2, normalize=True)
                 # NORMALIZE
                 # out2 = out2 / out2.norm(dim=1, keepdim=True)
                 result['s2'] = out2.cpu()
@@ -245,6 +255,45 @@ class Sampler():
                 samples.append(self.dataset[idx])           
         
         return samples
+
+
+def get_non_corresponding_cosine_similarities(s1, s2):
+    """
+    Computes cosine similarity between s1[i] and s2[j] for all i != j.
+
+    Args:
+        s1 (torch.Tensor): Tensor of shape (N, D).
+        s2 (torch.Tensor): Tensor of shape (N, D).
+
+    Returns:
+        torch.Tensor: A 1D tensor containing all off-diagonal cosine similarities.
+                      If N=1, returns an empty tensor.
+    """
+    N = s1.shape[0]
+    if N == 0:
+        return torch.empty(0, dtype=s1.dtype, device=s1.device)
+    if N == 1: # No non-corresponding elements for a batch size of 1
+        return torch.empty(0, dtype=s1.dtype, device=s1.device)
+
+
+    # 1. L2 Normalize both tensors
+    s1_norm = F.normalize(s1, p=2, dim=1)
+    s2_norm = F.normalize(s2, p=2, dim=1)
+
+    # 2. Compute the full pairwise cosine similarity matrix
+    # Resulting shape: (N, N)
+    similarity_matrix = torch.matmul(s1_norm, s2_norm.T)
+
+    # 3. Create a mask to select off-diagonal elements
+    # The diagonal elements (i == j) correspond to positive pairs.
+    # The off-diagonal elements (i != j) correspond to negative (non-corresponding) pairs.
+    mask = torch.ones(N, N, dtype=torch.bool, device=s1.device)
+    mask = mask.fill_diagonal_(False) # Set diagonal elements to False
+
+    # 4. Use the mask to extract the non-corresponding similarities
+    non_corresponding_sims = similarity_matrix[mask]
+
+    return non_corresponding_sims.cpu().numpy()
     
 def process_sampled_to_df(sampled, sat='s1'):
     dfs = []
@@ -260,59 +309,6 @@ def process_sampled_to_df(sampled, sat='s1'):
     # list of dfs to df
     df = pd.concat(dfs)
     return df
-
-# def cosine_similarity_matrix(X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
-#     """
-#     Computes the cosine similarity matrix between two sets of vectors.
-
-#     Args:
-#         X (torch.Tensor): Tensor of shape (N, D)
-#         Y (torch.Tensor): Tensor of shape (M, D)
-
-#     Returns:
-#         torch.Tensor: Cosine similarity matrix of shape (N, M)
-#                       where entry (i, j) is the cosine similarity between X[i] and Y[j]
-#     """
-#     # # Normalize rows to unit vectors
-#     # X_norm = X / X.norm(dim=1, keepdim=True) #.clamp(min=1e-8)
-#     # Y_norm = Y / Y.norm(dim=1, keepdim=True) #.clamp(min=1e-8)
-
-#     # Compute cosine similarity as dot product of normalized vectors
-#     sim_matrix = X_norm @ Y_norm.T  # shape: (N, M)
-
-#     return sim_matrix
-
-
-# def unique_cosine_similarities(X: torch.Tensor, Y: torch.Tensor = None) -> torch.Tensor:
-#     """
-#     Computes cosine similarity between all unique pairs of embeddings.
-    
-#     If Y is None, computes the upper triangle (without diagonal) of cosine similarity matrix of X vs X.
-#     If Y is provided and X.shape[0] == Y.shape[0], returns pairwise cosine similarity: X[i] vs Y[i].
-    
-#     Args:
-#         X (torch.Tensor): Tensor of shape (N, D) where N is the number of samples and D is the embedding dimension.
-#         Y (torch.Tensor, optional): Tensor of shape (N, D) or (M, D)
-        
-#     Returns:
-#         torch.Tensor: 1D tensor of cosine similarities for each unique pair.
-#     """
-#     if Y is None:
-#         sim_matrix = cosine_similarity_matrix(X, X)
-#         # Extract upper triangle without the diagonal
-#         N = sim_matrix.size(0)
-#         iu = torch.triu_indices(N, N, offset=1)
-#         unique_sims = sim_matrix[iu[0], iu[1]]
-#         return unique_sims
-#     else:
-#         assert X.shape == Y.shape, "If Y is provided, X and Y must have the same shape to compute pairwise similarities"
-#         sim_matrix = cosine_similarity_matrix(X, Y)
-#         N = sim_matrix.shape[0]
-#         iu = np.triu_indices(N, k=1)
-#         upper_triangle_sims = sim_matrix[iu]
-#         return upper_triangle_sims
-    
-
 
 from torch.utils.data import Dataset, DataLoader
 class Subset(Dataset):
@@ -342,7 +338,9 @@ def main(args: DictConfig):
 
     # path to the directory containing the experiment model checkpoints
     # chkpt_path = '/local/ms-data/SSL4EO/model/2025_07_03-RandomInit-bs4096/checkpoints'
-    chkpt_path = '/home/juro4948/ciip/logs/2025_07_02-12_18_14-model_resnet50-lr_0.0001-b_128-j_6-p_fp16/checkpoints'
+    chkpt_path = '/local/ms-data/SSL4EO/model/2025-08-03_12-52-38-test-compute/2025_08_03-13_00_14-model_resnet50-lr_5e-05-b_256-j_4-p_amp/checkpoints/'
+    # '/local/ms-data/SSL4EO/model/2025-08-03_12-52-38-test-compute/2025_08_03-13_00_14-model_resnet50-lr_5e-05-b_256-j_4-p_amp/checkpoints/'
+    # /local/ms-data/SSL4EO/model/2025_08_06-MoCoInit/no-copy/'
    
     experiment_name = chkpt_path.split('/')[-2]
     print(f'Experiment name: {experiment_name}')
@@ -353,7 +351,7 @@ def main(args: DictConfig):
     w_path = os.path.join(chkpt_path, 'W.pt') if os.path.exists(os.path.join(chkpt_path, 'W.pt')) else None
     print(f'Using orthogonal matrix from: {w_path}')
 
-    num_pairs = 1000
+    num_pairs = 2000
 
     device = init_distributed_device(args.datamodule)
     # device = torch.device(args.datamodule.device)
@@ -381,6 +379,7 @@ def main(args: DictConfig):
     model_checkpoints = []
     cosine_sims = []
     paired_cosine_sims = []
+    negative_cosine_sims = []
     linear_separabilities = []
     relative_modality_gaps = []
 
@@ -435,35 +434,40 @@ def main(args: DictConfig):
 
 
       
-        # Calculate L2 norm between s1 and s2 
+        # --- Paired L2 norm ---
         l2_norm_s1_s2 = np.linalg.norm(s1.values - s2.values, axis=1)
         paired_l2_norms.append(l2_norm_s1_s2)
 
-        # convert to np
-        s1 = s1.to_numpy()
-        s2 = s2.to_numpy()
+        # --- Convert to torch ---
+        s1 = torch.tensor(s1.to_numpy(), dtype=torch.float32)
+        s2 = torch.tensor(s2.to_numpy(), dtype=torch.float32)
 
-        # calculate paired cosine similarity
-        cos_sim_s1_s2 = F.cosine_similarity(torch.tensor(s1), torch.tensor(s2), dim=1).cpu().numpy()
+        # --- Normalize each sample (row-wise) ---
+        s1 = F.normalize(s1, p=2, dim=1)
+        s2 = F.normalize(s2, p=2, dim=1)
+
+        # --- Paired cosine similarity ---
+        cos_sim_s1_s2 = F.cosine_similarity(s1, s2, dim=1).cpu().numpy()
         paired_cosine_sims.append(cos_sim_s1_s2)
-        
 
-        # calculate centroids and normalize them 
-        s1_centroid = s1.mean(axis=0)
-        s2_centroid = s2.mean(axis=0)
+        neg_sims = get_non_corresponding_cosine_similarities(s1, s2)
+        negative_cosine_sims.append(neg_sims)
 
-        # normalize centroids
-        s1_centroid = s1_centroid / np.linalg.norm(s1_centroid)
-        s2_centroid = s2_centroid / np.linalg.norm(s2_centroid)
+        # --- Centroid calculation ---
+        s1_centroid = s1.mean(dim=0, keepdim=True)
+        s2_centroid = s2.mean(dim=0, keepdim=True)
+
+        # --- Normalize centroids ---
+        s1_centroid = F.normalize(s1_centroid, p=2, dim=1)
+        s2_centroid = F.normalize(s2_centroid, p=2, dim=1)
 
 
-        assert s1_centroid.shape[0] == s2_centroid.shape[0] == args.model.embed_dim, f"Centroid L2 norm should match embedding dimension shape: {l2_norm_centroids.shape}"
-        l2_norm_centroids = np.linalg.norm(s1_centroid - s2_centroid)
+        # --- L2 norm between centroids ---
+        l2_norm_centroids = torch.norm(s1_centroid - s2_centroid, p=2).item()
         centroid_l2_norms.append(l2_norm_centroids)
 
-        # print cosine similarity between s1 and s2 centroids for both models
-        cos_sim_centroids = F.cosine_similarity(torch.tensor(s1_centroid).unsqueeze(0), torch.tensor(s2_centroid).unsqueeze(0)).item()
-        
+        # --- Cosine similarity between centroids ---
+        cos_sim_centroids = F.cosine_similarity(s1_centroid, s2_centroid).item()
         cosine_sims.append(cos_sim_centroids)
 
         linear_separability = calc_linear_separability(s1, s2)
@@ -500,13 +504,19 @@ def main(args: DictConfig):
     plt.show()
 
     # plot paired cosine sims
-    plt.plot(model_checkpoints, paired_cosine_sims)
+    # plt.plot(model_checkpoints, paired_cosine_sims)
     plt.figure()
     mean_cosine_sims = [np.mean(sims) for sims in paired_cosine_sims]
     std_cosine_sims = [np.std(sims) for sims in paired_cosine_sims]
-    plt.errorbar(model_checkpoints, mean_cosine_sims, yerr=std_cosine_sims, fmt='o', capsize=5, label='Mean ± Std Dev', color='blue', linestyle='-')
+    
+    # plt.plot(model_checkpoints, negative_cosine_sims)
+    mean_negative_cosine_sims = [np.mean(sims) for sims in negative_cosine_sims]
+    std_negative_cosine_sims = [np.std(sims) for sims in negative_cosine_sims]
+    plt.errorbar(model_checkpoints, mean_cosine_sims, yerr=std_cosine_sims, fmt='o', capsize=5, label='Positive Pairs', color='blue', linestyle='-')
+    plt.errorbar(model_checkpoints, mean_negative_cosine_sims, yerr=std_negative_cosine_sims, fmt='o', capsize=5, label='Negative Pairs', color='orange', linestyle='--')
     plt.xlabel('Model checkpoints')
     plt.ylabel('Pairwise Cosine Similarities')
+    plt.legend()
     plt.title(f'Pairwise S1-S2 Cosine Similarities - {experiment_name} (n={num_pairs})')
     plt.grid()
     plt.savefig('pairwise-cosine-sim.png', bbox_inches='tight')

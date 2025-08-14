@@ -305,9 +305,9 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                             inputs[key] = torch.cat(temp_accumulated)
 
                         losses = loss(**inputs, **inputs_no_accum, output_dict=True)
-                        logging.info(f"Losses for batch {i_accum}, inner pass {j + 1}/{args.train.accum_freq}: {losses}")
+                        # logging.info(f"Losses for batch {i_accum}, inner pass {j + 1}/{args.train.accum_freq}: {losses}")
                         
-                        total_loss = sum(losses.values())
+                        total_loss = sum(losses.values()) / args.train.accum_freq
                         losses["loss"] = total_loss
 
                     backward(total_loss, scaler)

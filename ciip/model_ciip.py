@@ -324,11 +324,14 @@ class CIIP(nn.Module):
     def dtype_s2(self):
         return self.encoder_s2.conv1.weight.dtype
 
-    def encode_s1(self, s1):
-        return self.encoder_s1(s1.type(self.dtype_s1))
-
-    def encode_s2(self, s2):
-        return self.encoder_s2(s2.type(self.dtype_s2))
+  
+    def encode_s1(self, s1, normalize):
+        features =  self.encoder_s1(s1.type(self.dtype_s1))
+        return F.normalize(features, dim=-1) if normalize else features
+    
+    def encode_s2(self, s2, normalize):
+        features = self.encoder_s2(s2.type(self.dtype_s2))
+        return F.normalize(features, dim=-1) if normalize else features
     
     # def encode_text(self, text):
     #     x = self.token_embedding(text).type(self.dtype)  # [batch_size, n_ctx, d_model]
@@ -347,19 +350,12 @@ class CIIP(nn.Module):
 
     def forward(self, s1, s2):
         # returns normalized logits
-        s1_features = self.encode_s1(s1)
-        s2_features = self.encode_s2(s2)
-
-        # normalized features
-        s1_features  = s1_features  / s1_features.norm(dim=-1, keepdim=True)
-        s2_features = s2_features / s2_features.norm(dim=-1, keepdim=True)
+        s1_features = self.encode_s1(s1, normalize=True)
+        s2_features = self.encode_s2(s2, normalize=True)
 
         # # cosine similarity as logits
         logit_scale = self.logit_scale.exp()
-        # logits_per_s1 = logit_scale * s1_features @ s2_features.t()   # May have to check that these dimensions align
-        # logits_per_s2 = logits_per_s1.t()
 
-        # shape = [global_batch_size, global_batch_size]
  
         out_dict = {
             "s1_features": s1_features,
@@ -383,8 +379,8 @@ class CIIP(nn.Module):
     
 
     def compute_embeddings(self, s1, s2):
-        s1_features = self.encode_s1(s1)
-        s2_features = self.encode_s2(s2)
+        s1_features = self.encode_s1(s1, normalize=False)
+        s2_features = self.encode_s2(s2, normalize=False)
 
         # these should be normalized already
         # # # normalized features
@@ -403,8 +399,8 @@ class CIIP(nn.Module):
         self.encoder_s2.compute_orthogonal_matrix = True
 
         
-        s1_layer1_features = self.encode_s1(s1)
-        s2_layer1_features = self.encode_s2(s2)
+        s1_layer1_features = self.encode_s1(s1, normalize=True)
+        s2_layer1_features = self.encode_s2(s2, normalize=True)
 
 
         # Compute centroids BEFORE alignment (mean over batch and spatial dims)

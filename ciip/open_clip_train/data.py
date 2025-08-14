@@ -63,7 +63,7 @@ class SSL4EODataset(Dataset):
         s1_samples = os.listdir(self.s1_dir)
         s2_samples = os.listdir(self.s2_dir)
 
-        assert len(s1_samples) == len(s2_samples), 'Number of locations in S1 and S2 should be the same'
+        assert len(s1_samples) == len(s2_samples), 'Number of locations in S1 and S2 should be the same, but got {} and {}.'.format(len(s1_samples), len(s2_samples))
 
         self.num_locations = len(s1_samples)
         self.length = self.num_locations * 4

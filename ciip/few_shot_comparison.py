@@ -380,9 +380,9 @@ def few_shot_comparison_pipeline_optimized(data_path, k_values, models, bands, b
                 train_features, train_labels = extract_features(current_model, dataloader_train, device, use_s2_only=use_s2_only)
                 test_features, test_labels = extract_features(current_model, dataloader_test, device, use_s2_only=use_s2_only)
 
-                # normalize all features (they are np)
-                train_features = train_features / (np.linalg.norm(train_features, axis=1, keepdims=True) + 1e-8)
-                test_features = test_features / (np.linalg.norm(test_features, axis=1, keepdims=True) + 1e-8)
+                # # normalize all features (they are np)
+                # train_features = train_features / (np.linalg.norm(train_features, axis=1, keepdims=True) + 1e-8)
+                # test_features = test_features / (np.linalg.norm(test_features, axis=1, keepdims=True) + 1e-8)
 
                 if k == 0:
                     # Zero-shot: use nearest-prototype classification on features.
@@ -511,6 +511,79 @@ if __name__ == "__main__":
     MODEL_ROOT = "/local/ms-data/SSL4EO/model"
 
     MODEL_CONFIGS = {
+        "2025_8_3_RandomInit-deltaAI-epoch1": {
+            "type": "ciip",
+            "weights": f"{MODEL_ROOT}/2025-08-03_12-52-38-test-compute/2025_08_03-13_00_14-model_resnet50-lr_5e-05-b_256-j_4-p_amp/checkpoints/epoch_1.pt",
+            "apply_band_correction": False,
+        },
+        "2025_8_3_RandomInit-deltaAI-epoch2": {
+            "type": "ciip",
+            "weights": f"{MODEL_ROOT}/2025-08-03_12-52-38-test-compute/2025_08_03-13_00_14-model_resnet50-lr_5e-05-b_256-j_4-p_amp/checkpoints/epoch_2.pt",
+            "apply_band_correction": False,
+        },
+        "2025_8_3_RandomInit-deltaAI-epoch3": {
+            "type": "ciip",
+            "weights": f"{MODEL_ROOT}/2025-08-03_12-52-38-test-compute/2025_08_03-13_00_14-model_resnet50-lr_5e-05-b_256-j_4-p_amp/checkpoints/epoch_3.pt",
+            "apply_band_correction": False,
+        },
+        "2025_8_3_RandomInit-deltaAI-epoch4": {
+            "type": "ciip",
+            "weights": f"{MODEL_ROOT}/2025-08-03_12-52-38-test-compute/2025_08_03-13_00_14-model_resnet50-lr_5e-05-b_256-j_4-p_amp/checkpoints/epoch_4.pt",
+            "apply_band_correction": False,
+        },
+        "2025_8_3_RandomInit-deltaAI-epoch5": {
+            "type": "ciip",
+            "weights": f"{MODEL_ROOT}/2025-08-03_12-52-38-test-compute/2025_08_03-13_00_14-model_resnet50-lr_5e-05-b_256-j_4-p_amp/checkpoints/epoch_5.pt",
+            "apply_band_correction": False,
+        },
+        "2025_8_3_RandomInit-deltaAI-epoch6": {
+            "type": "ciip",
+            "weights": f"{MODEL_ROOT}/2025-08-03_12-52-38-test-compute/2025_08_03-13_00_14-model_resnet50-lr_5e-05-b_256-j_4-p_amp/checkpoints/epoch_6.pt",
+            "apply_band_correction": False,
+        },
+        "2025_8_3_RandomInit-deltaAI-epoch7": {
+            "type": "ciip",
+            "weights": f"{MODEL_ROOT}/2025-08-03_12-52-38-test-compute/2025_08_03-13_00_14-model_resnet50-lr_5e-05-b_256-j_4-p_amp/checkpoints/epoch_7.pt",
+            "apply_band_correction": False,
+        },
+        "2025_8_3_RandomInit-deltaAI-epoch8": {
+            "type": "ciip",
+            "weights": f"{MODEL_ROOT}/2025-08-03_12-52-38-test-compute/2025_08_03-13_00_14-model_resnet50-lr_5e-05-b_256-j_4-p_amp/checkpoints/epoch_8.pt",
+            "apply_band_correction": False,
+        },
+        "2025_8_3_RandomInit-deltaAI-epoch9": {
+            "type": "ciip",
+            "weights": f"{MODEL_ROOT}/2025-08-03_12-52-38-test-compute/2025_08_03-13_00_14-model_resnet50-lr_5e-05-b_256-j_4-p_amp/checkpoints/epoch_9.pt",
+            "apply_band_correction": False,
+        },
+        "2025_8_3_RandomInit-deltaAI-epoch10": {
+            "type": "ciip",
+            "weights": f"{MODEL_ROOT}/2025-08-03_12-52-38-test-compute/2025_08_03-13_00_14-model_resnet50-lr_5e-05-b_256-j_4-p_amp/checkpoints/epoch_10.pt",
+            "apply_band_correction": False,
+        },
+        "2025_8_3_RandomInit-deltaAI-epoch20": {
+            "type": "ciip",
+            "weights": f"{MODEL_ROOT}/2025-08-03_12-52-38-test-compute/2025_08_03-13_00_14-model_resnet50-lr_5e-05-b_256-j_4-p_amp/checkpoints/epoch_20.pt",
+            "apply_band_correction": False,
+        },
+        "2025_8_3_RandomInit-deltaAI-epoch11": {
+            "type": "ciip",
+            "weights": f"{MODEL_ROOT}/2025-08-03_12-52-38-test-compute/2025_08_03-13_00_14-model_resnet50-lr_5e-05-b_256-j_4-p_amp/checkpoints/epoch_11.pt",
+            "apply_band_correction": False,
+        },
+        "2025_8_3_RandomInit-deltaAI-epoch53": {
+            "type": "ciip",
+            "weights": f"{MODEL_ROOT}/2025-08-03_12-52-38-test-compute/2025_08_03-13_00_14-model_resnet50-lr_5e-05-b_256-j_4-p_amp/checkpoints/epoch_53.pt",
+            "apply_band_correction": False,
+        },
+        "2025_8_6_MoCoInit-deltaAI-epoch62": {
+            "type": "ciip",
+            "weights": f"{MODEL_ROOT}/2025_08_06-MoCoInit/no-copy/epoch_62.pt",
+            "apply_band_correction": False,
+        },
+
+
+
         "2025_4_14-MoCoInit-bs128-amp-bandsrearranged": {
             "type": "ciip",
             "weights": f"{MODEL_ROOT}/2025_4_14-MoCoInit-bs128-amp/checkpoints/epoch_100.pt",
@@ -572,13 +645,14 @@ if __name__ == "__main__":
 
     CONFIG = {
         "data_path": "./local/ms-data/eurosat_data",
-        "k_values": [0, 1, 8, 32],
+        "k_values": [0, 1, 5, 10, 16, 32, 100],
         "batch_size": 64,
         "num_workers": 32,
-        "num_experiments": 10,
+        "num_experiments": 5,
         "bands": BANDS,  # assuming BANDS is defined elsewhere
-        "include_models": ['2025_4_14-MoCoInit-bs128-amp', "2025_07_03-RandomInit-bs4096-epoch45",
-         "2025-03-18-MoCoInit-bs128-fp16", "SSL4EO-ResNet50_MoCo", "SSL4EO-ResNet50_DINO", "ResNet50_Random"]
+        "include_models": [ "SSL4EO-ResNet50_MoCo", "SSL4EO-ResNet50_DINO", "ResNet50_Random", '2025_8_6_MoCoInit-deltaAI-epoch62', '2025_8_3_RandomInit-deltaAI-epoch53']
+        # [ "SSL4EO-ResNet50_MoCo", "SSL4EO-ResNet50_DINO", "ResNet50_Random", '2025_8_3_RandomInit-deltaAI-epoch10', '2025_8_3_RandomInit-deltaAI-epoch20', '2025_8_3_RandomInit-deltaAI-epoch53']
+        # , "ResNet50_Random"]
         # ["2025-07-25-MoCoInit-bs128-amp", "2025_07_09-16-RandomInit-bs4096-epoch45",
         #                         "SSL4EO-ResNet50_MoCo", "SSL4EO-ResNet50_DINO", "ResNet50_Random"]
         # ['2025_4_14-MoCoInit-bs128-amp', "2025_07_03-RandomInit-bs4096-epoch45", "2025_03_31-MoCoInit-bs256-amp",
@@ -652,7 +726,7 @@ if __name__ == "__main__":
    
 
     timestamp = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
-    experiment_name = f"{timestamp}-no-bandcorrection"
+    experiment_name = f"{timestamp}-epochs"
     output_dir = os.path.join("few_shot_eval", experiment_name)
     os.makedirs(output_dir, exist_ok=True)
 
