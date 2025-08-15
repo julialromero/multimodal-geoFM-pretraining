@@ -1,42 +1,27 @@
 import csv
 import hashlib
-import datetime
 import os
-import random
-import torch
 import copy
-from collections import Counter
+import json
+import logging
+from datetime import datetime
+
 import numpy as np
 import matplotlib.pyplot as plt
+import torch
+import torch.nn as nn
 from torch.utils.data import DataLoader, Subset, TensorDataset
 from torchvision import transforms
-from torchgeo.datasets import EuroSAT
-from torchgeo.models import resnet50, ResNet50_Weights, resnet18, ResNet18_Weights, ViTSmall16_Weights, \
-    vit_small_patch16_224
 from sklearn.metrics import accuracy_score, f1_score
 from tqdm import tqdm
-import torch.nn as nn
-import torch.optim as optim
 
-from model import ResNet50
-import json
-from datetime import datetime
-from pytorch_lightning.callbacks import EarlyStopping, ModelSummary, ModelCheckpoint
-from pytorch_lightning.loggers import TensorBoardLogger, CSVLogger, CometLogger
+from torchgeo.datasets import EuroSAT
+from torchgeo.models import resnet50, ResNet50_Weights
+
 import pytorch_lightning as pl
+from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 
-import logging
-
-import sys
-# sys.path.append('/home/juro4948/ciip/ciip/evaluation')
 from utils import *
-# seed = 42
-# random.seed(seed)
-# np.random.seed(seed)
-# torch.manual_seed(seed)
-# torch.cuda.manual_seed_all(seed)
-# torch.backends.cudnn.deterministic = True
-# torch.backends.cudnn.benchmark = False
 
 
 MEAN = {
@@ -80,39 +65,32 @@ std_list = [STD[b] for b in BANDS]
 
 
 data_transforms = {
-        'train':  transforms.Compose([
-            transforms.RandomResizedCrop(224),
-            transforms.RandomHorizontalFlip(),
-            # transforms.ToTensor(),
-            transforms.Normalize(mean=mean_list, std=std_list),
-        ]),'val': transforms.Compose([
-            transforms.Resize(256),
-            transforms.CenterCrop(224),
-            # transforms.ToTensor(),
-            transforms.Normalize(mean=mean_list, std=std_list),
-        ]),
-    }
-train_transform = CustomTransform(data_transforms['train'])
-val_transform = CustomTransform(data_transforms['val'])
+    "train": transforms.Compose([
+        transforms.RandomResizedCrop(224),
+        transforms.RandomHorizontalFlip(),
+        transforms.Normalize(mean=mean_list, std=std_list),
+    ]),
+    "val": transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
+        transforms.Normalize(mean=mean_list, std=std_list),
+    ]),
+}
+
+train_transform = CustomTransform(data_transforms["train"])
+val_transform = CustomTransform(data_transforms["val"])
 
 def drop_last_linear_layer(model):
-    """
-    Replace the model's final linear layer with an identity function so that the features
-    from the backbone are returned without applying the last linear transformation.
-    """
-    if hasattr(model, 'encoder_s2') and hasattr(model.encoder_s2, 'fc'):
-        # Replace the fc layer of encoder_s2 with an identity mapping.
-        print(model.encoder_s2.fc)
-        _logger.info(f'Dropping {model.encoder_s2.fc}')
+    """Replace the model's final linear layer with an identity function."""
+    logger = logging.getLogger(__name__)
+    if hasattr(model, "encoder_s2") and hasattr(model.encoder_s2, "fc"):
+        logger.info("Dropping %s", model.encoder_s2.fc)
         model.encoder_s2.fc = nn.Identity()
-        print(f'Replaced fc')
-    elif hasattr(model, 'fc'):
-        print(f'set identity fc')
-        _logger.info(f'Dropping {model.fc}')
-        # If the model has a top-level fc, replace it.
+    elif hasattr(model, "fc"):
+        logger.info("Dropping %s", model.fc)
         model.fc = nn.Identity()
     else:
-        print("Warning: No final linear layer found to drop!")
+        logger.warning("No final linear layer found to drop")
     return model
 
 
@@ -145,6 +123,8 @@ class FewShotClassifierLightning(pl.LightningModule):
         self.validation_labels = []
         self.test_predictions = []
         self.test_labels = []
+        self.train_losses = []
+        self.val_losses = []
 
     def forward(self, x):
         return self.model(x)
@@ -217,8 +197,16 @@ class FewShotClassifierLightning(pl.LightningModule):
         accuracy = accuracy_score(all_labels, all_predictions)
         f1 = f1_score(all_labels, all_predictions, average="weighted")
 
-        avg_val_loss = self.trainer.callback_metrics.get('val_loss', float('nan')) 
+        avg_val_loss = self.trainer.callback_metrics.get('val_loss', float('nan'))
         avg_train_loss = self.trainer.callback_metrics.get('train_loss', float('nan'))
+
+        if isinstance(avg_train_loss, torch.Tensor):
+            avg_train_loss = avg_train_loss.item()
+        if isinstance(avg_val_loss, torch.Tensor):
+            avg_val_loss = avg_val_loss.item()
+
+        self.train_losses.append(avg_train_loss)
+        self.val_losses.append(avg_val_loss)
 
         _logger.info(
             f"Epoch {self.current_epoch} End - "
@@ -290,7 +278,7 @@ class FewShotClassifier(nn.Module):
 
 
 
-def train_pytorch_classifier(features, labels, val_features, val_labels, test_features, test_labels, num_classes, device, classifier_batch_size=256, model_name='None', num_workers=8):
+def train_pytorch_classifier(features, labels, val_features, val_labels, test_features, test_labels, num_classes, device, classifier_batch_size=256, model_name='None', num_workers=8, output_dir=None, plot_name=None):
     # Training Data
     features_tensor = torch.tensor(features, dtype=torch.float32)
     labels_tensor = torch.tensor(labels, dtype=torch.long)
@@ -402,6 +390,19 @@ def train_pytorch_classifier(features, labels, val_features, val_labels, test_fe
     )
     print("Training finished.")
 
+    if output_dir is not None:
+        epochs = range(1, len(lightning_model.train_losses) + 1)
+        plt.figure()
+        plt.plot(epochs, lightning_model.train_losses, label="Train Loss")
+        plt.plot(epochs, lightning_model.val_losses, label="Validation Loss")
+        plt.xlabel("Epoch")
+        plt.ylabel("Loss")
+        plt.title(f"{model_name} Loss")
+        plt.legend()
+        plot_path = os.path.join(output_dir, plot_name or f"{model_name}_train_val_loss.png")
+        plt.savefig(plot_path)
+        plt.close()
+
     # --- Load best model ---
     best_model_path = checkpoint_callback.best_model_path
     print(f"Loading best model from: {best_model_path}")
@@ -458,13 +459,13 @@ def get_deterministic_seed_for_experiment(k, exp):
 
 # Few-Shot Comparison Pipeline
 def few_shot_comparison_pipeline_optimized(data_path, percents, models, bands, batch_size=16, num_workers=18,
-                                           task="classification", num_experiments=10, **kwargs):
+                                           task="classification", num_experiments=10, output_dir=None, **kwargs):
 
     print('******************* NEW FEW-SHOT COMPARISON PIPELINE *******************')
 
    
     results = {}
-    device = "cuda:1" if torch.cuda.is_available() else "cpu"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     print(device)
 
     transformed_dataset_train = EuroSAT(data_path, split="train", bands=BANDS, transforms=train_transform, download=True)
@@ -498,7 +499,7 @@ def few_shot_comparison_pipeline_optimized(data_path, percents, models, bands, b
             _logger.info(f'{model_name} has fc of {model.fc}')
         else:
             _logger.info(f'{model_name} has no fc.')
-        if model_config['drop_last_layer']:
+        if model_config.get('drop_last_layer'):
             current_model = drop_last_linear_layer(current_model)
         # continue
             
@@ -517,7 +518,8 @@ def few_shot_comparison_pipeline_optimized(data_path, percents, models, bands, b
 
                 num_samples = int(percent * len(transformed_dataset_train))
                 length_of_training_data = len(transformed_dataset_train)
-                selected_indices = np.random.choice(length_of_training_data, num_samples, replace=False)
+                rng = np.random.default_rng(seed)
+                selected_indices = rng.choice(length_of_training_data, num_samples, replace=False)
 
                 train_data = Subset(transformed_dataset_train, selected_indices)
 
@@ -537,17 +539,28 @@ def few_shot_comparison_pipeline_optimized(data_path, percents, models, bands, b
                 val_features, val_labels = extract_features(current_model, dataloader_val, device, use_s2_only=use_s2_only)
                 test_features, test_labels = extract_features(current_model, dataloader_test, device, use_s2_only=use_s2_only)
 
-                # # normalize all features (they are np)
-                print(train_features.shape)
- 
                 if NORMALIZE:
                     train_features = train_features / (np.linalg.norm(train_features, axis=1, keepdims=True) + 1e-8)
                     test_features = test_features / (np.linalg.norm(test_features, axis=1, keepdims=True) + 1e-8)
          
 
                 # train linear classifier
-                classifier, trainer_results = train_pytorch_classifier(train_features, train_labels, val_features, val_labels, test_features, test_labels, len(np.unique(train_labels)),
-                                                        device, classifier_batch_size=batch_size, model_name=model_name, num_workers=num_workers)
+                plot_filename = f"{model_name}_p{str(percent).replace('.', 'p')}_exp{exp}_loss.png"
+                classifier, trainer_results = train_pytorch_classifier(
+                    train_features,
+                    train_labels,
+                    val_features,
+                    val_labels,
+                    test_features,
+                    test_labels,
+                    len(np.unique(train_labels)),
+                    device,
+                    classifier_batch_size=batch_size,
+                    model_name=model_name,
+                    num_workers=num_workers,
+                    output_dir=output_dir,
+                    plot_name=plot_filename,
+                )
 
                 if trainer_results:
                     final_accuracy = trainer_results[0].get('test_accuracy')
@@ -756,43 +769,29 @@ if __name__ == "__main__":
     CONFIG["models"] = model_info
     CONFIG['notes'] = 'Previously, we were dropping the fc layer and replacing with Identity, so the embeddings were dim of 2048. Try experiment without dropping fc layer. It seemed like Random performance went down, even though it should be unaffected.' 
 
-    ## Setup Logging ##
+    ## Setup Logging and Output Directory ##
     timestamp = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
     experiment_name = f"{timestamp}"
+    output_dir = os.path.join("results", "linearprobe-clf", f"normalized-{NORMALIZE}", experiment_name)
+    os.makedirs(output_dir, exist_ok=True)
 
-
-    log_dir = f"results/logs/lp/normalization-{NORMALIZE}/"
-    log_filename = experiment_name + "-training_log.txt"
-    log_filepath = os.path.join(log_dir, log_filename)
-    os.makedirs(log_dir, exist_ok=True)
-
-    custom_logger = logging.getLogger(__name__) # Use __name__ or a custom name like "my_trainer_logger"
-    custom_logger.setLevel(logging.INFO)    
+    log_filepath = os.path.join(output_dir, "training_log.txt")
+    custom_logger = logging.getLogger(__name__)
+    custom_logger.setLevel(logging.INFO)
 
     file_handler = logging.FileHandler(log_filepath)
     file_handler.setLevel(logging.INFO)
-
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     file_handler.setFormatter(formatter)
-
-    if not custom_logger.handlers: # Only add if no handlers are present
+    if not custom_logger.handlers:
         custom_logger.addHandler(file_handler)
 
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    file_handler.setFormatter(formatter)
-
     logging.getLogger("lightning.pytorch").setLevel(logging.WARNING)
-    _logger = logging.getLogger(__name__)
+    _logger = custom_logger
 
-    results = few_shot_comparison_pipeline_optimized(**CONFIG)
+    results = few_shot_comparison_pipeline_optimized(output_dir=output_dir, **CONFIG)
     print(results)
-
     _logger.info(results)
-
-    
-    
-    output_dir = os.path.join(f"results/linearprobe-clf/normalized-{NORMALIZE}", experiment_name)
-    os.makedirs(output_dir, exist_ok=True)
 
     # Save metrics
     output_results_to_csv(results, CONFIG["percents"], metric="accuracy", output_dir=output_dir)
@@ -804,18 +803,13 @@ if __name__ == "__main__":
 
     _logger.info(f'Saved results to {output_dir}')
     print(f'Saved results to {output_dir}')
-    print(f'Saved logs to {log_dir}')
 
-    SAVE_CONFIG = CONFIG
-    SAVE_CONFIG['models'] = []
-    try:
-        for model_info in CONFIG['models']:
-            if "weights" in model_info:
-                del model_dict["weights"]
-            SAVE_CONFIG['models'].append(model_info)
-    except:
-        pass
-        
-    
+    save_config = CONFIG.copy()
+    save_config['models'] = []
+    for model_info in CONFIG['models']:
+        model_copy = model_info.copy()
+        model_copy.pop('weights', None)
+        save_config['models'].append(model_copy)
+
     with open(os.path.join(output_dir, "config.json"), "w") as f:
-        json.dump(CONFIG, f, indent=4)
+        json.dump(save_config, f, indent=4)
