@@ -19,4 +19,15 @@ checkpoints/
 log/
 
 
-**/configs/prod_default.yaml
+# **/configs/prod_default.yaml
+# **
+*.in
+data/**
+local/*
+**/local/*
+notebooks/
+tests/
+visualizations/
+# **/open_clip_train/outputs/
+**/ciip/lightning_logs/
+# **/metadata.json

@@ -18,6 +18,12 @@ from tqdm import tqdm
 import torch.nn as nn
 import torch.optim as optim
 
+
+
+import sys
+sys.path.append('/home/juro4948/ciip/ciip')
+
+
 from model import ResNet50
 import json
 from datetime import datetime
@@ -28,7 +34,7 @@ import pytorch_lightning as pl
 import logging
 
 import sys
-# sys.path.append('/home/juro4948/ciip/ciip/evaluation')
+sys.path.append('/home/juro4948/ciip/ciip')
 from utils import *
 # seed = 42
 # random.seed(seed)
@@ -705,6 +711,21 @@ if __name__ == "__main__":
             "weights": f"{MODEL_ROOT}/2025_08_06-MoCoInit/no-copy/epoch_62.pt",
             'drop_last_layer': True
         },
+        "2025_8_6_MoCoInit-deltaAI-epoch85": {
+            "type": "ciip",
+            "weights": f"{MODEL_ROOT}/2025_08_06-MoCoInit/no-copy/epoch_85.pt",
+            'drop_last_layer': True
+        },
+        "2025_8_6_MoCoInit-deltaAI-epoch90": {
+            "type": "ciip",
+            "weights": f"{MODEL_ROOT}/2025_08_06-MoCoInit/no-copy/epoch_90.pt",
+            'drop_last_layer': True
+        },
+        "2025_8_6_MoCoInit-deltaAI-epoch160": {
+            "type": "ciip",
+            "weights": f"{MODEL_ROOT}/2025_08_06-MoCoInit/no-copy/epoch_160.pt",
+            'drop_last_layer': True
+        },
         "SSL4EO-ResNet50_MoCo": {
             "type": "resnet50",
             "weights": ResNet50_Weights.SENTINEL2_ALL_MOCO,
@@ -719,17 +740,22 @@ if __name__ == "__main__":
             "type": "resnet50",
             'weights': None,
             'drop_last_layer': True
+        },
+        "ResNet50_Random-EndtoEndSupervised": {
+            "type": "resnet50",
+            'weights': None,
+            'drop_last_layer': True
         }
     }
 
     CONFIG = {
         "data_path": "/local/ms-data/EuroSAT/",  # Path to EuroSAT dataset
-        "percents": [0.05, 0.1, 1], #[0.1, 1],
+        "percents": [0.05, 1], #[0.1, 1],
         "batch_size": 512,
         "num_workers": 8,
-        "num_experiments": 2,
+        "num_experiments": 1,
         "bands": BANDS,  # assuming BANDS is defined elsewhere
-        "models": ['2025_8_3_RandomInit-deltaAI-epoch53', '2025_8_6_MoCoInit-deltaAI-epoch62', "ResNet50_Random"] # , "SSL4EO-ResNet50_MoCo", , 'SSL4EO-ResNet50_DINO'
+        "models": ["2025_8_6_MoCoInit-deltaAI-epoch160",  "ResNet50_Random-EndtoEndSupervised"] # , "SSL4EO-ResNet50_MoCo", , 'SSL4EO-ResNet50_DINO'
     }
 
     #  '2025_8_3_RandomInit-deltaAI-epoch40', '2025_8_3_RandomInit-deltaAI-epoch30', '2025_8_3_RandomInit-deltaAI-epoch20', '2025_8_3_RandomInit-deltaAI-epoch10'
@@ -811,7 +837,7 @@ if __name__ == "__main__":
     try:
         for model_info in CONFIG['models']:
             if "weights" in model_info:
-                del model_dict["weights"]
+                del model_info["weights"]
             SAVE_CONFIG['models'].append(model_info)
     except:
         pass
