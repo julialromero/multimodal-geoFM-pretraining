@@ -843,4 +843,4 @@ if __name__ == "__main__":
         
     
     with open(os.path.join(output_dir, "config.json"), "w") as f:
-        json.dump(save_config, f, indent=4)
+        json.dump(SAVE_CONFIG, f, indent=4)

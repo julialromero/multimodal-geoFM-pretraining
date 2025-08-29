@@ -144,9 +144,9 @@ def train_resnet50_end_to_end(data_path, epochs=10, batch_size=64, lr=1e-3, devi
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="End-to-end supervised training of ResNet50 on EuroSAT")
-    parser.add_argument("data_path", help="Path to EuroSAT dataset")
+    parser.add_argument("--data_path", help="Path to EuroSAT dataset", default="/local/ms-data/EuroSAT/")
     parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--batch_size", type=int, default=512)
     parser.add_argument("--lr", type=float, default=1e-3)
     args = parser.parse_args()
     train_resnet50_end_to_end(args.data_path, args.epochs, args.batch_size, args.lr)
