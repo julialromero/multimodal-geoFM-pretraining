@@ -832,4 +832,4 @@ if __name__ == "__main__":
         save_config['models'].append(model_copy)
 
     with open(os.path.join(output_dir, "config.json"), "w") as f:
-        json.dump(save_config, f, indent=4)
+        json.dump(SAVE_CONFIG, f, indent=4)
