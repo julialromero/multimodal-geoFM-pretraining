@@ -22,7 +22,6 @@ from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torchvision.transforms import Resize
-from PIL import Image
 
 
 ### band statistics: mean & std
@@ -119,8 +118,8 @@ class SSL4EODataset(Dataset):
         # third_band = (vh_image + vv_image) / 2
 
         # resize each of these
-        vh_image = np.array(self.resize_transform(Image.fromarray(vh_image.astype(np.uint8))))
-        vv_image = np.array(self.resize_transform(Image.fromarray(vv_image.astype(np.uint8))))
+        vh_image = self.resize_transform(torch.from_numpy(vh_image).unsqueeze(0)).squeeze(0).numpy()
+        vv_image = self.resize_transform(torch.from_numpy(vv_image).unsqueeze(0)).squeeze(0).numpy()
 
         # third_band = np.array(self.resize_transform(Image.fromarray(third_band.astype(np.uint8))))
         # s1_composite_image = np.stack((vh_image, vv_image, third_band), axis=-1)
@@ -132,17 +131,16 @@ class SSL4EODataset(Dataset):
         s2_band_paths = [os.path.join(path_to_s2_season, f'B{band}.tif') for band in self.s2_bands]
         s2_band_images = [self.read_raster_image(band_path)[0] for band_path in s2_band_paths]
 
-        # resize the band images to target image dimension
-        s2_band_images = [np.array(self.resize_transform(Image.fromarray(band_image.astype(np.uint8)))) for band_image in s2_band_images]
-        assert all([band_image.shape == s2_band_images[0].shape for band_image in s2_band_images]), 'All bands should have the same shape'
-        
         # Normalize the bands
-        # s2_band_images = [self.normalize_image(band_image) for band_image in s2_band_images]
         if self.s2_tier == "s2a":
-            s2_band_images = [self.normalize(img, mean, std) for img, mean, std in
-                              zip(s2_band_images, S2A_MEAN, S2A_STD)]
+            s2_band_images = [self.normalize(img, mean, std) for img, mean, std in zip(s2_band_images, S2A_MEAN, S2A_STD)]
         else:
             s2_band_images = [self.normalize(img, mean, std) for img, mean, std in zip(s2_band_images, S2C_MEAN, S2C_STD)]
+
+        # resize the band images to target image dimension
+        s2_band_images = [self.resize_transform(torch.from_numpy(band_image).unsqueeze(0)).squeeze(0).numpy()
+                          for band_image in s2_band_images]
+        assert all([band_image.shape == s2_band_images[0].shape for band_image in s2_band_images]), 'All bands should have the same shape'
         
         s2_composite_image = np.stack(s2_band_images, axis=-1)  # Create a composite
         s1_composite_image = np.transpose(s1_composite_image, (2, 0, 1))
@@ -187,8 +185,8 @@ class SSL4EODataset(Dataset):
     def normalize(self, img, mean, std):
         min_value = mean - 2 * std
         max_value = mean + 2 * std
-        img = (img - min_value) / (max_value - min_value) * 255.0
-        img = np.clip(img, 0, 255).astype(np.uint8)
+        img = (img - min_value) / (max_value - min_value)
+        img = np.clip(img, 0, 1).astype(np.float32)
         return img
     
 
