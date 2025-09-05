@@ -1,28 +1,17 @@
 # import ast
 # import json
 import logging
-# import math
 import os
-# import random
-# import sys
-# import braceexpand
 from dataclasses import dataclass
 from multiprocessing import Value
-import rasterio
-import hydra
-import torch
 
+import hydra
 import numpy as np
-# import pandas as pd
-# import torch
-# import torchvision.datasets as datasets
-# import webdataset as wds
-from PIL import Image
-# from torch.utils.data import Dataset, DataLoader, SubsetRandomSampler, IterableDataset, get_worker_info
+import rasterio
+import torch
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torchvision.transforms import Resize
-from PIL import Image
 
 
 ### band statistics: mean & std
@@ -53,6 +42,13 @@ class SSL4EODataset(Dataset):
             raise ValueError('Band index should be between 1 and 12')
         self.transforms = transforms
         self.s2_tier = s2_tier
+
+        if self.s2_tier == "s2a":
+            stat_bands = ["1", "2", "3", "4", "5", "6", "7", "8", "8A", "9", "11", "12"]
+            self.s2_stats = {b: (m, s) for b, m, s in zip(stat_bands, S2A_MEAN, S2A_STD)}
+        else:
+            stat_bands = ["1", "2", "3", "4", "5", "6", "7", "8", "8A", "9", "10", "11", "12"]
+            self.s2_stats = {b: (m, s) for b, m, s in zip(stat_bands, S2C_MEAN, S2C_STD)}
 
         original_working_directory = hydra.utils.get_original_cwd()
         data_parent_directory = "/".join(original_working_directory.split("/")[:-2])
@@ -114,39 +110,28 @@ class SSL4EODataset(Dataset):
         # vh_image = self.normalize_image(vh_image)
         # vv_image = self.normalize_image(vv_image)
 
-        vv_image = self.normalize(vv_image, S1_MEAN[0], S1_STD[0])
-        vh_image = self.normalize(vh_image, S1_MEAN[1], S1_STD[1])
-        # third_band = (vh_image + vv_image) / 2
+        vv_image = torch.from_numpy(self.normalize(vv_image, S1_MEAN[0], S1_STD[0])).unsqueeze(0)
+        vh_image = torch.from_numpy(self.normalize(vh_image, S1_MEAN[1], S1_STD[1])).unsqueeze(0)
 
-        # resize each of these
-        vh_image = np.array(self.resize_transform(Image.fromarray(vh_image.astype(np.uint8))))
-        vv_image = np.array(self.resize_transform(Image.fromarray(vv_image.astype(np.uint8))))
+        vh_image = self.resize_transform(vh_image).squeeze(0)
+        vv_image = self.resize_transform(vv_image).squeeze(0)
 
-        # third_band = np.array(self.resize_transform(Image.fromarray(third_band.astype(np.uint8))))
-        # s1_composite_image = np.stack((vh_image, vv_image, third_band), axis=-1)
-        # if you want to add a 3rd band for RGB-related purposes, uncomment third_band above and stack
-        s1_composite_image = np.stack((vh_image, vv_image), axis=-1)
+        s1_composite_image = torch.stack((vh_image, vv_image), dim=0)
         
 
         ############### Load s2 images ###################
-        s2_band_paths = [os.path.join(path_to_s2_season, f'B{band}.tif') for band in self.s2_bands]
-        s2_band_images = [self.read_raster_image(band_path)[0] for band_path in s2_band_paths]
+        s2_band_images = []
+        for band in self.s2_bands:
+            band_path = os.path.join(path_to_s2_season, f'B{band}.tif')
+            band_img, _ = self.read_raster_image(band_path)
+            if band not in self.s2_stats:
+                raise ValueError(f"Statistics for band {band} not found")
+            mean, std = self.s2_stats[band]
+            band_img = torch.from_numpy(self.normalize(band_img, mean, std)).unsqueeze(0)
+            band_img = self.resize_transform(band_img).squeeze(0)
+            s2_band_images.append(band_img)
 
-        # resize the band images to target image dimension
-        s2_band_images = [np.array(self.resize_transform(Image.fromarray(band_image.astype(np.uint8)))) for band_image in s2_band_images]
-        assert all([band_image.shape == s2_band_images[0].shape for band_image in s2_band_images]), 'All bands should have the same shape'
-        
-        # Normalize the bands
-        # s2_band_images = [self.normalize_image(band_image) for band_image in s2_band_images]
-        if self.s2_tier == "s2a":
-            s2_band_images = [self.normalize(img, mean, std) for img, mean, std in
-                              zip(s2_band_images, S2A_MEAN, S2A_STD)]
-        else:
-            s2_band_images = [self.normalize(img, mean, std) for img, mean, std in zip(s2_band_images, S2C_MEAN, S2C_STD)]
-        
-        s2_composite_image = np.stack(s2_band_images, axis=-1)  # Create a composite
-        s1_composite_image = np.transpose(s1_composite_image, (2, 0, 1))
-        s2_composite_image = np.transpose(s2_composite_image, (2, 0, 1))
+        s2_composite_image = torch.stack(s2_band_images, dim=0)
 
         # print(f'S1 composite image shape: {s1_composite_image.shape}')
         # print(f'S2 composite image shape: {s2_composite_image.shape}')
@@ -154,9 +139,8 @@ class SSL4EODataset(Dataset):
 
         ## TODO: double check Image input to transforms ?
         if self.transforms is not None:
-            s1_composite_image = self.transforms(torch.from_numpy(s1_composite_image))
-            s2_composite_image = self.transforms(torch.from_numpy(s2_composite_image))
-        
+            s1_composite_image = self.transforms(s1_composite_image)
+            s2_composite_image = self.transforms(s2_composite_image)
 
         return (s1_composite_image, s2_composite_image)
 
@@ -185,10 +169,11 @@ class SSL4EODataset(Dataset):
     ## taken from: https://github.com/zhu-xlab/SSL4EO-S12/blob/2156913c5d8e5a2c572a5b000f0d5eaed6fc3192/src/benchmark/pretrain_ssl/datasets/SSL4EO/ssl4eo_dataset.py#L36
     # normalize: standardize + percentile
     def normalize(self, img, mean, std):
+        """Map band values using dataset mean/std so that μ±2σ → [0, 1]."""
         min_value = mean - 2 * std
         max_value = mean + 2 * std
-        img = (img - min_value) / (max_value - min_value) * 255.0
-        img = np.clip(img, 0, 255).astype(np.uint8)
+        img = (img - min_value) / (max_value - min_value)
+        img = np.clip(img, 0, 1).astype(np.float32)
         return img
     
 
@@ -236,7 +221,10 @@ def get_ssl4eo_dataset(args, is_train, transforms):
     root = args.dataset.root
     # root = args.dataset.train_data if is_train else args.val_data
     assert root
-    default_bands = ["1", "2", "3", "4", "5", "6", "7", "8", "8A", "9", "10", "11", "12"]
+    if args.dataset.s2_tier == "s2a":
+        default_bands = ["1", "2", "3", "4", "5", "6", "7", "8", "8A", "9", "11", "12"]
+    else:
+        default_bands = ["1", "2", "3", "4", "5", "6", "7", "8", "8A", "9", "10", "11", "12"]
 
     
     dataset = SSL4EODataset(
