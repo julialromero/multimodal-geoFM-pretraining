@@ -177,6 +177,10 @@ def main(args: DictConfig, start_epoch=0):
     local_rank, global_rank, world_size = world_info_from_env()
 
     setup_slurm_logging()
+          
+    # Setup text logger
+    args.log_level = logging.DEBUG if args.train.debug else logging.INFO
+    setup_logging(args.log_path, args.log_level)
 
     if torch.cuda.is_available():
         # This enables tf32 on Ampere GPUs which is only 8% slower than
@@ -202,14 +206,17 @@ def main(args: DictConfig, start_epoch=0):
         if os.path.exists(check_path):
             extracting_data = False
             print(f'{now} | File found, continuing with training')
+            logging.info(f'{now} | File found, continuing with training')
         else:
             print(f'{now} | File not found, waiting for data extraction to finish: {check_path}')
+            logging.info(f'{now} | File not found, waiting for data extraction to finish: {check_path}')
             # os.system("nvidia-smi")
 
     # delete the allocatd tensor to free up memory
     if os.environ.get("SLURM_PROCID", "0") == "0":
         print(f"BEFORE FREEING TENSOR: Rank {args.datamodule.rank} | Allocated: {torch.cuda.memory_allocated()/1024**2:.1f} MB | Reserved: {torch.cuda.memory_reserved()/1024**2:.1f} MB")
         print('####### DELETING 80GB ALLOCATED TENSOR #######')
+        logging.info('####### DELETING 80GB ALLOCATED TENSOR #######')
     del _reserved_memory_tensor
     # torch.cuda.empty_cache()
 
@@ -256,10 +263,7 @@ def main(args: DictConfig, start_epoch=0):
             )
         
 
-      
-    # Setup text logger
-    args.log_level = logging.DEBUG if args.train.debug else logging.INFO
-    setup_logging(args.log_path, args.log_level)
+
 
     # Setup wandb, tensorboard, checkpoint logging
     args.wandb = False #'wandb' in args.report_to or 'all' in args.report_to
