@@ -689,85 +689,82 @@ def load_model(model_type, weights_path):
     return model
 
 
+def generate_ciip_model_configs(
+    model_root: str,
+    base_name: str,
+    start_epoch: int,
+    end_epoch: int,
+    step: int = 5,
+    drop_last_layer: bool = True,
+):
+    """Generate MODEL_CONFIGS entries for CIIP checkpoints.
+
+    Parameters
+    ----------
+    model_root: str
+        Directory containing ``epoch_X.pt`` checkpoints.
+    base_name: str
+        Prefix used for naming each generated model.
+    start_epoch: int
+        First epoch to include.
+    end_epoch: int
+        Last epoch to include.
+    step: int
+        Interval between evaluated epochs.
+    drop_last_layer: bool
+        Whether the last linear layer should be removed.
+
+    Returns
+    -------
+    dict
+        Mapping of model names to configuration dictionaries compatible
+        with ``MODEL_CONFIGS``.
+    """
+    configs = {}
+    for epoch in range(start_epoch, end_epoch + 1, step):
+        model_name = f"{base_name}-epoch{epoch}"
+        configs[model_name] = {
+            "type": "ciip",
+            "weights": os.path.join(model_root, f"epoch_{epoch}.pt"),
+            "drop_last_layer": drop_last_layer,
+        }
+    return configs
+
+
 
     
 if __name__ == "__main__":
 
     MODEL_ROOT = "/local/ms-data/SSL4EO/model"
-    MODEL_CONFIGS = {
-        "2025_8_3_RandomInit-deltaAI-epoch1": {
-            "type": "ciip",
-            "weights": f"{MODEL_ROOT}/2025-08-03_12-52-38-test-compute/2025_08_03-13_00_14-model_resnet50-lr_5e-05-b_256-j_4-p_amp/checkpoints/epoch_1.pt",
-        },
-        "2025_8_3_RandomInit-deltaAI-epoch10": {
-            "type": "ciip",
-            "weights": f"{MODEL_ROOT}/2025-08-03_12-52-38-test-compute/2025_08_03-13_00_14-model_resnet50-lr_5e-05-b_256-j_4-p_amp/checkpoints/epoch_10.pt",
-        },
-       
-        "2025_8_3_RandomInit-deltaAI-epoch20": {
-            "type": "ciip",
-            "weights": f"{MODEL_ROOT}/2025-08-03_12-52-38-test-compute/2025_08_03-13_00_14-model_resnet50-lr_5e-05-b_256-j_4-p_amp/checkpoints/epoch_20.pt",
-        },
 
-        "2025_8_3_RandomInit-deltaAI-epoch40": {
-            "type": "ciip",
-            "weights": f"{MODEL_ROOT}/2025-08-03_12-52-38-test-compute/2025_08_03-13_00_14-model_resnet50-lr_5e-05-b_256-j_4-p_amp/checkpoints/epoch_40.pt",
-        },
-        "2025_8_3_RandomInit-deltaAI-epoch53": {
-            "type": "ciip",
-            "weights": f"{MODEL_ROOT}/2025-08-03_12-52-38-test-compute/2025_08_03-13_00_14-model_resnet50-lr_5e-05-b_256-j_4-p_amp/checkpoints/epoch_53.pt",
-            'drop_last_layer': True
-        },
-        "2025_8_6_MoCoInit-deltaAI-epoch62": {
-            "type": "ciip",
-            "weights": f"{MODEL_ROOT}/2025_08_06-MoCoInit/no-copy/epoch_62.pt",
-            'drop_last_layer': True
-        },
-        "2025_8_6_MoCoInit-deltaAI-epoch85": {
-            "type": "ciip",
-            "weights": f"{MODEL_ROOT}/2025_08_06-MoCoInit/no-copy/epoch_85.pt",
-            'drop_last_layer': True
-        },
-        "2025_8_6_MoCoInit-deltaAI-epoch90": {
-            "type": "ciip",
-            "weights": f"{MODEL_ROOT}/2025_08_06-MoCoInit/no-copy/epoch_90.pt",
-            'drop_last_layer': True
-        },
-        "2025_8_6_MoCoInit-deltaAI-epoch160": {
-            "type": "ciip",
-            "weights": f"{MODEL_ROOT}/2025_08_06-MoCoInit/no-copy/epoch_160.pt",
-            'drop_last_layer': True
-        },
-        "SSL4EO-ResNet50_MoCo": {
-            "type": "resnet50",
-            "weights": ResNet50_Weights.SENTINEL2_ALL_MOCO,
-            'drop_last_layer': True
-        },
-        "SSL4EO-ResNet50_DINO": {   
-            "type": "resnet50",
-            "weights": ResNet50_Weights.SENTINEL2_ALL_DINO,
-            'drop_last_layer': True
-        },
-        "ResNet50_Random": {
-            "type": "resnet50",
-            'weights': None,
-            'drop_last_layer': True
-        },
+    # Generate CIIP model configs for every 5 epochs
+    ciip_root = f"{MODEL_ROOT}/2025_08_06-MoCoInit/no-copy"
+    MODEL_CONFIGS = generate_ciip_model_configs(
+        model_root=ciip_root,
+        base_name="2025_8_6_MoCoInit-deltaAI",
+        start_epoch=5,
+        end_epoch=160,
+        step=5,
+    )
+
+    # Add any additional non-CIIP models here
+    MODEL_CONFIGS.update({
         "ResNet50_Random-EndtoEndSupervised": {
             "type": "resnet50",
-            'weights': None,
-            'drop_last_layer': True
+            "weights": None,
+            "drop_last_layer": True,
         }
-    }
+    })
 
     CONFIG = {
         "data_path": "/local/ms-data/EuroSAT/",  # Path to EuroSAT dataset
-        "percents": [0.05, 1], #[0.1, 1],
+        "percents": [0.05, 1],  # [0.1, 1],
         "batch_size": 512,
         "num_workers": 8,
         "num_experiments": 1,
         "bands": BANDS,  # assuming BANDS is defined elsewhere
-        "models": ["2025_8_6_MoCoInit-deltaAI-epoch160",  "ResNet50_Random-EndtoEndSupervised"] # , "SSL4EO-ResNet50_MoCo", , 'SSL4EO-ResNet50_DINO'
+        # Evaluate all generated CIIP checkpoints plus extra models
+        "models": list(MODEL_CONFIGS.keys()),
     }
 
     #  '2025_8_3_RandomInit-deltaAI-epoch40', '2025_8_3_RandomInit-deltaAI-epoch30', '2025_8_3_RandomInit-deltaAI-epoch20', '2025_8_3_RandomInit-deltaAI-epoch10'
