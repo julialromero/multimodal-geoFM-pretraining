@@ -14,20 +14,18 @@ from torch.utils.data import DataLoader, Subset, TensorDataset
 from torchvision import transforms
 from sklearn.metrics import accuracy_score, f1_score
 from tqdm import tqdm
-import torch.nn as nn
-import torch.optim as optim
 
-
-
-import sys
-sys.path.append('/home/juro4948/ciip/ciip')
-
+from torchgeo.datasets import EuroSAT
+from torchgeo.models import resnet50, ResNet50_Weights
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 
+<<<<<<< HEAD
 import sys
 sys.path.append('/home/juro4948/ciip/ciip')
+=======
+>>>>>>> 19ad2546aea61850032feae5f28c32d4f7089d16
 from utils import *
 
 
