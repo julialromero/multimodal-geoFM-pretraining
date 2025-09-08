@@ -27,7 +27,7 @@ local/*
 **/local/*
 notebooks/
 tests/
-visualizations/
+
 # **/open_clip_train/outputs/
 **/ciip/lightning_logs/
 # **/metadata.json
