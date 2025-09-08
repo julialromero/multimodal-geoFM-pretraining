@@ -13,17 +13,17 @@ io:
   resume: 
 
 comet: #personal
-  api_key: ADD_KEY_HERE
+  api_key: 3g8Rfgff8N5UNWQ1CdGvgEO9n
   project_name: general
   workspace:
 
 model:
   framework: resnet50 #options are resnet18, resnet50, modified_resnet, transformer
   pretrain:
-    load: False
+    load: True
     s1_weights: "MOCO" # Only support for resnet50. S1: MOCO
     s2_weights: "MOCO" # Only support for resnet50. S2: MOCO, DINO
-  embed_dim: 512 #1024 #512 #1024 #512 #1000
+  embed_dim: 1024 #512 #512 #1024 #512 #1000
   s1_layers: [3, 4, 6, 3]
   s2_layers: [3, 4, 6, 3]
   width: 32
@@ -85,7 +85,7 @@ train:
   beta2: 0.999
   eps: 1.0e-8
   val_frequency: 1
-  accum_freq: 5
+  accum_freq: 20
   save_logs: True
   name: ciip_test
   delete_previous_checkpoint: False

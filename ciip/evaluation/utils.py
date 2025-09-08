@@ -236,6 +236,8 @@ def load_ciip_model_checkpoint(checkpoint_path):
         embed_dim=512
     elif '2025_08_06-MoCoIn' in checkpoint_path:
         embed_dim=1024
+    elif '2025_09_05' in checkpoint_path:
+        embed_dim=1024
         
     print(f'Using embed {embed_dim}')
 

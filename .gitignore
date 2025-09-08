@@ -25,8 +25,8 @@ log/
 data/**
 local/*
 **/local/*
-notebooks/
-tests/
+**/notebooks/
+**/tests/
 
 # **/open_clip_train/outputs/
 **/ciip/lightning_logs/

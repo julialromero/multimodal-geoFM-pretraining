@@ -21,11 +21,6 @@ from torchgeo.models import resnet50, ResNet50_Weights
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 
-<<<<<<< HEAD
-import sys
-sys.path.append('/home/juro4948/ciip/ciip')
-=======
->>>>>>> 19ad2546aea61850032feae5f28c32d4f7089d16
 from utils import *
 
 
@@ -738,27 +733,39 @@ if __name__ == "__main__":
     MODEL_ROOT = "/local/ms-data/SSL4EO/model"
 
     # Generate CIIP model configs for every 5 epochs
-    ciip_root = f"{MODEL_ROOT}/2025_08_06-MoCoInit/no-copy"
+    # ciip_root = f"{MODEL_ROOT}/2025_08_06-MoCoInit/no-copy"
+    ciip_root = f"/home/juro4948/ciip/logs/2025_09_05-13_28_50-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints"
     MODEL_CONFIGS = generate_ciip_model_configs(
         model_root=ciip_root,
-        base_name="2025_8_6_MoCoInit-deltaAI",
+        base_name="2025_09_05_MoCoInit-hal",
         start_epoch=5,
-        end_epoch=160,
+        end_epoch=200,
         step=5,
     )
 
+
     # Add any additional non-CIIP models here
     MODEL_CONFIGS.update({
-        "ResNet50_Random-EndtoEndSupervised": {
+        "SSL4EO-ResNet50_MoCo": {
             "type": "resnet50",
-            "weights": None,
-            "drop_last_layer": True,
-        }
+            "weights": ResNet50_Weights.SENTINEL2_ALL_MOCO,
+            'drop_last_layer': True
+        },
+        "SSL4EO-ResNet50_DINO": {   
+            "type": "resnet50",
+            "weights": ResNet50_Weights.SENTINEL2_ALL_DINO,
+            'drop_last_layer': True
+        },
+        "ResNet50_Random": {
+            "type": "resnet50",
+            'weights': None,
+            'drop_last_layer': True
+        },
     })
 
     CONFIG = {
         "data_path": "/local/ms-data/EuroSAT/",  # Path to EuroSAT dataset
-        "percents": [0.05, 1],  # [0.1, 1],
+        "percents": [1],  # [0.1, 1],
         "batch_size": 512,
         "num_workers": 8,
         "num_experiments": 1,

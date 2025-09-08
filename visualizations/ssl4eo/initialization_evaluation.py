@@ -339,7 +339,9 @@ def main(args: DictConfig):
 
     # path to the directory containing the experiment model checkpoints
     # chkpt_path = '/local/ms-data/SSL4EO/model/2025_07_03-RandomInit-bs4096/checkpoints'
-    chkpt_path = '/local/ms-data/SSL4EO/model/2025_08_06-MoCoInit/no-copy/'
+    chkpt_path = '/home/juro4948/ciip/logs/2025_09_05-13_28_50-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints'
+    # '/local/ms-data/SSL4EO/model/2025_08_26-MoCoInit/checkpoints'
+    # '/local/ms-data/SSL4EO/model/2025_08_06-MoCoInit/no-copy/'
     # '/local/ms-data/SSL4EO/model/2025-08-03_12-52-38-test-compute/2025_08_03-13_00_14-model_resnet50-lr_5e-05-b_256-j_4-p_amp/checkpoints/'
     # '/local/ms-data/SSL4EO/model/2025-08-03_12-52-38-test-compute/2025_08_03-13_00_14-model_resnet50-lr_5e-05-b_256-j_4-p_amp/checkpoints/'
     # /local/ms-data/SSL4EO/model/2025_08_06-MoCoInit/no-copy/'
@@ -374,6 +376,10 @@ def main(args: DictConfig):
     models = [m.replace('epoch_init', 'epoch_0') for m in models]
     models = sorted(models, key=lambda x: int(x.split('_')[1].split('.')[0]))
 
+    # only use every 5th model if more than 20 models
+    if len(models) > 20:
+        models = models[::5]
+
     
     # centroids = []
     paired_l2_norms = []
@@ -398,8 +404,8 @@ def main(args: DictConfig):
         model = load_model(args, path, w_path=w_path, device=device)
 
         # if hasattr(model, 'encoder_s2') and hasattr(model.encoder_s2, 'fc'):
-            # Replace the fc layer of encoder_s2 with an identity mapping.
-        print(model.encoder_s2.fc)
+        #     # Replace the fc layer of encoder_s2 with an identity mapping.
+        # print(model.encoder_s2.fc)
         model.encoder_s2.fc = nn.Identity()
         print(model.encoder_s2.fc)
         if hasattr(model, 'encoder_s1') and hasattr(model.encoder_s1, 'fc'):
@@ -495,6 +501,13 @@ def main(args: DictConfig):
         relative_modality_gaps.append(relative_modality_gap)
 
         if int(os.environ.get("RANK", "0")) == 0:
+            # log the output layer fc
+            logging.info(f'-----Results for model: {model_epoch_fn}------')
+            logging.info(f'Output layer fc for S1: {model.encoder_s1.fc}')
+            logging.info(f'Output layer fc for S2: {model.encoder_s2.fc}')
+            # log whether noramlized or not
+            logging.info(f'Normalize embeddings: {True}')
+
             logging.info(f'L2 Norm between centroids for {model_epoch_fn}: {l2_norm_centroids}')
             logging.info(f'Cosine Similarity between centroids of S1 and S2 for {model_epoch_fn}: {cos_sim_centroids}')
             logging.info(f'Linear separability of S1 and S2 for {model_epoch_fn}: {linear_separability}')
@@ -516,7 +529,7 @@ def main(args: DictConfig):
     plt.errorbar(model_checkpoints, mean_l2_norms, yerr=std_l2_norms, fmt='o', capsize=5, label='Mean ± Std Dev', color='blue', linestyle='-')
     plt.xlabel('Model checkpoints')
     plt.ylabel('Pairwise L2 Norms')
-    plt.title(f'Pairwise S1-S2 L2 Norms - {experiment_name} (n={num_pairs})')
+    plt.title(f'Pairwise S1-S2 L2 Norms - {experiment_name} (n={num_pairs}) | fc={model.encoder_s1.fc} | normalize={True}')
     plt.grid()
     plt.savefig('pairwise-l2norm.png', bbox_inches='tight')
     plt.show()
@@ -535,7 +548,7 @@ def main(args: DictConfig):
     plt.xlabel('Model checkpoints')
     plt.ylabel('Pairwise Cosine Similarities')
     plt.legend()
-    plt.title(f'Pairwise S1-S2 Cosine Similarities - {experiment_name} (n={num_pairs})')
+    plt.title(f'Pairwise S1-S2 Cosine Similarities - {experiment_name} (n={num_pairs}) | fc={model.encoder_s1.fc} | normalize={True}')
     plt.grid()
     plt.savefig('pairwise-cosine-sim.png', bbox_inches='tight')
     plt.show()
@@ -545,7 +558,7 @@ def main(args: DictConfig):
     plt.plot(model_checkpoints, centroid_l2_norms, marker='o')
     plt.xlabel('Model checkpoints')
     plt.ylabel('Centroid L2 Norm')
-    plt.title(f'Centroid S1-S2 L2 Norm - {experiment_name} (n={num_pairs})')
+    plt.title(f'Centroid S1-S2 L2 Norm - {experiment_name} (n={num_pairs}) | fc={model.encoder_s1.fc} | normalize={True}')
     plt.grid()
     plt.savefig('centroid-l2norm.png', bbox_inches='tight')
     plt.show()
@@ -554,7 +567,7 @@ def main(args: DictConfig):
     plt.plot(model_checkpoints, cosine_sims, marker='o')
     plt.xlabel('Model checkpoints')
     plt.ylabel('Centroid Cosine Sim')
-    plt.title(f'Centroid S1-S2 Cosine Sim - {experiment_name} (n={num_pairs})')
+    plt.title(f'Centroid S1-S2 Cosine Sim - {experiment_name} (n={num_pairs}) | fc={model.encoder_s1.fc} | normalize={True}')
     plt.grid()
     plt.savefig('centroid-cosine-sim.png', bbox_inches='tight')
     plt.show()
@@ -564,7 +577,7 @@ def main(args: DictConfig):
     plt.plot(model_checkpoints, linear_separabilities, marker='o')
     plt.xlabel('Model checkpoints')
     plt.ylabel('Linear Separability')
-    plt.title(f'Linear Separability S1-S2 - {experiment_name} (n={num_pairs})')
+    plt.title(f'Linear Separability S1-S2 - {experiment_name} (n={num_pairs}) | fc={model.encoder_s1.fc} | normalize={True}')
     plt.grid()
     plt.savefig('linear-separability.png', bbox_inches='tight')
     plt.show()
@@ -574,7 +587,7 @@ def main(args: DictConfig):
     plt.plot(model_checkpoints, relative_modality_gaps, marker='o')
     plt.xlabel('Model checkpoints')
     plt.ylabel('Relative Modality Gap (RMG)')
-    plt.title(f'Relative Modality Gap (RMG) S1-S2 - {experiment_name} (n={num_pairs})')
+    plt.title(f'Relative Modality Gap (RMG) S1-S2 - {experiment_name} (n={num_pairs}) | fc={model.encoder_s1.fc} | normalize={True}')
     plt.grid()
     plt.savefig('rmg.png', bbox_inches='tight')
     plt.show()
