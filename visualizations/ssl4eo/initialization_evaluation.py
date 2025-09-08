@@ -22,8 +22,7 @@ import ast
 from omegaconf import OmegaConf, DictConfig
 import hydra
 import sys
-# parent_dir = '/home/juro4948/ciip/ciip/open_clip_train/'
-parent_dir = '/home/jema2085/ciip/ciip/open_clip_train/'
+parent_dir = '/home/juro4948/ciip/ciip/open_clip_train/'
 sys.path.insert(0, parent_dir)
 from open_clip import get_input_dtype
 from open_clip_train.precision import get_autocast
@@ -109,6 +108,9 @@ def load_model(args, chkpt_path, w_path, device='cuda'):
 # latent space; i.e. there is no gap between the embeddings. To summarize, if we can effectively close the gap
 # we will find that the distance between centroids is small and linear separability is close to 50%.
 def calc_linear_separability(s1_embeddings, s2_embeddings):
+
+    # to normalize or not to normalized????
+
     combined_embeddings = np.vstack([s1_embeddings, s2_embeddings])
     labels = np.array([0] * len(s1_embeddings) + [1] * len(s2_embeddings))
 
@@ -329,8 +331,7 @@ class Subset(Dataset):
 CONF = "prod_default"
 
 from data import get_data
-# @hydra.main(config_path="/home/juro4948/ciip/ciip/open_clip_train/configs", config_name=CONF)
-@hydra.main(config_path="/home/jema2085/ciip/ciip/open_clip_train/configs", config_name=CONF)
+@hydra.main(config_path="/home/juro4948/ciip/ciip/open_clip_train/configs", config_name=CONF)
 
 def main(args: DictConfig):
     print('----')
@@ -338,7 +339,8 @@ def main(args: DictConfig):
 
     # path to the directory containing the experiment model checkpoints
     # chkpt_path = '/local/ms-data/SSL4EO/model/2025_07_03-RandomInit-bs4096/checkpoints'
-    chkpt_path = '/local/ms-data/SSL4EO/model/2025-08-03_12-52-38-test-compute/2025_08_03-13_00_14-model_resnet50-lr_5e-05-b_256-j_4-p_amp/checkpoints/'
+    chkpt_path = '/local/ms-data/SSL4EO/model/2025_08_06-MoCoInit/no-copy/'
+    # '/local/ms-data/SSL4EO/model/2025-08-03_12-52-38-test-compute/2025_08_03-13_00_14-model_resnet50-lr_5e-05-b_256-j_4-p_amp/checkpoints/'
     # '/local/ms-data/SSL4EO/model/2025-08-03_12-52-38-test-compute/2025_08_03-13_00_14-model_resnet50-lr_5e-05-b_256-j_4-p_amp/checkpoints/'
     # /local/ms-data/SSL4EO/model/2025_08_06-MoCoInit/no-copy/'
    
@@ -394,6 +396,18 @@ def main(args: DictConfig):
 
 
         model = load_model(args, path, w_path=w_path, device=device)
+
+        # if hasattr(model, 'encoder_s2') and hasattr(model.encoder_s2, 'fc'):
+            # Replace the fc layer of encoder_s2 with an identity mapping.
+        print(model.encoder_s2.fc)
+        model.encoder_s2.fc = nn.Identity()
+        print(model.encoder_s2.fc)
+        if hasattr(model, 'encoder_s1') and hasattr(model.encoder_s1, 'fc'):
+            # Replace the fc layer of encoder_s2 with an identity mapping.
+            print(model.encoder_s1.fc)
+        model.encoder_s1.fc = nn.Identity()
+
+
         model.eval()
         # returns the normalized embeddings for s1 and s2
         with torch.no_grad():
@@ -461,6 +475,10 @@ def main(args: DictConfig):
         s1_centroid = F.normalize(s1_centroid, p=2, dim=1)
         s2_centroid = F.normalize(s2_centroid, p=2, dim=1)
 
+        # # --- Sanity check ---
+        # assert (
+        #     s1_centroid.shape[1] == s2_centroid.shape[1] == args.model.embed_dim
+        # ), f"Centroid L2 norm should match embedding dimension."
 
         # --- L2 norm between centroids ---
         l2_norm_centroids = torch.norm(s1_centroid - s2_centroid, p=2).item()
