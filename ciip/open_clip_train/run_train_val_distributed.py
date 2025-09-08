@@ -370,7 +370,8 @@ def main(args: DictConfig, start_epoch=0):
         model_kwargs['init_logit_scale'] = np.log(10)  # different from CLIP
         model_kwargs['init_logit_bias'] = -10
     if model_kwargs:
-        raise NotImplementedError('Model kwargs not yet supported.')
+        print(model_kwargs)
+        # raise NotImplementedError('Model kwargs not yet supported.')
     model = create_model(
         args,
         device=device,
@@ -386,7 +387,7 @@ def main(args: DictConfig, start_epoch=0):
         # aug_cfg=args.aug_cfg,
         # pretrained_image=args.pretrained_image,
         # output_dict=True,
-        # **model_kwargs,
+        **model_kwargs,
     )
     if args.distill:
         raise NotImplementedError('Distillation not yet supported.')

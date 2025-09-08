@@ -121,9 +121,9 @@ class SSL4EODataset(Dataset):
         # resize each of these
         vh_image = np.array(self.resize_transform(Image.fromarray(vh_image.astype(np.uint8))))
         vv_image = np.array(self.resize_transform(Image.fromarray(vv_image.astype(np.uint8))))
-
         # third_band = np.array(self.resize_transform(Image.fromarray(third_band.astype(np.uint8))))
-        # s1_composite_image = np.stack((vh_image, vv_image, third_band), axis=-1)
+
+        # Create an RGB composite using VH, VV, and their average
         # if you want to add a 3rd band for RGB-related purposes, uncomment third_band above and stack
         s1_composite_image = np.stack((vh_image, vv_image), axis=-1)
         
@@ -190,17 +190,6 @@ class SSL4EODataset(Dataset):
         img = (img - min_value) / (max_value - min_value) * 255.0
         img = np.clip(img, 0, 255).astype(np.uint8)
         return img
-    
-
-    def get_sample_uid(self, idx):
-        location_idx, season_idx = self.int_to_filepath(idx)
-        location_folder = self.locations[location_idx]
-
-        filepath = os.path.join(self.root, 's1', location_folder)
-
-        unique_id = f'{location_folder}_season{season_idx}'
-        return (unique_id, filepath)
- 
 
 
 # taken from: https://github.com/zhu-xlab/SSL4EO-S12/blob/2156913c5d8e5a2c572a5b000f0d5eaed6fc3192/src/benchmark/pretrain_ssl/datasets/SSL4EO/ssl4eo_dataset.py#L127
