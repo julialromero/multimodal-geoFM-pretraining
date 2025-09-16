@@ -143,7 +143,7 @@ class FewShotClassifierLightning(pl.LightningModule):
         # optimizer = torch.optim.SGD(self.parameters(), lr=self.learning_rate, momentum=0.9, weight_decay=0.002)
 
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.learning_rate, weight_decay=1e-4)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=500)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100)
 
         # # Warmup scheduler: Linear increase
         # warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
@@ -164,11 +164,11 @@ class FewShotClassifierLightning(pl.LightningModule):
         # Return dict required by Lightning for multiple schedulers or specific configurations
         return {
             'optimizer': optimizer,
-            # 'lr_scheduler': {
-            #     'scheduler': scheduler,
-            #     'interval': 'epoch', # 'epoch' means step every epoch, 'step' means step every batch
-            #     'frequency': 1,
-            # }
+            'lr_scheduler': {
+                'scheduler': scheduler,
+                'interval': 'epoch', # 'epoch' means step every epoch, 'step' means step every batch
+                'frequency': 1,
+            }
         }
 
     def validation_step(self, batch, batch_idx):
@@ -346,7 +346,7 @@ def train_pytorch_classifier(features, labels, val_features, val_labels, test_fe
     # --- Callbacks ---
     early_stopping_callback = EarlyStopping(
         monitor='val_loss',
-        patience=20,
+        patience=10,
         mode='min',
         verbose=False
     )
@@ -364,7 +364,7 @@ def train_pytorch_classifier(features, labels, val_features, val_labels, test_fe
 
     # --- Trainer ---
     trainer = pl.Trainer(
-        max_epochs=600,                   # Your desired total number of epochs
+        max_epochs=300,                   # Your desired total number of epochs
         accelerator='auto',               # 'cpu', 'gpu', or 'auto'
         devices=1, # Or specify [0, 1] for multiple GPUs
         # logger=logger,                    # Attach the TensorBoard logger
@@ -376,7 +376,7 @@ def train_pytorch_classifier(features, labels, val_features, val_labels, test_fe
         log_every_n_steps=50,             # Log every N training steps
         enable_model_summary=False,
         enable_progress_bar=False,
-        check_val_every_n_epoch=20
+        check_val_every_n_epoch=1
     )
 
 
@@ -684,39 +684,11 @@ def load_model(model_type, weights_path):
     return model
 
 
-def generate_ciip_model_configs(
-    model_root: str,
-    base_name: str,
-    start_epoch: int,
-    end_epoch: int,
-    step: int = 5,
-    drop_last_layer: bool = True,
-):
-    """Generate MODEL_CONFIGS entries for CIIP checkpoints.
-
-    Parameters
-    ----------
-    model_root: str
-        Directory containing ``epoch_X.pt`` checkpoints.
-    base_name: str
-        Prefix used for naming each generated model.
-    start_epoch: int
-        First epoch to include.
-    end_epoch: int
-        Last epoch to include.
-    step: int
-        Interval between evaluated epochs.
-    drop_last_layer: bool
-        Whether the last linear layer should be removed.
-
-    Returns
-    -------
-    dict
-        Mapping of model names to configuration dictionaries compatible
-        with ``MODEL_CONFIGS``.
-    """
+def generate_ciip_model_configs(model_root: str, base_name: str, epochs: list = None,
+                                drop_last_layer: bool = True):
+    """Generate configuration dictionaries for CIIP checkpoints."""
     configs = {}
-    for epoch in range(start_epoch, end_epoch + 1, step):
+    for epoch in epochs:
         model_name = f"{base_name}-epoch{epoch}"
         configs[model_name] = {
             "type": "ciip",
@@ -726,7 +698,44 @@ def generate_ciip_model_configs(
     return configs
 
 
+def parse_results_from_csv(csv_file, metric="accuracy"):
+    """
+    Reads a CSV file produced by output_results_to_csv() and reconstructs
+    the original results dictionary:
+    
+    {
+        "model_name": {
+            k_value: {f"{metric}_mean": ..., f"{metric}_std": ...},
+            ...
+        },
+        ...
+    }
+    """
+    results = {}
 
+    with open(csv_file, mode='r', newline='') as file:
+        reader = csv.reader(file)
+        header = next(reader)
+
+        # Extract k values from the header row
+        # The header format is: ["Model Name", "percent=...", ..., "Std percent=..."]
+        k_values = [float(h.split('=')[1]) for h in header[1:1 + (len(header)-1)//2]]
+
+        for row in reader:
+            model_name = row[0]
+            results[model_name] = {}
+
+            # First half are means, second half are stds
+            mean_values = [float(v) for v in row[1:1 + len(k_values)]]
+            std_values = [float(v) for v in row[1 + len(k_values):1 + 2*len(k_values)]]
+
+            for k, mean, std in zip(k_values, mean_values, std_values):
+                results[model_name][k] = {
+                    f"{metric}_mean": mean,
+                    f"{metric}_std": std
+                }
+
+    return results
     
 if __name__ == "__main__":
 
@@ -734,13 +743,21 @@ if __name__ == "__main__":
 
     # Generate CIIP model configs for every 5 epochs
     # ciip_root = f"{MODEL_ROOT}/2025_08_06-MoCoInit/no-copy"
-    ciip_root = f"/home/juro4948/ciip/logs/2025_09_05-13_28_50-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints"
+    # ciip_root = f"/home/juro4948/ciip/logs/2025_09_05-13_28_50-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints"
+    # epochs = [1, 2, 5, 10, 20, 50, 80, 100, 120,140]
+    # MODEL_CONFIGS = generate_ciip_model_configs(
+    #     model_root=ciip_root,
+    #     base_name="2025_09_05_MoCoInit-hal",
+    #     epochs=epochs,
+    # )
+    # ciip_root = f"/home/juro4948/ciip/logs/2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints"
+    ciip_root = '/home/juro4948/ciip/logs/2025_09_10-11_37_00-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints'
+    epochs = [1, 2, 3, 5, 10, 15, 20, 30]
+    base_name="2025_09_10_RandomInit-hal-bs5120"
     MODEL_CONFIGS = generate_ciip_model_configs(
         model_root=ciip_root,
-        base_name="2025_09_05_MoCoInit-hal",
-        start_epoch=5,
-        end_epoch=200,
-        step=5,
+        base_name=base_name,
+        epochs=epochs,
     )
 
 
@@ -765,7 +782,7 @@ if __name__ == "__main__":
 
     CONFIG = {
         "data_path": "/local/ms-data/EuroSAT/",  # Path to EuroSAT dataset
-        "percents": [1],  # [0.1, 1],
+        "percents": [0.1, 1],  # [0.1, 1],
         "batch_size": 512,
         "num_workers": 8,
         "num_experiments": 1,
@@ -796,7 +813,7 @@ if __name__ == "__main__":
         })
 
     CONFIG["models"] = model_info
-    CONFIG['notes'] = 'Previously, we were dropping the fc layer and replacing with Identity, so the embeddings were dim of 2048. Try experiment without dropping fc layer. It seemed like Random performance went down, even though it should be unaffected.' 
+    CONFIG['notes'] = ' ' 
 
     ## Setup Logging and Output Directory ##
     timestamp = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
@@ -829,6 +846,17 @@ if __name__ == "__main__":
     # Save plots
     plot_results(results, CONFIG["percents"], metric="accuracy", output_file=os.path.join(output_dir, "linearprobe_accuracy.png"))
     plot_results(results, CONFIG["percents"], metric="f1", output_file=os.path.join(output_dir, "linearprobe_f1.png"))
+
+    plot_primary_over_epochs(results, CONFIG["percents"], metric="accuracy", primary_regex=r"RandomInit-hal-epoch(\d+)", 
+        baselines=("SSL4EO-ResNet50_MoCo","SSL4EO-ResNet50_DINO","ResNet50_Random"),
+        layout="facets",                         # or "single"
+        title=f"{base_name} Linear probe clf head accuracy vs epoch",
+        output_file=os.path.join(output_dir, "svm_accuracy_per_epoch.png"))
+    plot_primary_over_epochs(results, CONFIG["percents"], metric="f1", primary_regex=r"RandomInit-hal-epoch(\d+)",
+        baselines=("SSL4EO-ResNet50_MoCo","SSL4EO-ResNet50_DINO","ResNet50_Random"),
+        layout="facets",                         # or "single"
+        title=f"{base_name} Linear probe clf head f1 vs epoch",
+        output_file=os.path.join(output_dir, "svm_f1_per_epoch.png"))
 
     _logger.info(f'Saved results to {output_dir}')
     print(f'Saved results to {output_dir}')

@@ -30,6 +30,7 @@ from utils import (
     get_deterministic_seed_for_experiment,
     load_model,
     plot_results,
+    plot_primary_over_epochs,
     output_results_to_csv,
 )
 
@@ -200,11 +201,11 @@ def few_shot_comparison_pipeline_svm(data_path, percents, models, bands, batch_s
     return results
 
 
-def generate_ciip_model_configs(model_root: str, base_name: str, start_epoch: int, end_epoch: int, step: int = 5,
+def generate_ciip_model_configs(model_root: str, base_name: str, epochs: list = None,
                                 drop_last_layer: bool = True):
     """Generate configuration dictionaries for CIIP checkpoints."""
     configs = {}
-    for epoch in range(start_epoch, end_epoch + 1, step):
+    for epoch in epochs:
         model_name = f"{base_name}-epoch{epoch}"
         configs[model_name] = {
             "type": "ciip",
@@ -217,12 +218,11 @@ def generate_ciip_model_configs(model_root: str, base_name: str, start_epoch: in
 if __name__ == "__main__":
     MODEL_ROOT = "/local/ms-data/SSL4EO/model"
     ciip_root = f"/home/juro4948/ciip/logs/2025_09_05-13_28_50-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints"
+    epochs = [1, 2, 5, 10, 20, 30, 40, 50, 80, 100, 120,140]
     MODEL_CONFIGS = generate_ciip_model_configs(
         model_root=ciip_root,
         base_name="2025_09_05_MoCoInit-hal",
-        start_epoch=5,
-        end_epoch=200,
-        step=5,
+        epochs=epochs,
     )
 
     MODEL_CONFIGS.update({
@@ -245,8 +245,8 @@ if __name__ == "__main__":
 
     CONFIG = {
         "data_path": "/local/ms-data/EuroSAT/",
-        "percents": [1],
-        "batch_size": 512,
+        "percents": [0.1, 1],
+        "batch_size": 256,
         "num_workers": 8,
         "num_experiments": 1,
         "bands": BANDS,
@@ -269,7 +269,7 @@ if __name__ == "__main__":
             'drop_last_layer': config['drop_last_layer'],
         })
     CONFIG["models"] = model_info
-    CONFIG['notes'] = 'SVM linear probe comparison.'
+    # CONFIG['notes'] = 'SVM linear probe comparison.'
 
     timestamp = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
     experiment_name = f"{timestamp}"
@@ -298,6 +298,17 @@ if __name__ == "__main__":
 
     plot_results(results, CONFIG["percents"], metric="accuracy", output_file=os.path.join(output_dir, "svm_accuracy.png"))
     plot_results(results, CONFIG["percents"], metric="f1", output_file=os.path.join(output_dir, "svm_f1.png"))
+
+    plot_primary_over_epochs(results, CONFIG["percents"], metric="accuracy", primary_regex=r"MoCoInit-hal-epoch(\d+)",
+        baselines=("SSL4EO-ResNet50_MoCo","SSL4EO-ResNet50_DINO","ResNet50_Random"),
+        layout="facets",                         # or "single"
+        title="Linear probe SVM accuracy vs epoch",
+        output_file=os.path.join(output_dir, "svm_accuracy_per_epoch.png"))
+    plot_primary_over_epochs(results, CONFIG["percents"], metric="f1", primary_regex=r"MoCoInit-hal-epoch(\d+)",
+        baselines=("SSL4EO-ResNet50_MoCo","SSL4EO-ResNet50_DINO","ResNet50_Random"),
+        layout="facets",                         # or "single"
+        title="Linear probe SVM f1 vs epoch",
+        output_file=os.path.join(output_dir, "svm_f1_per_epoch.png"))
 
     _logger.info(f'Saved results to {output_dir}')
     print(f'Saved results to {output_dir}')

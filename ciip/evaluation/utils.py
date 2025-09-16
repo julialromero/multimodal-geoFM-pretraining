@@ -13,6 +13,9 @@ import json
 from datetime import datetime
 import numpy as np
 import os
+import csv
+import matplotlib.pyplot as plt
+import re
 
 def sample_episode(dataset, n_way, k_shot, query_per_class=15):
     """
@@ -78,6 +81,124 @@ def sample_episode(dataset, n_way, k_shot, query_per_class=15):
     query_labels = np.array(query_labels)
     
     return support_features, support_labels, query_features, query_labels
+
+
+
+def plot_primary_over_epochs(
+    results,
+    k_values,
+    metric="accuracy",
+    primary_regex=r"epoch(\d+)",
+    baselines=("SSL4EO-ResNet50_MoCo", "SSL4EO-ResNet50_DINO", "ResNet50_Random"),
+    layout="facets",
+    title=None,
+    output_file=None,
+):
+    rx = re.compile(primary_regex) if isinstance(primary_regex, str) else primary_regex
+
+    # --- collect primary runs (name, epoch) ---
+    primary = []
+    for name in results:
+        m = rx.search(name)
+        if m:
+            try:
+                epoch = int(m.group(1))
+            except (ValueError, IndexError):
+                continue
+            primary.append((epoch, name))
+    if not primary:
+        raise ValueError(f"No primary runs matched regex: {primary_regex}")
+
+    primary.sort(key=lambda x: x[0])
+    epochs = [e for e, _ in primary]
+
+    # cache per-k series (means/stds aligned to sorted epochs)
+    per_k = {}
+    for k in k_values:
+        means, stds = [], []
+        for _, name in primary:
+            means.append(results[name][k][f"{metric}_mean"])
+            stds.append(results[name][k][f"{metric}_std"])
+        per_k[k] = (np.asarray(means), np.asarray(stds))
+
+    # --- fig/axes ---
+    if layout == "facets":
+        n = len(k_values)
+        ncols = 2 if n > 1 else 1
+        nrows = int(np.ceil(n / ncols))
+        fig, axes = plt.subplots(nrows, ncols, figsize=(6.5*ncols, 4.2*nrows), squeeze=False)
+        ax_list = [ax for row in axes for ax in row][:n]
+    else:
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax_list = [ax]
+
+    markers = ['o','s','^','D','P','X','v','>','<','*']
+
+    def draw_baselines_for_k(ax, k, x0, x1):
+        """Draw dashed baselines only for this k, and return handles/labels."""
+        handles, labels = [], []
+        for bname in baselines or []:
+            if bname not in results: 
+                continue
+            if k not in results[bname]:
+                continue
+            if f"{metric}_mean" not in results[bname][k]:
+                continue
+            mu = results[bname][k][f"{metric}_mean"]
+            (line,) = ax.plot([x0, x1], [mu, mu],
+                              linestyle='--', linewidth=1.2, alpha=0.7,
+                              label=f"{bname} (k={k})")
+            handles.append(line); labels.append(line.get_label())
+        return handles, labels
+
+    if layout == "facets":
+        for idx, (ax, k) in enumerate(zip(ax_list, k_values)):
+            means, stds = per_k[k]
+            # primary line — NO label (so only dashed lines appear in legend)
+            (pline,) = ax.plot(epochs, means, marker=markers[idx % len(markers)])
+            ax.fill_between(epochs, means-stds, means+stds, alpha=0.25, color=pline.get_color())
+            # baselines ONLY for this k
+            x0, x1 = min(epochs), max(epochs)
+            b_handles, b_labels = draw_baselines_for_k(ax, k, x0, x1)
+            # legend: only dashed baselines
+            if b_handles:
+                ax.legend(b_handles, b_labels, loc="lower right", fontsize=9, framealpha=0.35)
+            ax.set_xlabel("Epoch"); ax.set_ylabel(metric.capitalize())
+            ax.set_title(f"CIIP across epochs (k={k})")
+            ax.grid(True, alpha=0.3)
+        # hide any unused axes
+        if len(ax_list) < axes.size:
+            for ax in axes.flatten()[len(ax_list):]:
+                ax.axis("off")
+        if title:
+            fig.suptitle(title, y=0.995, fontsize=13)
+            fig.tight_layout(rect=[0, 0, 1, 0.97])
+        else:
+            fig.tight_layout()
+    else:
+        ax = ax_list[0]
+        # plot all k series (no labels)
+        for idx, k in enumerate(k_values):
+            means, stds = per_k[k]
+            (pline,) = ax.plot(epochs, means, marker=markers[idx % len(markers)])
+            ax.fill_between(epochs, means-stds, means+stds, alpha=0.25, color=pline.get_color())
+        # draw baselines once per k and label them
+        x0, x1 = min(epochs), max(epochs)
+        all_bh, all_bl = [], []
+        for k in k_values:
+            bh, bl = draw_baselines_for_k(ax, k, x0, x1)
+            all_bh += bh; all_bl += bl
+        if all_bh:
+            ax.legend(all_bh, all_bl, loc="lower right", framealpha=0.35)
+        ax.set_xlabel("Epoch"); ax.set_ylabel(metric.capitalize())
+        ax.set_title(title or f"CIIP across epochs — {metric}")
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+
+    if output_file:
+        fig.savefig(output_file, bbox_inches="tight", dpi=200)
+    plt.show()
+
 
 
 
@@ -237,6 +358,8 @@ def load_ciip_model_checkpoint(checkpoint_path):
     elif '2025_08_06-MoCoIn' in checkpoint_path:
         embed_dim=1024
     elif '2025_09_05' in checkpoint_path:
+        embed_dim=1024
+    else:
         embed_dim=1024
         
     print(f'Using embed {embed_dim}')
