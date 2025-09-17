@@ -217,11 +217,20 @@ def generate_ciip_model_configs(model_root: str, base_name: str, epochs: list = 
 
 if __name__ == "__main__":
     MODEL_ROOT = "/local/ms-data/SSL4EO/model"
-    ciip_root = f"/home/juro4948/ciip/logs/2025_09_05-13_28_50-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints"
-    epochs = [1, 2, 5, 10, 20, 30, 40, 50, 80, 100, 120,140]
+    # ciip_root = f"/home/juro4948/ciip/logs/2025_09_05-13_28_50-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints"
+    # epochs = [1, 2, 5, 10, 20, 50, 80, 100, 120, 140]
+    # MODEL_CONFIGS = generate_ciip_model_configs(
+    #     model_root=ciip_root,
+    #     base_name="2025_09_05_MoCoInit-hal",
+    #     epochs=epochs,
+    # )
+
+    ciip_root = '/home/juro4948/ciip/logs/2025_09_10-11_37_00-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints'
+    epochs = [1, 2, 3, 5, 10, 15, 20, 30]
+    base_name="2025_09_10_RandomInit-hal-bs5120"
     MODEL_CONFIGS = generate_ciip_model_configs(
         model_root=ciip_root,
-        base_name="2025_09_05_MoCoInit-hal",
+        base_name=base_name,
         epochs=epochs,
     )
 

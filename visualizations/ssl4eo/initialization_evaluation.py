@@ -259,43 +259,47 @@ class Sampler():
         return samples
 
 
-def get_non_corresponding_cosine_similarities(s1, s2):
+import torch
+import torch.nn.functional as F
+
+def get_non_corresponding_cosine_similarities(s1, s2, seed=42):
     """
-    Computes cosine similarity between s1[i] and s2[j] for all i != j.
+    Computes cosine similarities for positive pairs (i==j) and a balanced
+    random subset of negative pairs (i!=j).
 
     Args:
         s1 (torch.Tensor): Tensor of shape (N, D).
         s2 (torch.Tensor): Tensor of shape (N, D).
+        seed (int): Random seed for reproducibility.
 
     Returns:
-        torch.Tensor: A 1D tensor containing all off-diagonal cosine similarities.
-                      If N=1, returns an empty tensor.
+        pos_sims (np.ndarray): Cosine similarities of positive pairs (N,).
+        neg_sims (np.ndarray): Cosine similarities of a sampled subset of
+                               negative pairs (N,).
     """
     N = s1.shape[0]
-    if N == 0:
-        return torch.empty(0, dtype=s1.dtype, device=s1.device)
-    if N == 1: # No non-corresponding elements for a batch size of 1
-        return torch.empty(0, dtype=s1.dtype, device=s1.device)
 
-
-    # 1. L2 Normalize both tensors
+    # Normalize
     s1_norm = F.normalize(s1, p=2, dim=1)
     s2_norm = F.normalize(s2, p=2, dim=1)
 
-    # 2. Compute the full pairwise cosine similarity matrix
-    # Resulting shape: (N, N)
-    similarity_matrix = torch.matmul(s1_norm, s2_norm.T)
+    # Full cosine similarity matrix
+    sim_matrix = torch.matmul(s1_norm, s2_norm.T)
 
-    # 3. Create a mask to select off-diagonal elements
-    # The diagonal elements (i == j) correspond to positive pairs.
-    # The off-diagonal elements (i != j) correspond to negative (non-corresponding) pairs.
+    # Positives are the diagonal
+    pos_sims = sim_matrix.diag()
+
+    # Negatives are off-diagonal
     mask = torch.ones(N, N, dtype=torch.bool, device=s1.device)
-    mask = mask.fill_diagonal_(False) # Set diagonal elements to False
+    mask.fill_diagonal_(False)
+    neg_sims_all = sim_matrix[mask]
 
-    # 4. Use the mask to extract the non-corresponding similarities
-    non_corresponding_sims = similarity_matrix[mask]
+    # Sample as many negatives as positives
+    torch.manual_seed(seed)
+    idx = torch.randperm(neg_sims_all.numel(), device=s1.device)[:N]
+    neg_sims = neg_sims_all[idx]
 
-    return non_corresponding_sims.cpu().numpy()
+    return neg_sims.cpu().numpy()
     
 def process_sampled_to_df(sampled, sat='s1'):
     dfs = []
@@ -339,7 +343,8 @@ def main(args: DictConfig):
 
     # path to the directory containing the experiment model checkpoints
     # chkpt_path = '/local/ms-data/SSL4EO/model/2025_07_03-RandomInit-bs4096/checkpoints'
-    chkpt_path = '/home/juro4948/ciip/logs/2025_09_05-13_28_50-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints'
+    chkpt_path = '/home/juro4948/ciip/logs/2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints'
+    # '/home/juro4948/ciip/logs/2025_09_05-13_28_50-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints'
     # '/local/ms-data/SSL4EO/model/2025_08_26-MoCoInit/checkpoints'
     # '/local/ms-data/SSL4EO/model/2025_08_06-MoCoInit/no-copy/'
     # '/local/ms-data/SSL4EO/model/2025-08-03_12-52-38-test-compute/2025_08_03-13_00_14-model_resnet50-lr_5e-05-b_256-j_4-p_amp/checkpoints/'
@@ -404,14 +409,14 @@ def main(args: DictConfig):
         model = load_model(args, path, w_path=w_path, device=device)
 
         # if hasattr(model, 'encoder_s2') and hasattr(model.encoder_s2, 'fc'):
-        #     # Replace the fc layer of encoder_s2 with an identity mapping.
-        # print(model.encoder_s2.fc)
-        model.encoder_s2.fc = nn.Identity()
-        print(model.encoder_s2.fc)
-        if hasattr(model, 'encoder_s1') and hasattr(model.encoder_s1, 'fc'):
             # Replace the fc layer of encoder_s2 with an identity mapping.
-            print(model.encoder_s1.fc)
-        model.encoder_s1.fc = nn.Identity()
+        # print(model.encoder_s2.fc)
+        # model.encoder_s2.fc = nn.Identity()
+        # print(model.encoder_s2.fc)
+        # if hasattr(model, 'encoder_s1') and hasattr(model.encoder_s1, 'fc'):
+        #     # Replace the fc layer of encoder_s2 with an identity mapping.
+        #     print(model.encoder_s1.fc)
+        # model.encoder_s1.fc = nn.Identity()
 
 
         model.eval()
