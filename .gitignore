@@ -19,7 +19,7 @@ checkpoints/
 log/
 
 
-# **/configs/prod_default.yaml
+**/configs/prod_default.yaml
 # **
 *.in
 data/**
