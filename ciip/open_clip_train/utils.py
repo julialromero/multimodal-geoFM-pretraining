@@ -14,7 +14,7 @@ sys.path.insert(0, parent_dir)
 from model_ciip import CIIP
 from loss import CiipLoss, SigLipLoss
 from torch import nn
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, ListConfig, OmegaConf
 import numpy as np
 
 
@@ -61,9 +61,49 @@ def convert_weights_to_lp(model: nn.Module, dtype=torch.float16):
 convert_weights_to_fp16 = convert_weights_to_lp  # backwards compat
 
 
+_SENTINEL = object()
+
+
+def _resolve_section(cfg, key):
+    if cfg is None:
+        return None
+    if isinstance(cfg, DictConfig):
+        try:
+            return cfg[key]
+        except Exception:
+            return None
+    if isinstance(cfg, dict):
+        return cfg.get(key)
+    return getattr(cfg, key, None)
+
+
+def _get_cfg_value(cfg, key, default=_SENTINEL):
+    if cfg is None:
+        return default
+    if isinstance(cfg, DictConfig):
+        if key in cfg:
+            return cfg[key]
+        return default
+    if isinstance(cfg, dict):
+        return cfg.get(key, default)
+    return getattr(cfg, key, default)
+
+
+def _resolve_value(key, *cfgs, default=None):
+    for cfg in cfgs:
+        value = _get_cfg_value(cfg, key, _SENTINEL)
+        if value is not _SENTINEL:
+            return value
+    return default
+
 
 def create_loss(args):
-    if args.distill:
+    datamodule_cfg = _resolve_section(args, "datamodule")
+    loss_cfg = _resolve_section(args, "loss")
+    if loss_cfg is None:
+        loss_cfg = args
+
+    if bool(_resolve_value("distill", args, loss_cfg, default=False)):
         raise NotImplementedError("DistillClipLoss not currently supported")
         # return DistillClipLoss(
         #     local_loss=args.local_loss,
@@ -85,20 +125,29 @@ def create_loss(args):
         #     world_size=args.world_size,
         #     use_horovod=args.horovod,
         # )
-    elif args.siglip:
+    siglip_enabled = bool(_resolve_value("siglip", args, loss_cfg, default=False))
+    if siglip_enabled:
         # raise NotImplementedError("SigLip not currently supported")
         # assert not args.horovod, "Horovod not currently supported for SigLip"
         return SigLipLoss(
-            rank=args.rank,
-            world_size=args.world_size,
+            rank=_resolve_value("rank", args, datamodule_cfg, default=0),
+            world_size=_resolve_value("world_size", args, datamodule_cfg, default=1),
         )
+    vc_covariance_weights = _resolve_value("vc_covariance_weights", loss_cfg, args, default=None)
+    if isinstance(vc_covariance_weights, (DictConfig, ListConfig)):
+        vc_covariance_weights = OmegaConf.to_object(vc_covariance_weights)
+
     return CiipLoss(
-        local_loss=args.local_loss,
-        gather_with_grad=args.gather_with_grad,
-        cache_labels=True,
-        rank=args.rank,
-        world_size=args.world_size,
-        use_horovod=args.horovod,
+        local_loss=_resolve_value("local_loss", loss_cfg, args, default=False),
+        gather_with_grad=_resolve_value("gather_with_grad", loss_cfg, args, default=False),
+        cache_labels=_resolve_value("cache_labels", loss_cfg, args, default=True),
+        rank=_resolve_value("rank", loss_cfg, args, datamodule_cfg, default=0),
+        world_size=_resolve_value("world_size", loss_cfg, args, datamodule_cfg, default=1),
+        use_horovod=_resolve_value("horovod", loss_cfg, args, datamodule_cfg, default=False),
+        vc_reg_enabled=_resolve_value("vc_enabled", loss_cfg, args, default=False),
+        vc_weight=_resolve_value("vc_weight", loss_cfg, args, default=0.0),
+        vc_gamma=_resolve_value("vc_gamma", loss_cfg, args, default=1.0),
+        vc_covariance_weights=vc_covariance_weights,
     )
 
 

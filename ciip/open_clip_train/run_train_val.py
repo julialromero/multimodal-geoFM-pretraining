@@ -17,7 +17,7 @@ from data import get_data
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 sys.path.insert(0, parent_dir)
 from model_ciip import CIIP
-from loss import CiipLoss
+from utils import create_loss
 
 from torchvision.transforms import v2
 # from torchvision.transforms import *
@@ -50,13 +50,7 @@ def main(args: DictConfig, start_epoch=0):
   local_rank = int(os.environ.get("LOCAL_RANK", 0))
   args.train.device = "cuda:%d" % local_rank
 
-  # loss = create_loss(args)
-  loss = CiipLoss(local_loss=False,
-    gather_with_grad=False,
-    cache_labels=False,
-    rank=0,
-    world_size=1,
-    use_horovod=False)
+  loss = create_loss(args)
 
   model = CIIP(embed_dim=args.model.embed_dim,
     s1_resolution=args.model.s1_resolution,
