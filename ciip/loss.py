@@ -73,6 +73,10 @@ class CiipLoss(nn.Module):
             rank=0,
             world_size=1,
             use_horovod=False,
+            vc_reg_enabled=False,
+            vc_weight=0.0,
+            vc_gamma=1.0,
+            vc_covariance_weights=None,
     ):
         super().__init__()
         self.local_loss = local_loss
@@ -82,9 +86,41 @@ class CiipLoss(nn.Module):
         self.world_size = world_size
         self.use_horovod = use_horovod
 
+        self.vc_reg_enabled = vc_reg_enabled
+        self.vc_weight = vc_weight
+        self.vc_gamma = vc_gamma
+
+        if vc_covariance_weights is None:
+            self.vc_covariance_weights = (1.0, 1.0)
+        else:
+            if isinstance(vc_covariance_weights, torch.Tensor):
+                vc_covariance_weights = vc_covariance_weights.tolist()
+            if not isinstance(vc_covariance_weights, (list, tuple)):
+                vc_covariance_weights = [float(vc_covariance_weights)]
+            if len(vc_covariance_weights) == 1:
+                vc_covariance_weights = [vc_covariance_weights[0], vc_covariance_weights[0]]
+            elif len(vc_covariance_weights) >= 2:
+                vc_covariance_weights = vc_covariance_weights[:2]
+            self.vc_covariance_weights = tuple(float(w) for w in vc_covariance_weights)
+
         # cache state
         self.prev_num_logits = 0
         self.labels = {}
+
+    def _variance_regularizer(self, features: torch.Tensor) -> torch.Tensor:
+        if features.ndim != 2 or features.shape[0] <= 1:
+            return torch.zeros((), device=features.device, dtype=features.dtype)
+        variances = torch.var(features, dim=0, unbiased=False)
+        std = torch.sqrt(variances + 1e-4)
+        return torch.mean(F.relu(self.vc_gamma - std))
+
+    def _covariance_regularizer(self, features: torch.Tensor) -> torch.Tensor:
+        if features.ndim != 2 or features.shape[0] <= 1:
+            return torch.zeros((), device=features.device, dtype=features.dtype)
+        features = features - features.mean(dim=0)
+        cov = features.T @ features / (features.shape[0] - 1)
+        cov = cov - torch.diag(torch.diagonal(cov))
+        return cov.pow(2).sum() / cov.shape[0]
 
     def get_ground_truth(self, device, num_logits) -> torch.Tensor:
         # calculated ground-truth and cache if enabled
@@ -127,12 +163,25 @@ class CiipLoss(nn.Module):
 
         labels = self.get_ground_truth(device, logits_per_s1.shape[0])
 
-        total_loss = (
+        contrastive_loss = (
             F.cross_entropy(logits_per_s1, labels) +
             F.cross_entropy(logits_per_s2, labels)
         ) / 2
 
-        return {"contrastive_loss": total_loss} if output_dict else total_loss
+        losses = {"contrastive_loss": contrastive_loss}
+
+        if self.vc_reg_enabled and self.vc_weight != 0:
+            variance_loss = self._variance_regularizer(s1_features) + self._variance_regularizer(s2_features)
+            cov_w_s1, cov_w_s2 = self.vc_covariance_weights
+            covariance_loss = (
+                cov_w_s1 * self._covariance_regularizer(s1_features) +
+                cov_w_s2 * self._covariance_regularizer(s2_features)
+            )
+            vc_loss = self.vc_weight * (variance_loss + covariance_loss)
+            losses["vc_loss"] = vc_loss
+
+        total_loss = sum(losses.values())
+        return losses if output_dict else total_loss
 
 
 # class CoCaLoss(ClipLoss):

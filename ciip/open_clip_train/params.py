@@ -452,6 +452,32 @@ def parse_args(args):
         action="store_true",
         help='Use SigLip (sigmoid) loss.'
     )
+    parser.add_argument(
+        "--vc-regularization",
+        dest="vc_enabled",
+        default=False,
+        action="store_true",
+        help="Enable the variance-covariance (VC) regularizer during contrastive training.",
+    )
+    parser.add_argument(
+        "--vc-weight",
+        type=float,
+        default=0.0,
+        help="Overall weight applied to the VC regularizer term.",
+    )
+    parser.add_argument(
+        "--vc-gamma",
+        type=float,
+        default=1.0,
+        help="Target standard deviation γ used by the VC variance penalty.",
+    )
+    parser.add_argument(
+        "--vc-covariance-weights",
+        type=float,
+        nargs="+",
+        default=None,
+        help="Per-modality covariance weights for the VC regularizer. Provide one or two floats.",
+    )
 
     args = parser.parse_args(args)
 

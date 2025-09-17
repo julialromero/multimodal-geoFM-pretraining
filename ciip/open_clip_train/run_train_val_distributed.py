@@ -458,7 +458,7 @@ def main(args: DictConfig, start_epoch=0):
         # evaluate(model, data, start_epoch, args, tb_writer=writer, tokenizer=tokenizer)
         # return
 
-    loss = create_loss(args.datamodule)
+    loss = create_loss(args)
 
     # MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT=100000
     # torch.cuda.memory._record_memory_history(

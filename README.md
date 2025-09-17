@@ -24,6 +24,35 @@ $ pip install git+https://github.com/openai/CLIP.git
 
 Replace `cudatoolkit=11.0` above with the appropriate CUDA version on your machine or `cpuonly` when installing on a machine without a GPU.
 
+### Variance–covariance regularization for CIIP training
+
+The CIIP training entrypoints now expose an optional variance–covariance (VC) regularizer. When enabled, the loss augments the contrastive objective with penalties that encourage per-dimension variance above a threshold `γ` and suppress cross-feature correlations for each modality. You can tune these behaviours from both the CLI and the Hydra configuration files:
+
+* **CLI flags**: `train.py` accepts `--vc-regularization` (enables the regularizer), `--vc-weight` (overall loss weight), `--vc-gamma` (variance target γ) and `--vc-covariance-weights` (one or two floats weighting the Sentinel-1/Sentinel-2 covariance terms). Example:
+
+  ```bash
+  python -m ciip.open_clip_train.main \
+      --vc-regularization \
+      --vc-weight 0.1 \
+      --vc-gamma 1.0 \
+      --vc-covariance-weights 1.0 0.5
+  ```
+
+* **Hydra configs**: when using `run_train_val.py` or the distributed runner, the new options live under the `loss` section in the YAML config. For instance, `ciip/open_clip_train/configs/local_default.yaml` now contains:
+
+  ```yaml
+  loss:
+    local_loss: False
+    gather_with_grad: False
+    cache_labels: True
+    vc_enabled: False      # set to True to activate the VC regularizer
+    vc_weight: 0.0         # overall VC weight
+    vc_gamma: 1.0          # variance floor γ
+    vc_covariance_weights: [1.0, 1.0]
+  ```
+
+  Override these keys in your experiment-specific config to customise the regulariser while keeping the rest of the defaults untouched.
+
 ```python
 import torch
 import clip
