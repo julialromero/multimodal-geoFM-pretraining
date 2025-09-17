@@ -506,6 +506,11 @@ def parse_linear_probe_csv(
     configuration. When multiple rows match, later values override earlier ones.
     """
 
+    csv_path = Path(csv_path)
+    if not csv_path.is_file():
+        _LOGGER.warning("Linear probe CSV '%s' not found; skipping", csv_path)
+        return {}
+
     pattern = re.compile(model_pattern) if model_pattern else None
     results: Dict[int, Tuple[float, Optional[float]]] = {}
 
