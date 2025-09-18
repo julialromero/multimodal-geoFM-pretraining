@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Utilities for visualizing embedding collapse and training instability.
 
-This script loads saved CIIP embeddings across epochs and produces a suite of
-plots that are commonly used to diagnose representation collapse:
+This script loads CIIP checkpoints, extracts embeddings for a shared subset of
+samples, and produces a suite of plots that are commonly used to diagnose
+representation collapse:
 
 * Positive vs. negative cosine similarity statistics.
 * Cosine similarity histograms per epoch.
@@ -13,18 +14,20 @@ plots that are commonly used to diagnose representation collapse:
 
 The implementation follows the data loading patterns used in
 ``visualizations/ssl4eo/initialization_evaluation.py`` and
-``ciip/evaluation/linearprobe_comparison.py`` so it should integrate with the
-existing CIIP checkpoints and evaluation outputs.
+``ciip/evaluation/linearprobe_comparison.py`` so it can load models,
+instantiate the SSL4EO dataset, and compute embeddings on-the-fly without
+pre-extracted features.
 
 Example usage::
 
     python -m visualizations.ssl4eo.embedding_collapse_diagnostics \
-        --embedding-root /path/to/extracted_embeddings \
+        --checkpoint-root /home/juro4948/ciip/logs/2025_09_05-13_28_50-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints \
         --output-dir diagnostics/random_init \
-        --negative-samples 20000 \
+        --dataset-root /local/ms-data/SSL4EO/ \
+        --subset-size 2048 \
+        --negative-samples 2000 \
         --linear-probe-csv results.csv \
         --linear-probe-pattern "RandomInit-hal-epoch(\\d+)" \
-        --linear-probe-k 1.0 \
         --tsne-samples 800 \
         --umap-samples 800
 
@@ -35,6 +38,7 @@ are exported as JSON/NumPy files for downstream analysis.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import json
 import logging
@@ -48,13 +52,32 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
+from omegaconf import DictConfig, OmegaConf
 from sklearn.manifold import TSNE
 
+import sys
+parent_dir = '/home/juro4948/ciip/ciip/open_clip_train/'
+sys.path.insert(0, parent_dir)
+
+# from ciip.open_clip_train.data import get_data
+# from ciip.open_clip_train.precision import get_autocast
+# from ciip.open_clip_train.utils import create_model
+from data import get_data
+from utils import create_model
+from open_clip_train.precision import get_autocast
+
+import os
 try:
     import umap  # type: ignore
 except ImportError:  # pragma: no cover - optional dependency
     umap = None
+
+try:  # pragma: no cover - optional dependency
+    from open_clip import get_input_dtype  # type: ignore
+except ImportError:  # pragma: no cover - open_clip is optional for docs/tests
+    get_input_dtype = None  # type: ignore[assignment]
 
 
 _LOGGER = logging.getLogger("embedding_collapse")
@@ -113,35 +136,17 @@ class EpochMetrics:
             "s2_condition_number": self.s2_condition_number,
         }
 
+def _sanitize_label(label: str) -> str:
+    """Return a filesystem-friendly variant of ``label``."""
+
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", label).strip("_")
+    return safe or "epoch"
+
 
 def _natural_key(value: str) -> List[object]:
     """Return a key for natural sorting of strings containing numbers."""
 
     return [int(text) if text.isdigit() else text.lower() for text in re.split(r"(\\d+)", value)]
-
-
-def discover_epoch_dirs(root: Path) -> List[Path]:
-    """Return directories that correspond to individual epochs.
-
-    If ``root`` already contains ``.pt`` files, the root itself is treated as a
-    single epoch directory. Otherwise we return the immediate subdirectories
-    sorted by name (using natural ordering).
-    """
-
-    root = Path(root)
-    if not root.exists():
-        raise FileNotFoundError(f"Embedding root '{root}' does not exist")
-
-    if any(root.glob("*.pt")) or any(root.glob("*.pth")):
-        return [root]
-
-    dirs = [p for p in root.iterdir() if p.is_dir()]
-    dirs.sort(key=lambda p: _natural_key(p.name))
-    if not dirs:
-        raise FileNotFoundError(
-            f"No epoch directories found under '{root}'. Expected subdirectories containing .pt files."
-        )
-    return dirs
 
 
 def infer_epoch_index(name: str, fallback: int) -> int:
@@ -157,82 +162,312 @@ def infer_epoch_index(name: str, fallback: int) -> int:
     return fallback
 
 
-def load_epoch_embeddings(
-    epoch_dir: Path,
+
+
+def resolve_input_dtype(precision: str) -> torch.dtype:
+    """Resolve the tensor dtype used for model inputs."""
+
+    dtype: Optional[torch.dtype] = None
+    if get_input_dtype is not None:
+        dtype = get_input_dtype(precision)
+    if dtype is not None:
+        return dtype
+
+    precision = precision.lower()
+    if "bf16" in precision:
+        return torch.bfloat16
+    if "fp16" in precision or "amp" in precision:
+        return torch.float16
+    return torch.float32
+
+
+def ensure_hydra_original_cwd() -> None:
+    """Ensure ``hydra.utils.get_original_cwd`` is defined when not using Hydra."""
+
+    try:
+        from hydra import utils as hydra_utils  # type: ignore
+    except ImportError as exc:  # pragma: no cover - hydra is required for dataset loading
+        raise ImportError(
+            "hydra-core is required to instantiate the SSL4EO dataset; install it with `pip install hydra-core`."
+        ) from exc
+
+    try:
+        hydra_utils.get_original_cwd()
+    except Exception:
+        repo_root = Path(__file__).resolve().parents[3]
+        default_cwd = repo_root / "ciip" / "open_clip_train"
+        hydra_utils.get_original_cwd = lambda: str(default_cwd)
+
+
+def compare_state_keys(model: torch.nn.Module, state_dict: Dict[str, torch.Tensor]) -> Tuple[set, set]:
+    """Return missing and unexpected keys between a model and checkpoint."""
+
+    model_keys = set(model.state_dict().keys())
+    checkpoint_keys = set(state_dict.keys())
+    return model_keys - checkpoint_keys, checkpoint_keys - model_keys
+
+
+def load_model_from_checkpoint(
+    config: DictConfig,
+    checkpoint_path: Path,
     *,
-    max_files: Optional[int] = None,
-) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], List[str]]:
-    """Load paired S1/S2 embeddings from a directory of ``.pt`` files."""
+    device: torch.device,
+    input_dtype: torch.dtype,
+    w_path: Optional[Path] = None,
+) -> torch.nn.Module:
+    """Instantiate a CIIP model and load weights from ``checkpoint_path``."""
 
-    tensor_paths = sorted(
-        list(epoch_dir.glob("*.pt")) + list(epoch_dir.glob("*.pth")) + list(epoch_dir.glob("*.pkl"))
-    )
-    if not tensor_paths:
-        _LOGGER.warning("No embedding tensors found in %s", epoch_dir)
-        return None, None, []
+    model = create_model(config, device=device)
 
-    if max_files is not None:
-        tensor_paths = tensor_paths[:max_files]
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    state_dict = checkpoint.get("state_dict", checkpoint)
 
+    try:
+        model.load_state_dict(state_dict, strict=True)
+    except Exception:
+        cleaned = {k.replace("module.", ""): v for k, v in state_dict.items()}
+        try:
+            model.load_state_dict(cleaned, strict=True)
+        except Exception:
+            if "encoder_s1.W" in cleaned:
+                del cleaned["encoder_s1.W"]
+            missing, unexpected = compare_state_keys(model, cleaned)
+            if missing or unexpected:
+                raise RuntimeError(
+                    f"Checkpoint {checkpoint_path} is incompatible with the CIIP architecture."
+                )
+            model.load_state_dict(cleaned, strict=True)
+        else:
+            state_dict = cleaned
+
+    if w_path is not None and w_path.exists():
+        try:
+            orthogonal = torch.load(w_path, map_location=device)
+        except Exception as exc:  # pragma: no cover - defensive branch
+            _LOGGER.warning("Failed to load orthogonal mapping from %s: %s", w_path, exc)
+        else:
+            if hasattr(model, "encoder_s1"):
+                model.encoder_s1.register_buffer("W", orthogonal)
+                if hasattr(model.encoder_s1, "apply_orthogonal_matrix"):
+                    model.encoder_s1.apply_orthogonal_matrix = True
+
+    if input_dtype is not None:
+        model = model.to(device, dtype=input_dtype, non_blocking=True)
+    else:
+        model = model.to(device, non_blocking=True)
+
+    if hasattr(model, "encoder_s1") and hasattr(model.encoder_s1, "fc"):
+        model.encoder_s1.fc = nn.Identity()
+    if hasattr(model, "encoder_s2") and hasattr(model.encoder_s2, "fc"):
+        model.encoder_s2.fc = nn.Identity()
+
+    model.eval()
+    return model
+
+
+def _unwrap_subset(dataset: torch.utils.data.Dataset) -> Tuple[torch.utils.data.Dataset, Sequence[int]]:
+    if isinstance(dataset, torch.utils.data.Subset):
+        return dataset.dataset, dataset.indices  # type: ignore[return-value]
+    return dataset, range(len(dataset))
+
+
+def extract_embeddings_for_dataset(
+    model: torch.nn.Module,
+    dataset: torch.utils.data.Dataset,
+    *,
+    input_dtype: torch.dtype,
+    device: torch.device,
+    autocast,
+) -> Tuple[torch.Tensor, torch.Tensor, List[str]]:
+    """Run the encoders over ``dataset`` and return stacked embeddings."""
+
+    base_dataset, index_map = _unwrap_subset(dataset)
     s1_vectors: List[torch.Tensor] = []
     s2_vectors: List[torch.Tensor] = []
     uids: List[str] = []
 
-    for path in tensor_paths:
-        try:
-            sample = torch.load(path, map_location="cpu")
-        except Exception as exc:  # pragma: no cover - defensive branch
-            _LOGGER.error("Failed to load %s: %s", path, exc)
-            continue
+    with torch.no_grad():
+        for local_idx, base_idx in enumerate(index_map):
+            sample = dataset[local_idx]
+            if isinstance(sample, dict):
+                s1_img = sample.get("s1")
+                s2_img = sample.get("s2")
+            else:
+                s1_img, s2_img = sample  # type: ignore[misc]
 
-        s1 = sample.get("s1")
-        s2 = sample.get("s2")
-        if s1 is None or s2 is None:
-            # We only keep samples that contain both modalities so that cross
-            # cosine similarity is well defined.
-            continue
+            if s1_img is None or s2_img is None:
+                continue
 
-        s1_tensor = torch.as_tensor(s1).reshape(-1)
-        s2_tensor = torch.as_tensor(s2).reshape(-1)
-        if s1_tensor.ndim != 1 or s2_tensor.ndim != 1:
-            _LOGGER.debug("Skipping %s due to unexpected tensor shape", path)
-            continue
+            s1_tensor = torch.as_tensor(s1_img).unsqueeze(0)
+            s2_tensor = torch.as_tensor(s2_img).unsqueeze(0)
+            if input_dtype is not None:
+                s1_tensor = s1_tensor.to(device=device, dtype=input_dtype, non_blocking=True)
+                s2_tensor = s2_tensor.to(device=device, dtype=input_dtype, non_blocking=True)
+            else:
+                s1_tensor = s1_tensor.to(device=device, non_blocking=True)
+                s2_tensor = s2_tensor.to(device=device, non_blocking=True)
 
-        s1_vectors.append(s1_tensor)
-        s2_vectors.append(s2_tensor)
-        uids.append(str(sample.get("uid", path.stem)))
+            with autocast():
+                s1_embed = model.encode_s1(s1_tensor, normalize=True)
+                s2_embed = model.encode_s2(s2_tensor, normalize=True)
+
+            s1_vectors.append(s1_embed.squeeze(0).cpu())
+            s2_vectors.append(s2_embed.squeeze(0).cpu())
+
+            if hasattr(base_dataset, "get_sample_uid"):
+                uid, _ = base_dataset.get_sample_uid(base_idx)
+            else:
+                uid = base_idx
+            uids.append(str(uid))
 
     if not s1_vectors or not s2_vectors:
-        _LOGGER.warning("No paired embeddings found in %s", epoch_dir)
-        return None, None, []
+        raise RuntimeError("No embeddings were extracted from the provided dataset subset.")
 
     s1_stack = torch.stack(s1_vectors, dim=0)
     s2_stack = torch.stack(s2_vectors, dim=0)
     return s1_stack, s2_stack, uids
 
 
-def collect_embeddings(
-    embedding_root: Path,
+def discover_checkpoints(
+    checkpoint_root: Path,
     *,
-    max_files_per_epoch: Optional[int] = None,
-) -> List[EpochEmbeddings]:
-    """Load embeddings for all epochs contained in ``embedding_root``."""
+    pattern: Optional[str],
+    include_init: bool,
+    max_checkpoints: Optional[int],
+) -> List[Path]:
+    """Return checkpoint files sorted using natural ordering."""
 
-    epoch_dirs = discover_epoch_dirs(embedding_root)
+    checkpoint_root = Path(checkpoint_root)
+    if not checkpoint_root.exists():
+        raise FileNotFoundError(f"Checkpoint root '{checkpoint_root}' does not exist")
+
+    regex = re.compile(pattern) if pattern else None
+    candidates: List[Path] = []
+    for extension in ("*.pt", "*.pth"):
+        candidates.extend(checkpoint_root.glob(extension))
+
+    if regex is not None:
+        candidates = [path for path in candidates if regex.search(path.name)]
+    if not include_init:
+        candidates = [path for path in candidates if "epoch_init" not in path.name]
+
+    # candidates.sort(key=lambda p: _natural_key(p.name))
+    # sort candidates
+    # candidates = sorted(
+    #     candidates,
+    #     key=lambda p: int(p.stem.split('_')[1])
+    # )
+    # print(candidates)
+
+
+    # if epoch_stride > 1:
+    #     candidates = candidates[::epoch_stride]
+    epochs = [1, 2, 3, 5, 10, 20, 50, 80, 100, 120, 140]
+
+    # filter and keep only those epochs
+    selected_paths = [
+        p for p in candidates
+        if int(p.stem.split('_')[1]) in epochs
+    ]
+
+    # (optional) sort them by epoch number
+    candidates = sorted(
+        selected_paths,
+        key=lambda p: int(p.stem.split('_')[1])
+    )
+
+    print(candidates)
+
+    # candidates = [candidates[i] for i in range(len(candidates)) if i in epochs or i == 0 or i == len(candidates)-1]
+    if max_checkpoints is not None:
+        candidates = candidates[:max_checkpoints]
+
+    if not candidates:
+        raise FileNotFoundError(f"No checkpoints matching the provided criteria were found in '{checkpoint_root}'")
+
+    return candidates
+
+
+def collect_epoch_embeddings(
+    checkpoint_root: Path,
+    config: DictConfig,
+    dataset: torch.utils.data.Dataset,
+    *,
+    input_dtype: torch.dtype,
+    device: torch.device,
+    autocast,
+    pattern: Optional[str],
+    include_init: bool,
+    max_checkpoints: Optional[int],
+) -> List[EpochEmbeddings]:
+    """Extract embeddings for each checkpoint under ``checkpoint_root``."""
+
+    checkpoints = discover_checkpoints(
+        checkpoint_root,
+        pattern=pattern,
+        include_init=include_init,
+        max_checkpoints=max_checkpoints,
+    )
+
+    w_path = checkpoint_root / "W.pt"
+    if not w_path.exists():
+        w_path = None
+
     epochs: List[EpochEmbeddings] = []
-    for idx, epoch_dir in enumerate(epoch_dirs):
-        s1, s2, uids = load_epoch_embeddings(epoch_dir, max_files=max_files_per_epoch)
-        if s1 is None or s2 is None:
-            _LOGGER.warning("Skipping epoch directory %s (no valid embeddings)", epoch_dir)
+    for idx, checkpoint_path in enumerate(checkpoints):
+        label = checkpoint_path.stem
+        epoch_index = infer_epoch_index(label, fallback=idx)
+        _LOGGER.info("Extracting embeddings for %s (epoch index %d)", checkpoint_path.name, epoch_index)
+
+        model = load_model_from_checkpoint(
+            config,
+            checkpoint_path,
+            device=device,
+            input_dtype=input_dtype,
+            w_path=w_path,
+        )
+
+        try:
+            s1, s2, uids = extract_embeddings_for_dataset(
+                model,
+                dataset,
+                input_dtype=input_dtype,
+                device=device,
+                autocast=autocast,
+            )
+        except RuntimeError as exc:
+            _LOGGER.error("Skipping %s due to extraction failure: %s", checkpoint_path.name, exc)
             continue
-        epoch_index = infer_epoch_index(epoch_dir.name, fallback=idx)
-        epochs.append(EpochEmbeddings(epoch_dir.name, epoch_index, epoch_dir, s1, s2, uids))
+
+        epochs.append(EpochEmbeddings(label, epoch_index, checkpoint_path, s1, s2, uids))
+
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
 
     epochs.sort(key=lambda e: (e.epoch_index, e.label))
     if not epochs:
-        raise RuntimeError(f"No embeddings loaded from '{embedding_root}'")
-    _LOGGER.info("Loaded embeddings for %d epochs from %s", len(epochs), embedding_root)
+        raise RuntimeError(f"No embeddings were extracted from checkpoints in '{checkpoint_root}'")
+
+    _LOGGER.info("Extracted embeddings for %d checkpoints from %s", len(epochs), checkpoint_root)
     return epochs
+
+
+
+
+def build_subset(
+    dataset: torch.utils.data.Dataset,
+    subset_size: Optional[int],
+    seed: int,
+) -> torch.utils.data.Dataset:
+    """Return a subset of ``dataset`` containing ``subset_size`` samples."""
+
+    total = len(dataset)
+    if subset_size is None or subset_size <= 0 or subset_size >= total:
+        indices = list(range(total))
+    else:
+        rng = np.random.default_rng(seed)
+        indices = sorted(rng.choice(total, size=subset_size, replace=False).tolist())
+    return torch.utils.data.Subset(dataset, indices)
 
 
 def compute_covariance(tensor: torch.Tensor) -> Optional[torch.Tensor]:
@@ -350,6 +585,14 @@ def compute_epoch_metrics(
 
     return results
 
+def _mark_axis_no_data(ax, title: str, message: str = "No data available") -> None:
+    """Annotate ``ax`` to indicate that the desired plot could not be produced."""
+
+    ax.set_title(title)
+    ax.text(0.5, 0.5, message, ha="center", va="center", transform=ax.transAxes, color="gray")
+    ax.set_xticks([])
+    ax.set_yticks([])
+
 
 def plot_cosine_summary(metrics: Sequence[EpochMetrics], output_dir: Path) -> None:
     x = [m.epoch_index for m in metrics]
@@ -377,18 +620,47 @@ def plot_cosine_summary(metrics: Sequence[EpochMetrics], output_dir: Path) -> No
 
 def plot_cosine_histograms(metrics: Sequence[EpochMetrics], output_dir: Path, *, bins: int = 50) -> None:
     for metric in metrics:
-        if metric.cosine_positive is None:
-            continue
-        fig, axes = plt.subplots(1, 2, figsize=(12, 4), sharey=True)
-        axes[0].hist(metric.cosine_positive, bins=bins, color="#1f77b4", alpha=0.8)
-        axes[0].set_title(f"Positive pairs — {metric.label}")
-        axes[0].set_xlabel("Cosine similarity")
-        axes[0].set_ylabel("Count")
+        positives = metric.cosine_positive
+        negatives = metric.cosine_negative
 
-        negatives = metric.cosine_negative if metric.cosine_negative is not None else np.empty(0)
-        axes[1].hist(negatives, bins=bins, color="#ff7f0e", alpha=0.8)
-        axes[1].set_title(f"Negative pairs — {metric.label}")
-        axes[1].set_xlabel("Cosine similarity")
+        has_positive = positives is not None and getattr(positives, "size", 0)
+        has_negative = negatives is not None and getattr(negatives, "size", 0)
+        if not (has_positive or has_negative):
+            continue
+        # fig, axes = plt.subplots(1, 2, figsize=(12, 4), sharey=True)
+        # axes[0].hist(metric.cosine_positive, bins=bins, color="#1f77b4", alpha=0.8)
+        # axes[0].set_title(f"Positive pairs — {metric.label}")
+        # axes[0].set_xlabel("Cosine similarity")
+        # axes[0].set_ylabel("Count")
+
+        # negatives = metric.cosine_negative if metric.cosine_negative is not None else np.empty(0)
+        # axes[1].hist(negatives, bins=bins, color="#ff7f0e", alpha=0.8)
+        # axes[1].set_title(f"Negative pairs — {metric.label}")
+        # axes[1].set_xlabel("Cosine similarity")
+        fig, ax = plt.subplots(figsize=(8, 4))
+        if has_positive:
+            ax.hist(
+                positives,
+                bins=bins,
+                color="#1f77b4",
+                alpha=0.6,
+                label="Positive pairs",
+            )
+        if has_negative:
+            ax.hist(
+                negatives,
+                bins=bins,
+                color="#ff7f0e",
+                alpha=0.6,
+                label="Negative pairs",
+            )
+
+        ax.set_title(f"Cosine similarity — {metric.label}")
+        ax.set_xlabel("Cosine similarity")
+        ax.set_ylabel("Count")
+        if has_positive or has_negative:
+            ax.legend()
+        ax.grid(True, alpha=0.3)
         fig.tight_layout()
         fig.savefig(output_dir / f"cosine_hist_{metric.label}.png", dpi=200)
         plt.close(fig)
@@ -493,6 +765,143 @@ def plot_spectrum(
     plt.close(fig)
 
 
+def plot_epoch_dashboards(
+    metrics: Sequence[EpochMetrics],
+    output_dir: Path,
+    *,
+    cosine_bins: int,
+    spectrum_top_k: int,
+) -> None:
+    """Generate a multi-panel diagnostic figure for each epoch."""
+
+    for metric in metrics:
+        fig = plt.figure(figsize=(14, 12))
+        fig.suptitle(f"Diagnostics — {metric.label}")
+        grid = fig.add_gridspec(3, 2)
+        hist_ax = fig.add_subplot(grid[0, :])
+        s1_var_ax = fig.add_subplot(grid[1, 0])
+        s2_var_ax = fig.add_subplot(grid[1, 1])
+        s1_spec_ax = fig.add_subplot(grid[2, 0])
+        s2_spec_ax = fig.add_subplot(grid[2, 1])
+
+        positives = metric.cosine_positive
+        negatives = metric.cosine_negative
+        has_positive = positives is not None and getattr(positives, "size", 0)
+        has_negative = negatives is not None and getattr(negatives, "size", 0)
+
+        if has_positive or has_negative:
+            if has_positive:
+                hist_ax.hist(
+                    positives,
+                    bins=cosine_bins,
+                    color="#1f77b4",
+                    alpha=0.6,
+                    label="Positive pairs",
+                )
+            if has_negative:
+                hist_ax.hist(
+                    negatives,
+                    bins=cosine_bins,
+                    color="#ff7f0e",
+                    alpha=0.6,
+                    label="Negative pairs",
+                )
+            hist_ax.set_title("Cosine similarity distribution")
+            hist_ax.set_xlabel("Cosine similarity")
+            hist_ax.set_ylabel("Count")
+            hist_ax.legend()
+            hist_ax.grid(True, alpha=0.3)
+        else:
+            _mark_axis_no_data(hist_ax, "Cosine similarity distribution")
+
+        # Variance per modality
+        if metric.s1_variance is not None and metric.s1_variance.size:
+            dims = np.arange(1, metric.s1_variance.size + 1)
+            s1_var_ax.plot(dims, metric.s1_variance, color="#2ca02c")
+            s1_var_ax.set_title("S1 variance by dimension")
+            s1_var_ax.set_xlabel("Dimension")
+            s1_var_ax.set_ylabel("Variance")
+        else:
+            _mark_axis_no_data(s1_var_ax, "S1 variance by dimension")
+
+        if metric.s2_variance is not None and metric.s2_variance.size:
+            dims = np.arange(1, metric.s2_variance.size + 1)
+            s2_var_ax.plot(dims, metric.s2_variance, color="#17becf")
+            s2_var_ax.set_title("S2 variance by dimension")
+            s2_var_ax.set_xlabel("Dimension")
+            s2_var_ax.set_ylabel("Variance")
+        else:
+            _mark_axis_no_data(s2_var_ax, "S2 variance by dimension")
+
+        # Covariance spectrum per modality
+        if metric.s1_spectrum is not None and metric.s1_spectrum.size:
+            take = min(spectrum_top_k, metric.s1_spectrum.size)
+            idx = np.arange(1, take + 1)
+            s1_spec_ax.plot(idx, metric.s1_spectrum[:take], marker="o", color="#9467bd")
+            s1_spec_ax.set_yscale("log")
+            s1_spec_ax.set_title(f"S1 covariance spectrum (top {take})")
+            s1_spec_ax.set_xlabel("Component")
+            s1_spec_ax.set_ylabel("Eigenvalue")
+            cond = metric.s1_condition_number
+            if cond is not None:
+                if math.isnan(cond):
+                    text = "cond = nan"
+                elif math.isinf(cond):
+                    text = "cond = inf"
+                else:
+                    text = f"cond = {cond:.2e}"
+                s1_spec_ax.text(
+                    0.95,
+                    0.05,
+                    text,
+                    transform=s1_spec_ax.transAxes,
+                    ha="right",
+                    va="bottom",
+                    fontsize=10,
+                    bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.6},
+                )
+        else:
+            _mark_axis_no_data(s1_spec_ax, "S1 covariance spectrum")
+
+        if metric.s2_spectrum is not None and metric.s2_spectrum.size:
+            take = min(spectrum_top_k, metric.s2_spectrum.size)
+            idx = np.arange(1, take + 1)
+            s2_spec_ax.plot(idx, metric.s2_spectrum[:take], marker="o", color="#8c564b")
+            s2_spec_ax.set_yscale("log")
+            s2_spec_ax.set_title(f"S2 covariance spectrum (top {take})")
+            s2_spec_ax.set_xlabel("Component")
+            s2_spec_ax.set_ylabel("Eigenvalue")
+            cond = metric.s2_condition_number
+            if cond is not None:
+                if math.isnan(cond):
+                    text = "cond = nan"
+                elif math.isinf(cond):
+                    text = "cond = inf"
+                else:
+                    text = f"cond = {cond:.2e}"
+                s2_spec_ax.text(
+                    0.95,
+                    0.05,
+                    text,
+                    transform=s2_spec_ax.transAxes,
+                    ha="right",
+                    va="bottom",
+                    fontsize=10,
+                    bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.6},
+                )
+        else:
+            _mark_axis_no_data(s2_spec_ax, "S2 covariance spectrum")
+
+        fig.tight_layout(rect=[0, 0, 1, 0.97])
+        safe_label = _sanitize_label(metric.label)
+        filename = output_dir / f"epoch_{metric.epoch_index:04d}_{safe_label}_diagnostics.png"
+        fig.savefig(filename, dpi=200)
+        plt.close(fig)
+
+
+
+
+
 def parse_linear_probe_csv(
     csv_path: Path,
     *,
@@ -509,6 +918,13 @@ def parse_linear_probe_csv(
     pattern = re.compile(model_pattern) if model_pattern else None
     results: Dict[int, Tuple[float, Optional[float]]] = {}
 
+    csv_path = Path(csv_path)
+    if not csv_path.is_file():
+        _LOGGER.warning("Linear probe CSV '%s' not found; skipping", csv_path)
+        return {}
+
+
+    os.makedirs(csv_path.parent, exist_ok=True)
     with csv_path.open("r", newline="") as handle:
         reader = csv.reader(handle)
         header = next(reader)
@@ -617,6 +1033,31 @@ def compute_projection(
     return reducer.fit_transform(data)
 
 
+# def plot_projection(
+def _plot_projection_panel(
+    ax,
+    coords: np.ndarray,
+    labels: np.ndarray,
+    # output_path: Path,
+    *,
+    title: str,
+    ):
+# ) -> None:
+    # fig, ax = plt.subplots(figsize=(6, 5))
+    unique_labels = np.unique(labels)
+    handles = []
+    for label in unique_labels:
+        mask = labels == label
+        handle = ax.scatter(coords[mask, 0], coords[mask, 1], label=label, alpha=0.7, s=18)
+        handles.append(handle)
+    ax.set_title(title)
+    ax.set_xlabel("Component 1")
+    ax.set_ylabel("Component 2")
+    # ax.legend()
+    ax.grid(True, alpha=0.2)
+    return handles
+
+
 def plot_projection(
     coords: np.ndarray,
     labels: np.ndarray,
@@ -625,16 +1066,57 @@ def plot_projection(
     title: str,
 ) -> None:
     fig, ax = plt.subplots(figsize=(6, 5))
-    unique_labels = np.unique(labels)
-    for label in unique_labels:
-        mask = labels == label
-        ax.scatter(coords[mask, 0], coords[mask, 1], label=label, alpha=0.7, s=18)
-    ax.set_title(title)
-    ax.set_xlabel("Component 1")
-    ax.set_ylabel("Component 2")
-    ax.legend()
-    ax.grid(True, alpha=0.2)
+    handles = _plot_projection_panel(ax, coords, labels, title=title)
+    if handles:
+        ax.legend()
     fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+
+def _flatten_axes(axes) -> List:
+    if hasattr(axes, "flat"):
+        return list(axes.flat)
+    if isinstance(axes, (list, tuple)):
+        flattened: List = []
+        for item in axes:
+            flattened.extend(_flatten_axes(item))
+        return flattened
+    return [axes]
+
+
+def plot_projection_grid(
+    panels: Sequence[Tuple[str, np.ndarray, np.ndarray]],
+    output_path: Path,
+    *,
+    method: str,
+) -> None:
+    if not panels:
+        _LOGGER.warning("No %s projections to plot", method)
+        return
+
+    n_panels = len(panels)
+    ncols = min(3, n_panels)
+    nrows = math.ceil(n_panels / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(6 * ncols, 5 * nrows))
+    axes_list = _flatten_axes(axes)
+
+    legend_handles: List = []
+    legend_labels: List[str] = []
+
+    for idx, (ax, (epoch_label, coords, modalities)) in enumerate(zip(axes_list, panels)):
+        handles = _plot_projection_panel(ax, coords, modalities, title=f"{method} — {epoch_label}")
+        if idx == 0:
+            legend_handles = handles
+            legend_labels = [h.get_label() for h in handles]
+
+    for ax in axes_list[len(panels) :]:
+        fig.delaxes(ax)
+
+    if legend_handles:
+        fig.legend(legend_handles, legend_labels, loc="upper right", frameon=True)
+
+    fig.suptitle(f"{method} projections across epochs")
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
     fig.savefig(output_path, dpi=200)
     plt.close(fig)
 
@@ -667,18 +1149,61 @@ def parse_args() -> argparse.Namespace:
             """
             Example:
               python -m visualizations.ssl4eo.embedding_collapse_diagnostics \\
-                --embedding-root /path/to/extracted_embeddings \\
-                --output-dir diagnostics/random_init
+                --checkpoint-root /path/to/checkpoints \\
+                --output-dir diagnostics/random_init \\
+                --dataset-root /data/SSL4EO
             """
         ).strip(),
     )
-    parser.add_argument("--embedding-root", type=Path, required=True, help="Directory containing per-epoch embeddings")
+    parser.add_argument("--checkpoint-root", type=Path, required=True, help="Directory containing CIIP checkpoints")
     parser.add_argument("--output-dir", type=Path, required=True, help="Where to store plots and metrics")
     parser.add_argument(
-        "--max-files-per-epoch",
+        "--config-name",
+        type=str,
+        default="prod_default",
+        help="Name of the Hydra config to load (without .yaml)",
+    )
+    parser.add_argument(
+        "--config-path",
+        type=Path,
+        default=None,
+        help="Optional path to the Hydra config directory (defaults to ciip/open_clip_train/configs)",
+    )
+    parser.add_argument(
+        "--dataset-root",
+        type=Path,
+        default=None,
+        help="Override the dataset.root value from the config",
+    )
+    parser.add_argument(
+        "--subset-size",
+        type=int,
+        default=2048,
+        help="Number of samples to evaluate per epoch (0 or negative = full dataset)",
+    )
+    parser.add_argument("--subset-seed", type=int, default=42, help="Random seed for subset sampling")
+    parser.add_argument(
+        "--checkpoint-pattern",
+        type=str,
+        default=r"epoch",
+        help="Regex used to select checkpoints for evaluation",
+    )
+    parser.add_argument(
+        "--max-checkpoints",
         type=int,
         default=None,
-        help="Maximum number of embedding files to load per epoch (for faster debugging)",
+        help="Optional cap on the number of checkpoints to process",
+    )
+    parser.add_argument(
+        "--include-init",
+        action="store_true",
+        help="Include epoch_init checkpoints when present",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="Device to run extraction on (defaults to CUDA if available else CPU)",
     )
     parser.add_argument(
         "--negative-samples",
@@ -741,7 +1266,60 @@ def main() -> None:
     output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    epochs = collect_embeddings(args.embedding_root, max_files_per_epoch=args.max_files_per_epoch)
+    config_dir = args.config_path or Path(__file__).resolve().parents[3] / "ciip" / "ciip" / "open_clip_train" / "configs"
+    config_file = (config_dir / f"{args.config_name}.yaml").resolve()
+    if not config_file.is_file():
+        raise FileNotFoundError(f"Could not find config file '{config_file}'")
+
+    _LOGGER.info("Loading config from %s", config_file)
+    config = OmegaConf.load(config_file)
+    OmegaConf.set_struct(config, False)
+
+    if args.dataset_root is not None:
+        config.dataset.root = str(args.dataset_root)
+    else:
+        config.dataset.root = str(config.dataset.root)
+
+    config.io.checkpoint_path = str(args.checkpoint_root)
+    config.datamodule.distributed = False
+    if "horovod" in config.datamodule:
+        config.datamodule.horovod = False
+
+    ensure_hydra_original_cwd()
+    data = get_data(config)
+    train_dataset = data["train"].dataloader.dataset
+    subset = build_subset(train_dataset, args.subset_size, args.subset_seed)
+    _LOGGER.info(
+        "Using %d samples per epoch from dataset root %s",
+        len(subset),
+        config.dataset.root,
+    )
+
+    device_str = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(device_str)
+    config.datamodule.device = device_str
+
+    input_dtype = resolve_input_dtype(config.model.precision)
+    if device.type != "cuda" and input_dtype in {torch.float16, torch.bfloat16}:
+        input_dtype = torch.float32
+    _LOGGER.info("Running extraction on %s with input dtype %s", device, input_dtype)
+
+    autocast_fn = get_autocast(config.model.precision)
+    if device.type != "cuda":
+        autocast_fn = contextlib.nullcontext
+
+    epochs = collect_epoch_embeddings(
+        args.checkpoint_root,
+        config,
+        subset,
+        input_dtype=input_dtype,
+        device=device,
+        autocast=autocast_fn,
+        pattern=args.checkpoint_pattern,
+        include_init=args.include_init,
+        max_checkpoints=args.max_checkpoints,
+    )
+
     metrics = compute_epoch_metrics(epochs, negative_samples=args.negative_samples, random_seed=args.random_seed)
 
     export_metrics(metrics, output_dir)
@@ -751,6 +1329,13 @@ def main() -> None:
     plot_variance_heatmap(metrics, output_dir, modality="s2")
     plot_spectrum(metrics, output_dir, modality="s1", top_k=args.spectrum_top_k)
     plot_spectrum(metrics, output_dir, modality="s2", top_k=args.spectrum_top_k)
+    plot_epoch_dashboards(
+        metrics,
+        output_dir,
+        cosine_bins=args.cosine_hist_bins,
+        spectrum_top_k=args.spectrum_top_k,
+    )
+    
 
     if args.linear_probe_csv:
         linear_probe = parse_linear_probe_csv(
@@ -763,7 +1348,10 @@ def main() -> None:
 
     np_gen = np.random.default_rng(args.random_seed)
     if args.tsne_samples > 0:
+        tsne_panels: List[Tuple[str, np.ndarray, np.ndarray]] = []
         for epoch in epochs:
+            if epoch.s1 is None or epoch.s2 is None:
+                continue
             try:
                 data, labels = sample_for_projection(epoch.s1, epoch.s2, per_modality=args.tsne_samples, generator=np_gen)
             except ValueError:
@@ -771,20 +1359,36 @@ def main() -> None:
             coords = compute_projection(data, method="tsne", random_state=args.random_seed)
             if coords is None:
                 continue
-            plot_projection(coords, labels, output_dir / f"tsne_{epoch.label}.png", title=f"t-SNE — {epoch.label}")
+            # plot_projection(coords, labels, output_dir / f"tsne_{epoch.label}.png", title=f"t-SNE — {epoch.label}")
+            tsne_panels.append((epoch.label, coords, labels))
 
-    if args.umap_samples > 0 and umap is not None:
-        for epoch in epochs:
-            try:
-                data, labels = sample_for_projection(epoch.s1, epoch.s2, per_modality=args.umap_samples, generator=np_gen)
-            except ValueError:
-                continue
-            coords = compute_projection(data, method="umap", random_state=args.random_seed)
-            if coords is None:
-                continue
-            plot_projection(coords, labels, output_dir / f"umap_{epoch.label}.png", title=f"UMAP — {epoch.label}")
-    elif args.umap_samples > 0:
-        _LOGGER.warning("UMAP requested but not installed; skipping")
+        if tsne_panels:
+            plot_projection_grid(tsne_panels, output_dir / "tsne_epochs.png", method="t-SNE")
+        else:
+            _LOGGER.warning("Skipping t-SNE projections (insufficient data)")
+
+    if args.umap_samples > 0:
+        if umap is None:
+            _LOGGER.warning("UMAP requested but not installed; skipping")
+        else:
+            umap_panels: List[Tuple[str, np.ndarray, np.ndarray]] = []
+            for epoch in epochs:
+                if epoch.s1 is None or epoch.s2 is None:
+                    continue
+                try:
+                    data, labels = sample_for_projection(epoch.s1, epoch.s2, per_modality=args.umap_samples, generator=np_gen)
+                except ValueError:
+                    continue
+                coords = compute_projection(data, method="umap", random_state=args.random_seed)
+                if coords is None:
+                    continue
+                umap_panels.append((epoch.label, coords, labels))
+
+            if umap_panels:
+                plot_projection_grid(umap_panels, output_dir / "umap_epochs.png", method="UMAP")
+            else:
+                _LOGGER.warning("Skipping UMAP projections (insufficient data)")
+    
 
     _LOGGER.info("Saved plots and metrics to %s", output_dir.resolve())
 
