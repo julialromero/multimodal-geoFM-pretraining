@@ -74,20 +74,26 @@ def _compute_vc_geometry(
         nan = float("nan")
         return nan, nan, nan, nan
 
-    feats = features.float()
-    variances = torch.var(feats, dim=0, unbiased=False)
-    std = torch.sqrt(variances + 1e-4)
-    std_min = torch.min(std)
-    gamma_tensor = torch.as_tensor(gamma, dtype=std.dtype, device=std.device)
-    std_diff = std_min - gamma_tensor
+    if features.is_cuda and torch.cuda.is_available():
+        autocast_ctx = torch.cuda.amp.autocast(enabled=False)
+    else:
+        autocast_ctx = nullcontext()
 
-    centered = feats - feats.mean(dim=0, keepdim=True)
-    cov = centered.t().matmul(centered) / (centered.shape[0] - 1)
-    off_diag = cov - torch.diag(torch.diagonal(cov))
-    cov_fro = torch.linalg.norm(off_diag, ord="fro")
+    with autocast_ctx:
+        feats = features.float()
+        variances = torch.var(feats, dim=0, unbiased=False)
+        std = torch.sqrt(variances + 1e-4)
+        std_min = torch.min(std)
+        gamma_tensor = torch.as_tensor(gamma, dtype=std.dtype, device=std.device)
+        std_diff = std_min - gamma_tensor
 
-    eigvals = torch.linalg.eigvalsh(cov).real
-    participation = (eigvals.sum() ** 2) / (eigvals.pow(2).sum() + eps)
+        centered = feats - feats.mean(dim=0, keepdim=True)
+        cov = centered.t().matmul(centered) / (centered.shape[0] - 1)
+        off_diag = cov - torch.diag(torch.diagonal(cov))
+        cov_fro = torch.linalg.norm(off_diag, ord="fro")
+
+        eigvals = torch.linalg.eigvalsh(cov).real
+        participation = (eigvals.sum() ** 2) / (eigvals.pow(2).sum() + eps)
 
     return (
         std_min.item(),
