@@ -239,7 +239,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
             logging.info(f"Orthogonal matrix train stats: {stats}")
 
             # save stats to log directory
-            if args.io.save_logs:
+            if args.io.save_logs and is_master(args):
                 with open(os.path.join(args.io.checkpoint_path, "orthogonal_matrix_stats_train.json"), "w") as f:
                     json.dump(stats, f, indent=4)
                 W_path = os.path.join(args.io.checkpoint_path, "W_train.pt")
@@ -271,10 +271,10 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
             logging.info(f"Orthogonal matrix eval stats: {stats}")
 
             # save stats to log directory
-            if args.io.save_logs:
+            if args.io.save_logs and is_master(args):
                 with open(os.path.join(args.io.checkpoint_path, "orthogonal_matrix_stats.json"), "w") as f:
                     json.dump(stats, f, indent=4)
-                # save W matrix to log directory 
+                # save W matrix to log directory
                 W_path = os.path.join(args.io.checkpoint_path, "W.pt")
                 torch.save(W, W_path)
                 logging.info(f"Saved orthogonal matrix W to {W_path}")
@@ -282,11 +282,12 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
 
 
             # save the model weights after the warm up phase -> random weights with appropriate batch norm stats
-            torch.save(
-            model.state_dict(),
-                os.path.join(args.io.checkpoint_path, f"epoch_init.pt"),
-            )
-            logging.info(f'Saved initial model weights to {args.io.checkpoint_path}.')
+            if is_master(args):
+                torch.save(
+                    model.state_dict(),
+                    os.path.join(args.io.checkpoint_path, "epoch_init.pt"),
+                )
+                logging.info(f"Saved initial model weights to {args.io.checkpoint_path}.")
 
             # delete  dataloader
             del loader
