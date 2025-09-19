@@ -157,7 +157,17 @@ class CiipLoss(nn.Module):
         
         return logits_per_s1, logits_per_s2
 
-    def forward(self, s1_features, s2_features, logit_scale, logit_bias=None, output_dict=False):
+    def forward(
+            self,
+            s1_features,
+            s2_features,
+            logit_scale,
+            logit_bias=None,
+            output_dict=False,
+            s1_features_vc=None,
+            s2_features_vc=None,
+            **kwargs,
+    ):
         device = s1_features.device
         logits_per_s1, logits_per_s2 = self.get_logits(s1_features, s2_features, logit_scale, logit_bias=logit_bias,)
 
@@ -171,11 +181,14 @@ class CiipLoss(nn.Module):
         losses = {"contrastive_loss": contrastive_loss}
 
         if self.vc_reg_enabled and self.vc_weight != 0:
-            variance_loss = self._variance_regularizer(s1_features) + self._variance_regularizer(s2_features)
+            s1_vc = s1_features_vc if s1_features_vc is not None else s1_features
+            s2_vc = s2_features_vc if s2_features_vc is not None else s2_features
+
+            variance_loss = self._variance_regularizer(s1_vc) + self._variance_regularizer(s2_vc)
             cov_w_s1, cov_w_s2 = self.vc_covariance_weights
             covariance_loss = (
-                cov_w_s1 * self._covariance_regularizer(s1_features) +
-                cov_w_s2 * self._covariance_regularizer(s2_features)
+                cov_w_s1 * self._covariance_regularizer(s1_vc) +
+                cov_w_s2 * self._covariance_regularizer(s2_vc)
             )
             vc_loss = self.vc_weight * (variance_loss + covariance_loss)
             losses["vc_loss"] = vc_loss

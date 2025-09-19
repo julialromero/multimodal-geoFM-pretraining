@@ -125,10 +125,14 @@ def _accumulate_vc_metrics(
         return
     with torch.no_grad():
         for modality in ("s1", "s2"):
+            raw_key = f"{modality}_features_vc"
             feature_key = f"{modality}_features"
-            if feature_key not in model_out:
+            features = model_out.get(raw_key)
+            if features is None:
+                features = model_out.get(feature_key)
+            if features is None:
                 continue
-            features = model_out[feature_key].detach()
+            features = features.detach()
             std_min, std_diff, cov_fro, participation = _compute_vc_geometry(features, loss.vc_gamma)
             _update_vc_metric_meter(vc_metrics_m, f"vc_std_min_{modality}", std_min, batch_size)
             _update_vc_metric_meter(vc_metrics_m, f"vc_std_diff_{modality}", std_diff, batch_size)
