@@ -74,12 +74,15 @@ def _compute_vc_geometry(
         nan = float("nan")
         return nan, nan, nan, nan
 
-    if features.is_cuda and torch.cuda.is_available():
-        autocast_ctx = torch.cuda.amp.autocast(enabled=False)
-    else:
-        autocast_ctx = nullcontext()
 
-    with autocast_ctx:
+    autocast_off = (
+        torch.cuda.amp.autocast(enabled=False)
+        if features.is_cuda and torch.cuda.is_available()
+        else nullcontext()
+    )
+
+    with autocast_off:
+
         feats = features.float()
         variances = torch.var(feats, dim=0, unbiased=False)
         std = torch.sqrt(variances + 1e-4)
@@ -434,12 +437,16 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 losses_m[key].update(val.item(), batch_size)
 
             logit_scale_scalar = logit_scale.item()
-            loss_log = " ".join(
-                [
-                    f"{loss_name.capitalize()}: {loss_m.val:#.5g} ({loss_m.avg:#.5g})" 
-                    for loss_name, loss_m in losses_m.items()
-                ]
-            )
+            metrics_log_parts = [
+                f"{loss_name.capitalize()}: {loss_m.val:#.5g} ({loss_m.avg:#.5g})"
+                for loss_name, loss_m in losses_m.items()
+            ]
+            if vc_metrics_m:
+                metrics_log_parts.extend(
+                    f"{name}: {meter.val:#.5g} ({meter.avg:#.5g})"
+                    for name, meter in vc_metrics_m.items()
+                )
+            metrics_log = " ".join(metrics_log_parts)
             samples_per_second = args.train.accum_freq * args.datamodule.batch_size * args.datamodule.world_size / batch_time_m.val
             samples_per_second_per_gpu = args.train.accum_freq * args.datamodule.batch_size / batch_time_m.val
             logging.info(
@@ -447,7 +454,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 f"Data (t): {data_time_m.avg:.3f} "
                 f"Batch (t): {batch_time_m.avg:.3f}, {samples_per_second:#g}/s, {samples_per_second_per_gpu:#g}/s/gpu "
                 f"LR: {optimizer.param_groups[0]['lr']:5f} "
-                f"Logit Scale: {logit_scale_scalar:.3f} " + loss_log
+                f"Logit Scale: {logit_scale_scalar:.3f} " + metrics_log
             )
 
             # Save train loss / etc. Using non avg meter values as loggers have their own smoothing
