@@ -95,6 +95,8 @@ class EpochEmbeddings:
     s1: Optional[torch.Tensor]
     s2: Optional[torch.Tensor]
     uids: List[str]
+    s1_normalized: Optional[torch.Tensor] = None
+    s2_normalized: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -300,12 +302,14 @@ def extract_embeddings_for_dataset(
     input_dtype: torch.dtype,
     device: torch.device,
     autocast,
-) -> Tuple[torch.Tensor, torch.Tensor, List[str]]:
-    """Run the encoders over ``dataset`` and return stacked embeddings."""
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, List[str]]:
+    """Run the encoders over ``dataset`` and return raw & normalized embeddings."""
 
     base_dataset, index_map = _unwrap_subset(dataset)
     s1_vectors: List[torch.Tensor] = []
     s2_vectors: List[torch.Tensor] = []
+    s1_normalized_vectors: List[torch.Tensor] = []
+    s2_normalized_vectors: List[torch.Tensor] = []
     uids: List[str] = []
 
     with torch.no_grad():
@@ -330,11 +334,19 @@ def extract_embeddings_for_dataset(
                 s2_tensor = s2_tensor.to(device=device, non_blocking=True)
 
             with autocast():
-                s1_embed = model.encode_s1(s1_tensor, normalize=True)
-                s2_embed = model.encode_s2(s2_tensor, normalize=True)
+                s1_embed = model.encode_s1(s1_tensor, normalize=False)
+                s2_embed = model.encode_s2(s2_tensor, normalize=False)
 
-            s1_vectors.append(s1_embed.squeeze(0).cpu())
-            s2_vectors.append(s2_embed.squeeze(0).cpu())
+            s1_embed = s1_embed.squeeze(0).detach()
+            s2_embed = s2_embed.squeeze(0).detach()
+
+            s1_cpu = s1_embed.cpu()
+            s2_cpu = s2_embed.cpu()
+            s1_vectors.append(s1_cpu)
+            s2_vectors.append(s2_cpu)
+
+            s1_normalized_vectors.append(F.normalize(s1_cpu.to(dtype=torch.float32), dim=0))
+            s2_normalized_vectors.append(F.normalize(s2_cpu.to(dtype=torch.float32), dim=0))
 
             if hasattr(base_dataset, "get_sample_uid"):
                 uid, _ = base_dataset.get_sample_uid(base_idx)
@@ -347,7 +359,9 @@ def extract_embeddings_for_dataset(
 
     s1_stack = torch.stack(s1_vectors, dim=0)
     s2_stack = torch.stack(s2_vectors, dim=0)
-    return s1_stack, s2_stack, uids
+    s1_norm_stack = torch.stack(s1_normalized_vectors, dim=0)
+    s2_norm_stack = torch.stack(s2_normalized_vectors, dim=0)
+    return s1_stack, s2_stack, s1_norm_stack, s2_norm_stack, uids
 
 
 def discover_checkpoints(
@@ -450,7 +464,7 @@ def collect_epoch_embeddings(
         )
 
         try:
-            s1, s2, uids = extract_embeddings_for_dataset(
+            s1, s2, s1_normalized, s2_normalized, uids = extract_embeddings_for_dataset(
                 model,
                 dataset,
                 input_dtype=input_dtype,
@@ -461,7 +475,18 @@ def collect_epoch_embeddings(
             _LOGGER.error("Skipping %s due to extraction failure: %s", checkpoint_path.name, exc)
             continue
 
-        epochs.append(EpochEmbeddings(label, epoch_index, checkpoint_path, s1, s2, uids))
+        epochs.append(
+            EpochEmbeddings(
+                label,
+                epoch_index,
+                checkpoint_path,
+                s1,
+                s2,
+                uids,
+                s1_normalized,
+                s2_normalized,
+            )
+        )
 
         if device.type == "cuda":
             torch.cuda.empty_cache()
@@ -607,16 +632,21 @@ def compute_epoch_metrics(
     results: List[EpochMetrics] = []
     for epoch in epochs:
         if epoch.s1 is None or epoch.s2 is None:
-            _LOGGER.warning("Skipping epoch %s (missing embeddings)", epoch.label)
+            _LOGGER.warning("Skipping epoch %s due to missing embeddings", epoch.label)
             continue
 
-        sample_count = epoch.s1.shape[0]
-        s1_var = torch.var(epoch.s1, dim=0, unbiased=False).cpu().numpy()
-        s2_var = torch.var(epoch.s2, dim=0, unbiased=False).cpu().numpy()
+        s1_tensor = epoch.s1.to(dtype=torch.float32)
+        s2_tensor = epoch.s2.to(dtype=torch.float32)
+        sample_count = s1_tensor.shape[0]
+        s1_var = torch.var(s1_tensor, dim=0, unbiased=False).cpu().numpy()
+        s2_var = torch.var(s2_tensor, dim=0, unbiased=False).cpu().numpy()
 
         metrics = EpochMetrics(label=epoch.label, epoch_index=epoch.epoch_index, sample_count=sample_count)
         metrics.s1_variance = s1_var
         metrics.s2_variance = s2_var
+
+        cov_s1 = compute_covariance(s1_tensor)
+        cov_s2 = compute_covariance(s2_tensor)
 
         s1_std_min, s1_std_diff, s1_cov_fro, s1_participation = compute_vc_geometry(epoch.s1, vc_gamma)
         s2_std_min, s2_std_diff, s2_cov_fro, s2_participation = compute_vc_geometry(epoch.s2, vc_gamma)
@@ -630,8 +660,7 @@ def compute_epoch_metrics(
         metrics.s1_participation_ratio = s1_participation
         metrics.s2_participation_ratio = s2_participation
 
-        cov_s1 = compute_covariance(epoch.s1)
-        cov_s2 = compute_covariance(epoch.s2)
+
         if cov_s1 is not None:
             eigvals1 = torch.linalg.eigvalsh(cov_s1).flip(0).cpu().numpy()
             metrics.s1_spectrum = eigvals1
@@ -641,9 +670,12 @@ def compute_epoch_metrics(
             metrics.s2_spectrum = eigvals2
             metrics.s2_condition_number = compute_condition_number(eigvals2)
 
+        s1_for_cosine = epoch.s1_normalized if epoch.s1_normalized is not None else epoch.s1
+        s2_for_cosine = epoch.s2_normalized if epoch.s2_normalized is not None else epoch.s2
+
         positive, negative = compute_cosine_statistics(
-            epoch.s1,
-            epoch.s2,
+            s1_for_cosine,
+            s2_for_cosine,
             negative_samples=negative_samples,
             torch_generator=torch_gen,
             numpy_generator=np_gen,
@@ -1653,8 +1685,17 @@ def main() -> None:
         for epoch in epochs:
             if epoch.s1 is None or epoch.s2 is None:
                 continue
+            s1_proj = epoch.s1_normalized if epoch.s1_normalized is not None else epoch.s1
+            s2_proj = epoch.s2_normalized if epoch.s2_normalized is not None else epoch.s2
+            if s1_proj is None or s2_proj is None:
+                continue
             try:
-                data, labels = sample_for_projection(epoch.s1, epoch.s2, per_modality=args.tsne_samples, generator=np_gen)
+                data, labels = sample_for_projection(
+                    s1_proj,
+                    s2_proj,
+                    per_modality=args.tsne_samples,
+                    generator=np_gen,
+                )
             except ValueError:
                 continue
             coords = compute_projection(data, method="tsne", random_state=args.random_seed)
@@ -1676,8 +1717,17 @@ def main() -> None:
             for epoch in epochs:
                 if epoch.s1 is None or epoch.s2 is None:
                     continue
+                s1_proj = epoch.s1_normalized if epoch.s1_normalized is not None else epoch.s1
+                s2_proj = epoch.s2_normalized if epoch.s2_normalized is not None else epoch.s2
+                if s1_proj is None or s2_proj is None:
+                    continue
                 try:
-                    data, labels = sample_for_projection(epoch.s1, epoch.s2, per_modality=args.umap_samples, generator=np_gen)
+                    data, labels = sample_for_projection(
+                        s1_proj,
+                        s2_proj,
+                        per_modality=args.umap_samples,
+                        generator=np_gen,
+                    )
                 except ValueError:
                     continue
                 coords = compute_projection(data, method="umap", random_state=args.random_seed)
