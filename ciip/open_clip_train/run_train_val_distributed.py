@@ -476,7 +476,8 @@ def main(args: DictConfig, start_epoch=0):
         #     evaluate(model, data, completed_epoch, args, tb_writer=writer, tokenizer=tokenizer)
 
         # Saving checkpoints.
-        if args.io.save_logs:
+        checkpoint_dict = None
+        if args.io.save_logs or args.train.save_most_recent:
             checkpoint_dict = {
                 "epoch": completed_epoch,
                 "name": args.train.name,
@@ -486,10 +487,13 @@ def main(args: DictConfig, start_epoch=0):
             if scaler is not None:
                 checkpoint_dict["scaler"] = scaler.state_dict()
 
-            if completed_epoch == args.train.epochs \
-                    or (args.io.save_frequency > 0 and (completed_epoch % args.io.save_frequency) == 0) \
-                        or completed_epoch == 1:
-                # save checkpoints within outputs file
+        if args.io.save_logs and is_master(args):
+            should_save_epoch = (
+                completed_epoch == args.train.epochs
+                or (args.io.save_frequency > 0 and (completed_epoch % args.io.save_frequency) == 0)
+                or completed_epoch == 1
+            )
+            if should_save_epoch and checkpoint_dict is not None:
                 torch.save(
                     checkpoint_dict,
                     os.path.join(args.io.checkpoint_path, f"epoch_{completed_epoch}.pt"),
@@ -501,12 +505,12 @@ def main(args: DictConfig, start_epoch=0):
                 #     experiment.log_parameters(checkpoint_dict)
                 #     log_model(experiment, model=original_model, model_name="CIIP!")
 
-        if args.train.delete_previous_checkpoint:
+        if args.train.delete_previous_checkpoint and args.io.save_logs and is_master(args):
             previous_checkpoint = os.path.join(args.io.checkpoint_path, f"epoch_{completed_epoch - 1}.pt")
             if os.path.exists(previous_checkpoint):
                 os.remove(previous_checkpoint)
 
-        if args.train.save_most_recent:
+        if args.train.save_most_recent and checkpoint_dict is not None and is_master(args):
             # try not to corrupt the latest checkpoint if save fails
             tmp_save_path = os.path.join(args.io.checkpoint_path, "tmp.pt")
             latest_save_path = os.path.join(args.io.checkpoint_path, LATEST_CHECKPOINT_NAME)
