@@ -74,6 +74,7 @@ def _compute_vc_geometry(
         nan = float("nan")
         return nan, nan, nan, nan
 
+
     autocast_off = (
         torch.cuda.amp.autocast(enabled=False)
         if features.is_cuda and torch.cuda.is_available()
@@ -81,6 +82,7 @@ def _compute_vc_geometry(
     )
 
     with autocast_off:
+
         feats = features.float()
         variances = torch.var(feats, dim=0, unbiased=False)
         std = torch.sqrt(variances + 1e-4)
