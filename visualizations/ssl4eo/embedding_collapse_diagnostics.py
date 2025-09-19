@@ -9,6 +9,7 @@ representation collapse:
 * Cosine similarity histograms per epoch.
 * Per-dimension embedding variance heatmaps and summaries.
 * Covariance spectrum (singular values) and condition numbers.
+* Variance-covariance geometry diagnostics (std minima, γ gap, off-diagonal Frobenius norm, participation ratio).
 * Linear probe accuracy overlays (optional, from CSV exports).
 * t-SNE / UMAP projections of the embedding space across epochs.
 
@@ -20,19 +21,20 @@ pre-extracted features.
 
 Example usage::
 
-    python -m visualizations.ssl4eo.embedding_collapse_diagnostics \
-        --checkpoint-root /home/juro4948/ciip/logs/2025_09_05-13_28_50-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints \
-        --output-dir diagnostics/random_init \
-        --dataset-root /local/ms-data/SSL4EO/ \
-        --subset-size 2048 \
-        --negative-samples 2000 \
-        --linear-probe-csv results.csv \
-        --linear-probe-pattern "RandomInit-hal-epoch(\\d+)" \
-        --tsne-samples 800 \
-        --umap-samples 800
+    # python -m visualizations.ssl4eo.embedding_collapse_diagnostics \
+    #     --checkpoint-root /home/juro4948/ciip/logs/2025_09_05-13_28_50-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints \
+    #     --output-dir diagnostics/random_init \
+    #     --dataset-root /local/ms-data/SSL4EO/ \
+    #     --subset-size 2048 \
+    #     --negative-samples 2000 \
+    #     --linear-probe-csv results.csv \
+    #     --linear-probe-pattern "RandomInit-hal-epoch(\\d+)" \
+    #     --tsne-samples 800 \
+    #     --umap-samples 800
 
 All plots are saved in the provided output directory; intermediate statistics
-are exported as JSON/NumPy files for downstream analysis.
+are exported as JSON/NumPy files for downstream analysis. The VC diagnostics are
+also written to ``vc_metrics.csv`` and summarized in ``vc_metrics_timeseries.png``.
 """
 
 from __future__ import annotations
@@ -110,6 +112,14 @@ class EpochMetrics:
     s2_spectrum: Optional[np.ndarray] = None
     s1_condition_number: Optional[float] = None
     s2_condition_number: Optional[float] = None
+    s1_std_min: Optional[float] = None
+    s2_std_min: Optional[float] = None
+    s1_std_diff: Optional[float] = None
+    s2_std_diff: Optional[float] = None
+    s1_cov_fro: Optional[float] = None
+    s2_cov_fro: Optional[float] = None
+    s1_participation_ratio: Optional[float] = None
+    s2_participation_ratio: Optional[float] = None
 
     def to_summary_dict(self) -> Dict[str, object]:
         """Return a JSON-friendly summary of the metrics."""
@@ -134,6 +144,20 @@ class EpochMetrics:
             "s2_variance": _safe_stats(self.s2_variance),
             "s1_condition_number": self.s1_condition_number,
             "s2_condition_number": self.s2_condition_number,
+            "vc_metrics": {
+                "s1": {
+                    "std_min": self.s1_std_min,
+                    "std_diff": self.s1_std_diff,
+                    "cov_fro": self.s1_cov_fro,
+                    "participation_ratio": self.s1_participation_ratio,
+                },
+                "s2": {
+                    "std_min": self.s2_std_min,
+                    "std_diff": self.s2_std_diff,
+                    "cov_fro": self.s2_cov_fro,
+                    "participation_ratio": self.s2_participation_ratio,
+                },
+            },
         }
 
 def _sanitize_label(label: str) -> str:
@@ -160,8 +184,6 @@ def infer_epoch_index(name: str, fallback: int) -> int:
             except (ValueError, IndexError):
                 continue
     return fallback
-
-
 
 
 def resolve_input_dtype(precision: str) -> torch.dtype:
@@ -362,7 +384,7 @@ def discover_checkpoints(
 
     # if epoch_stride > 1:
     #     candidates = candidates[::epoch_stride]
-    epochs = [1, 2, 3, 5, 10, 20, 50, 80, 100, 120, 140]
+    epochs = [1, 2, 3, 5, 10, 20]
 
     # filter and keep only those epochs
     selected_paths = [
@@ -480,6 +502,37 @@ def compute_covariance(tensor: torch.Tensor) -> Optional[torch.Tensor]:
     return cov
 
 
+def compute_vc_geometry(
+    features: torch.Tensor,
+    gamma: float,
+    eps: float = 1e-12,
+) -> Tuple[float, float, float, float]:
+    """Return variance-covariance diagnostics for a batch of ``features``."""
+
+    if features.dim() != 2 or features.shape[0] < 2:
+        nan = float("nan")
+        return nan, nan, nan, nan
+
+    feats = features.to(torch.float64)
+    variances = torch.var(feats, dim=0, unbiased=False)
+    std = torch.sqrt(variances + 1e-4)
+    std_min = float(std.min().item())
+    std_diff = std_min - float(gamma)
+
+    cov = compute_covariance(feats)
+    if cov is None:
+        nan = float("nan")
+        return nan, nan, nan, nan
+
+    diag = torch.diag(torch.diagonal(cov))
+    off_diag = (cov - diag).to(torch.float64)
+    cov_fro = float(torch.linalg.norm(off_diag, ord="fro").item())
+
+    eigvals = torch.linalg.eigvalsh(cov).real
+    participation = float(((eigvals.sum() ** 2) / (eigvals.pow(2).sum() + eps)).item())
+
+    return std_min, std_diff, cov_fro, participation
+
 def compute_condition_number(spectrum: np.ndarray, eps: float = 1e-12) -> float:
     """Compute a safe condition number from a descending spectrum."""
 
@@ -543,6 +596,7 @@ def compute_epoch_metrics(
     *,
     negative_samples: Optional[int],
     random_seed: int,
+    vc_gamma: float,
 ) -> List[EpochMetrics]:
     """Compute diagnostic metrics for each epoch."""
 
@@ -552,6 +606,10 @@ def compute_epoch_metrics(
 
     results: List[EpochMetrics] = []
     for epoch in epochs:
+        if epoch.s1 is None or epoch.s2 is None:
+            _LOGGER.warning("Skipping epoch %s (missing embeddings)", epoch.label)
+            continue
+
         sample_count = epoch.s1.shape[0]
         s1_var = torch.var(epoch.s1, dim=0, unbiased=False).cpu().numpy()
         s2_var = torch.var(epoch.s2, dim=0, unbiased=False).cpu().numpy()
@@ -559,6 +617,18 @@ def compute_epoch_metrics(
         metrics = EpochMetrics(label=epoch.label, epoch_index=epoch.epoch_index, sample_count=sample_count)
         metrics.s1_variance = s1_var
         metrics.s2_variance = s2_var
+
+        s1_std_min, s1_std_diff, s1_cov_fro, s1_participation = compute_vc_geometry(epoch.s1, vc_gamma)
+        s2_std_min, s2_std_diff, s2_cov_fro, s2_participation = compute_vc_geometry(epoch.s2, vc_gamma)
+
+        metrics.s1_std_min = s1_std_min
+        metrics.s2_std_min = s2_std_min
+        metrics.s1_std_diff = s1_std_diff
+        metrics.s2_std_diff = s2_std_diff
+        metrics.s1_cov_fro = s1_cov_fro
+        metrics.s2_cov_fro = s2_cov_fro
+        metrics.s1_participation_ratio = s1_participation
+        metrics.s2_participation_ratio = s2_participation
 
         cov_s1 = compute_covariance(epoch.s1)
         cov_s2 = compute_covariance(epoch.s2)
@@ -584,6 +654,8 @@ def compute_epoch_metrics(
         results.append(metrics)
 
     return results
+
+
 
 def _mark_axis_no_data(ax, title: str, message: str = "No data available") -> None:
     """Annotate ``ax`` to indicate that the desired plot could not be produced."""
@@ -714,6 +786,124 @@ def plot_variance_heatmap(
     plt.close(fig)
 
 
+def _extract_metric_series(metrics: Sequence[EpochMetrics], attr: str) -> List[float]:
+    values: List[float] = []
+    for metric in metrics:
+        value = getattr(metric, attr, None)
+        if value is None:
+            values.append(math.nan)
+        else:
+            values.append(float(value))
+    return values
+
+
+def _plot_vc_timeseries_panel(
+    ax,
+    metrics: Sequence[EpochMetrics],
+    *,
+    attr_s1: str,
+    attr_s2: str,
+    title: str,
+    ylabel: str,
+    reference: Optional[Tuple[float, Optional[str]]] = None,
+) -> None:
+    x = [m.epoch_index for m in metrics]
+    labels = [m.label for m in metrics]
+    s1_values = _extract_metric_series(metrics, attr_s1)
+    s2_values = _extract_metric_series(metrics, attr_s2)
+
+    has_s1 = any(not math.isnan(v) for v in s1_values)
+    has_s2 = any(not math.isnan(v) for v in s2_values)
+
+    if not (has_s1 or has_s2):
+        _mark_axis_no_data(ax, title)
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=45, ha="right")
+        ax.set_xlabel("Epoch")
+        return
+
+    if has_s1:
+        ax.plot(x, s1_values, marker="o", label="S1")
+    if has_s2:
+        ax.plot(x, s2_values, marker="s", label="S2")
+
+    if reference is not None:
+        ref_value, ref_label = reference
+        if ref_value is not None:
+            line = ax.axhline(ref_value, color="k", linestyle="--", linewidth=1)
+            if ref_label:
+                line.set_label(ref_label)
+            else:
+                line.set_label("_nolegend_")
+
+    ax.set_title(title)
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel(ylabel)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=45, ha="right")
+    ax.grid(True, alpha=0.3)
+
+    handles, legends = ax.get_legend_handles_labels()
+    filtered = [(h, l) for h, l in zip(handles, legends) if l != "_nolegend_"]
+    if filtered:
+        handles, legends = zip(*filtered)
+        ax.legend(handles, legends)
+
+
+def plot_vc_timeseries(
+    metrics: Sequence[EpochMetrics],
+    output_dir: Path,
+    *,
+    vc_gamma: float,
+) -> None:
+    if not metrics:
+        return
+
+    specs = [
+        {
+            "attr_s1": "s1_std_min",
+            "attr_s2": "s2_std_min",
+            "title": "Minimum per-dimension std. deviation",
+            "ylabel": "Std. deviation",
+            "reference": (vc_gamma, r"γ"),
+        },
+        {
+            "attr_s1": "s1_std_diff",
+            "attr_s2": "s2_std_diff",
+            "title": "Std. deviation minus γ",
+            "ylabel": "Δ std",
+            "reference": (0.0, None),
+        },
+        {
+            "attr_s1": "s1_cov_fro",
+            "attr_s2": "s2_cov_fro",
+            "title": "Off-diagonal covariance Frobenius norm",
+            "ylabel": "‖Cov_off‖₍fro₎",
+            "reference": None,
+        },
+        {
+            "attr_s1": "s1_participation_ratio",
+            "attr_s2": "s2_participation_ratio",
+            "title": "Covariance participation ratio",
+            "ylabel": "Participation ratio",
+            "reference": None,
+        },
+    ]
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 9))
+    axes_list = axes.flatten()
+
+    for ax, spec in zip(axes_list, specs):
+        _plot_vc_timeseries_panel(ax, metrics, **spec)
+
+    for ax in axes_list[len(specs) :]:
+        fig.delaxes(ax)
+
+    fig.suptitle("Variance-covariance diagnostics across epochs")
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    fig.savefig(output_dir / "vc_metrics_timeseries.png", dpi=200)
+    plt.close(fig)
+
 def plot_spectrum(
     metrics: Sequence[EpochMetrics],
     output_dir: Path,
@@ -776,13 +966,44 @@ def plot_epoch_dashboards(
 
     for metric in metrics:
         fig = plt.figure(figsize=(14, 12))
-        fig.suptitle(f"Diagnostics — {metric.label}")
+        # fig.suptitle(f"Diagnostics — {metric.label}")
         grid = fig.add_gridspec(3, 2)
         hist_ax = fig.add_subplot(grid[0, :])
         s1_var_ax = fig.add_subplot(grid[1, 0])
         s2_var_ax = fig.add_subplot(grid[1, 1])
         s1_spec_ax = fig.add_subplot(grid[2, 0])
         s2_spec_ax = fig.add_subplot(grid[2, 1])
+
+        def _format_line(modality: str) -> str:
+            std_min = getattr(metric, f"{modality}_std_min")
+            std_diff = getattr(metric, f"{modality}_std_diff")
+            cov_fro = getattr(metric, f"{modality}_cov_fro")
+            participation = getattr(metric, f"{modality}_participation_ratio")
+
+            def _fmt(value: Optional[float], fmt: str) -> str:
+                if value is None:
+                    return "NA"
+                value_float = float(value)
+                if math.isnan(value_float):
+                    return "NA"
+                return format(value_float, fmt)
+
+            return (
+                f"{modality.upper()} std_min={_fmt(std_min, '.4f')}, "
+                f"Δγ={_fmt(std_diff, '.4f')}, "
+                f"‖Cov_off‖={_fmt(cov_fro, '.2e')}, "
+                f"PR={_fmt(participation, '.2f')}"
+            )
+
+        fig.suptitle(
+            "\n".join(
+                [
+                    f"Diagnostics — {metric.label}",
+                    _format_line("s1"),
+                    _format_line("s2"),
+                ]
+            )
+        )
 
         positives = metric.cosine_positive
         negatives = metric.cosine_negative
@@ -1141,6 +1362,54 @@ def export_metrics(metrics: Sequence[EpochMetrics], output_dir: Path) -> None:
         np.savez(output_dir / "s2_spectrum.npz", **s2_spec)
 
 
+def _csv_value(value: Optional[float]):
+    if value is None:
+        return ""
+    value_float = float(value)
+    if math.isnan(value_float):
+        return ""
+    return value_float
+
+
+def export_vc_metrics_csv(metrics: Sequence[EpochMetrics], output_dir: Path) -> None:
+    if not metrics:
+        return
+
+    fieldnames = [
+        "epoch_index",
+        "label",
+        "sample_count",
+        "vc_std_min_s1",
+        "vc_std_min_s2",
+        "vc_std_diff_s1",
+        "vc_std_diff_s2",
+        "vc_cov_fro_s1",
+        "vc_cov_fro_s2",
+        "vc_participation_ratio_s1",
+        "vc_participation_ratio_s2",
+    ]
+
+    with (output_dir / "vc_metrics.csv").open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for metric in metrics:
+            writer.writerow(
+                {
+                    "epoch_index": metric.epoch_index,
+                    "label": metric.label,
+                    "sample_count": metric.sample_count,
+                    "vc_std_min_s1": _csv_value(metric.s1_std_min),
+                    "vc_std_min_s2": _csv_value(metric.s2_std_min),
+                    "vc_std_diff_s1": _csv_value(metric.s1_std_diff),
+                    "vc_std_diff_s2": _csv_value(metric.s2_std_diff),
+                    "vc_cov_fro_s1": _csv_value(metric.s1_cov_fro),
+                    "vc_cov_fro_s2": _csv_value(metric.s2_cov_fro),
+                    "vc_participation_ratio_s1": _csv_value(metric.s1_participation_ratio),
+                    "vc_participation_ratio_s2": _csv_value(metric.s2_participation_ratio),
+                }
+            )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Embedding collapse diagnostic visualizations",
@@ -1148,10 +1417,11 @@ def parse_args() -> argparse.Namespace:
         epilog=textwrap.dedent(
             """
             Example:
-              python -m visualizations.ssl4eo.embedding_collapse_diagnostics \\
-                --checkpoint-root /path/to/checkpoints \\
-                --output-dir diagnostics/random_init \\
-                --dataset-root /data/SSL4EO
+              python -m visualizations.ssl4eo.embedding_collapse_diagnostics \
+                --checkpoint-root '/home/juro4948/ciip/logs/2025_09_18-14_11_51-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints' \
+                --output-dir diagnostics/random_init/9-18-2025-vcreg \
+                --dataset-root /local/ms-data/SSL4EO/ \
+                --vc-gamma 1 
             """
         ).strip(),
     )
@@ -1208,8 +1478,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--negative-samples",
         type=int,
-        default=50000,
+        default=2000,
         help="Number of negative pairs to sample for cosine similarity (None = all)",
+    )
+    parser.add_argument(
+        "--vc-gamma",
+        type=float,
+        default=None,
+        help="Override the variance floor γ used when computing VC diagnostics (defaults to config)",
     )
     parser.add_argument("--random-seed", type=int, default=42, help="Random seed for sampling")
     parser.add_argument("--spectrum-top-k", type=int, default=10, help="Number of leading eigenvalues to plot")
@@ -1241,13 +1517,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tsne-samples",
         type=int,
-        default=0,
+        default=800,
         help="Number of samples per modality for t-SNE projections (0 = skip)",
     )
     parser.add_argument(
         "--umap-samples",
         type=int,
-        default=0,
+        default=800,
         help="Number of samples per modality for UMAP projections (0 = skip)",
     )
     parser.add_argument(
@@ -1320,15 +1596,40 @@ def main() -> None:
         max_checkpoints=args.max_checkpoints,
     )
 
-    metrics = compute_epoch_metrics(epochs, negative_samples=args.negative_samples, random_seed=args.random_seed)
+    # metrics = compute_epoch_metrics(epochs, negative_samples=args.negative_samples, random_seed=args.random_seed)
+    try:
+        config_gamma = float(config.loss.vc_gamma)
+    except Exception:
+        config_gamma = None
+
+    if args.vc_gamma is not None:
+        vc_gamma = float(args.vc_gamma)
+        gamma_source = "CLI override"
+    elif config_gamma is not None:
+        vc_gamma = config_gamma
+        gamma_source = "config"
+    else:
+        vc_gamma = 1.0
+        gamma_source = "default"
+
+    _LOGGER.info("Using VC γ target of %.4f (%s)", vc_gamma, gamma_source)
+
+    metrics = compute_epoch_metrics(
+        epochs,
+        negative_samples=args.negative_samples,
+        random_seed=args.random_seed,
+        vc_gamma=vc_gamma,
+    )
 
     export_metrics(metrics, output_dir)
+    export_vc_metrics_csv(metrics, output_dir)
     plot_cosine_summary(metrics, output_dir)
     plot_cosine_histograms(metrics, output_dir, bins=args.cosine_hist_bins)
     plot_variance_heatmap(metrics, output_dir, modality="s1")
     plot_variance_heatmap(metrics, output_dir, modality="s2")
     plot_spectrum(metrics, output_dir, modality="s1", top_k=args.spectrum_top_k)
     plot_spectrum(metrics, output_dir, modality="s2", top_k=args.spectrum_top_k)
+    plot_vc_timeseries(metrics, output_dir, vc_gamma=vc_gamma)
     plot_epoch_dashboards(
         metrics,
         output_dir,
