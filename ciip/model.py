@@ -129,7 +129,10 @@ class ResNet50(ResNet):
         x = torch.flatten(x, 1)
         x = self.fc(x)
 
-        x = F.normalize(x, p=2, dim=-1)
+        # Normalization of the projection head outputs is handled by callers when
+        # required (e.g. CIIP.encode_* when ``normalize=True``). Keeping the raw
+        # features here ensures downstream utilities can decide whether to apply
+        # cosine-style normalization or operate on the unnormalized representations.
 
         if self.compute_orthogonal_matrix:
             print(f"S1:{self.is_s1}: returning embedding without applying orthogonal matrix")
@@ -143,7 +146,11 @@ class ResNet50(ResNet):
                 raise ValueError("Orthogonal matrix W is not initialized. Set compute_orthogonal_matrix to True first.")
             x = x @ self.W
 
-            # normalize again after applying W
+            # normalize again after applying W. Utilities that toggle
+            # ``apply_orthogonal_matrix`` (e.g. VC diagnostics) historically relied on
+            # this branch returning cosine-normalized features even when callers did
+            # not explicitly request normalization, so we keep the behavior to avoid
+            # breaking existing checkpoints and analyses.
             x = F.normalize(x, p=2, dim=-1)
         return x
 
