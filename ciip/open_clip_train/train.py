@@ -25,6 +25,7 @@ from open_clip import get_input_dtype
 from open_clip_train.distributed import is_master
 from open_clip_train.zero_shot import zero_shot_eval
 from open_clip_train.precision import get_autocast
+from ciip.loss import gather_features
 
 import random
 from torch.utils.data import Dataset, DataLoader
@@ -124,12 +125,59 @@ def _accumulate_vc_metrics(
     if not getattr(loss, "vc_reg_enabled", False):
         return
     with torch.no_grad():
+        gathered_features = {}
         for modality in ("s1", "s2"):
             raw_key = f"{modality}_features_vc"
             feature_key = f"{modality}_features"
             features = model_out.get(raw_key)
             if features is None:
                 features = model_out.get(feature_key)
+            gathered_features[modality] = features
+
+        world_size = getattr(loss, "world_size", 1)
+        if world_size > 1:
+            local_loss = getattr(loss, "local_loss", False)
+            rank = getattr(loss, "rank", 0)
+            use_horovod = getattr(loss, "use_horovod", False)
+
+            s1_tensor = gathered_features.get("s1")
+            s2_tensor = gathered_features.get("s2")
+            if s1_tensor is not None or s2_tensor is not None:
+                if s1_tensor is not None and s2_tensor is not None:
+                    s1_tensor, s2_tensor = gather_features(
+                        s1_tensor,
+                        s2_tensor,
+                        local_loss,
+                        False,
+                        rank,
+                        world_size,
+                        use_horovod,
+                    )
+                else:
+                    if s1_tensor is not None:
+                        s1_tensor, _ = gather_features(
+                            s1_tensor,
+                            s1_tensor,
+                            local_loss,
+                            False,
+                            rank,
+                            world_size,
+                            use_horovod,
+                        )
+                    if s2_tensor is not None:
+                        s2_tensor, _ = gather_features(
+                            s2_tensor,
+                            s2_tensor,
+                            local_loss,
+                            False,
+                            rank,
+                            world_size,
+                            use_horovod,
+                        )
+                gathered_features["s1"] = s1_tensor
+                gathered_features["s2"] = s2_tensor
+
+        for modality, features in gathered_features.items():
             if features is None:
                 continue
             features = features.detach()
