@@ -398,7 +398,7 @@ def discover_checkpoints(
 
     # if epoch_stride > 1:
     #     candidates = candidates[::epoch_stride]
-    epochs = [1, 2, 3, 5, 10, 20]
+    epochs = [1,2,3,4,5,6]
 
     # filter and keep only those epochs
     selected_paths = [
@@ -1449,13 +1449,19 @@ def parse_args() -> argparse.Namespace:
         epilog=textwrap.dedent(
             """
             Example:
+
               python -m visualizations.ssl4eo.embedding_collapse_diagnostics \
-                --checkpoint-root '/home/juro4948/ciip/logs/2025_09_18-14_11_51-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints' \
-                --output-dir diagnostics/random_init/9-18-2025-vcreg \
+                --checkpoint-root '/home/juro4948/ciip/logs/2025_09_22-16_02_28-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints' \
+                --output-dir diagnostics/random_init/9-11-2025-vcregstats \
                 --dataset-root /local/ms-data/SSL4EO/ \
                 --vc-gamma 1 
             """
+            # '' \
         ).strip(),
+        # '/home/juro4948/ciip/logs/2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints'
+
+        #          /home/juro4948/ciip/logs/2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints' \
+        # /home/juro4948/ciip/logs/2025_09_20-22_35_45-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints
     )
     parser.add_argument("--checkpoint-root", type=Path, required=True, help="Directory containing CIIP checkpoints")
     parser.add_argument("--output-dir", type=Path, required=True, help="Where to store plots and metrics")
