@@ -238,6 +238,7 @@ def load_model_from_checkpoint(
     device: torch.device,
     input_dtype: torch.dtype,
     w_path: Optional[Path] = None,
+    skip_final_fc: bool = False,
 ) -> torch.nn.Module:
     """Instantiate a CIIP model and load weights from ``checkpoint_path``."""
 
@@ -280,10 +281,11 @@ def load_model_from_checkpoint(
     else:
         model = model.to(device, non_blocking=True)
 
-    if hasattr(model, "encoder_s1") and hasattr(model.encoder_s1, "fc"):
-        model.encoder_s1.fc = nn.Identity()
-    if hasattr(model, "encoder_s2") and hasattr(model.encoder_s2, "fc"):
-        model.encoder_s2.fc = nn.Identity()
+    if skip_final_fc:
+        if hasattr(model, "encoder_s1") and hasattr(model.encoder_s1, "fc"):
+            model.encoder_s1.fc = nn.Identity()
+        if hasattr(model, "encoder_s2") and hasattr(model.encoder_s2, "fc"):
+            model.encoder_s2.fc = nn.Identity()
 
     model.eval()
     return model
@@ -334,19 +336,42 @@ def extract_embeddings_for_dataset(
                 s2_tensor = s2_tensor.to(device=device, non_blocking=True)
 
             with autocast():
-                s1_embed = model.encode_s1(s1_tensor, normalize=False)
-                s2_embed = model.encode_s2(s2_tensor, normalize=False)
+                model_out = model(s1_tensor, s2_tensor)
+
+            if isinstance(model_out, dict):
+                s1_embed = model_out.get("s1_features_vc")
+                s2_embed = model_out.get("s2_features_vc")
+                s1_norm = model_out.get("s1_features")
+                s2_norm = model_out.get("s2_features")
+            else:
+                s1_embed = s2_embed = None
+                s1_norm = s2_norm = None
+
+            if s1_embed is None or s2_embed is None:
+                with autocast():
+                    s1_embed = model.encode_s1(s1_tensor, normalize=False)
+                    s2_embed = model.encode_s2(s2_tensor, normalize=False)
+                s1_norm = None
+                s2_norm = None
+
+            if s1_norm is None:
+                s1_norm = F.normalize(s1_embed, dim=-1)
+            if s2_norm is None:
+                s2_norm = F.normalize(s2_embed, dim=-1)
 
             s1_embed = s1_embed.squeeze(0).detach()
             s2_embed = s2_embed.squeeze(0).detach()
+            s1_norm = s1_norm.squeeze(0).detach()
+            s2_norm = s2_norm.squeeze(0).detach()
+            del model_out
 
             s1_cpu = s1_embed.cpu()
             s2_cpu = s2_embed.cpu()
             s1_vectors.append(s1_cpu)
             s2_vectors.append(s2_cpu)
 
-            s1_normalized_vectors.append(F.normalize(s1_cpu.to(dtype=torch.float32), dim=0))
-            s2_normalized_vectors.append(F.normalize(s2_cpu.to(dtype=torch.float32), dim=0))
+            s1_normalized_vectors.append(s1_norm.to(dtype=torch.float32).cpu())
+            s2_normalized_vectors.append(s2_norm.to(dtype=torch.float32).cpu())
 
             if hasattr(base_dataset, "get_sample_uid"):
                 uid, _ = base_dataset.get_sample_uid(base_idx)
@@ -435,6 +460,7 @@ def collect_epoch_embeddings(
     pattern: Optional[str],
     include_init: bool,
     max_checkpoints: Optional[int],
+    skip_final_fc: bool = False,
 ) -> List[EpochEmbeddings]:
     """Extract embeddings for each checkpoint under ``checkpoint_root``."""
 
@@ -461,6 +487,7 @@ def collect_epoch_embeddings(
             device=device,
             input_dtype=input_dtype,
             w_path=w_path,
+            skip_final_fc=skip_final_fc,
         )
 
         try:
@@ -1514,6 +1541,14 @@ def parse_args() -> argparse.Namespace:
         help="Device to run extraction on (defaults to CUDA if available else CPU)",
     )
     parser.add_argument(
+        "--skip-final-fc",
+        action="store_true",
+        help=(
+            "Replace the encoders' final projection layers with identity mappings "
+            "when extracting embeddings (defaults to keeping the trained heads)."
+        ),
+    )
+    parser.add_argument(
         "--negative-samples",
         type=int,
         default=2000,
@@ -1632,6 +1667,7 @@ def main() -> None:
         pattern=args.checkpoint_pattern,
         include_init=args.include_init,
         max_checkpoints=args.max_checkpoints,
+        skip_final_fc=args.skip_final_fc,
     )
 
     # metrics = compute_epoch_metrics(epochs, negative_samples=args.negative_samples, random_seed=args.random_seed)
