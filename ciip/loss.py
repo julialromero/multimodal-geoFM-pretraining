@@ -135,7 +135,14 @@ class CiipLoss(nn.Module):
             labels = self.labels[device]
         return labels
 
-    def get_logits(self, s1_features, s2_features, logit_scale, logit_bias=None):
+    def get_logits(
+            self,
+            s1_features,
+            s2_features,
+            logit_scale,
+            logit_bias=None,
+            return_gathered=False,
+    ):
         if self.world_size > 1:
             all_s1_features, all_s2_features = gather_features(
                 s1_features, s2_features,
@@ -150,11 +157,16 @@ class CiipLoss(nn.Module):
         else:
             logits_per_s1 = logit_scale * s1_features @ s2_features.T
             logits_per_s2 = logit_scale * s2_features @ s1_features.T
+            all_s1_features = s1_features
+            all_s2_features = s2_features
 
         if logit_bias is not None:
             logits_per_image += logit_bias
             logits_per_text += logit_bias
-        
+
+        if return_gathered:
+            return logits_per_s1, logits_per_s2, all_s1_features, all_s2_features
+
         return logits_per_s1, logits_per_s2
 
     def forward(
@@ -169,7 +181,21 @@ class CiipLoss(nn.Module):
             **kwargs,
     ):
         device = s1_features.device
-        logits_per_s1, logits_per_s2 = self.get_logits(s1_features, s2_features, logit_scale, logit_bias=logit_bias,)
+        need_vc = self.vc_reg_enabled and self.vc_weight != 0
+        gather_for_vc = need_vc and self.world_size > 1
+        logits_outputs = self.get_logits(
+            s1_features,
+            s2_features,
+            logit_scale,
+            logit_bias=logit_bias,
+            return_gathered=gather_for_vc,
+        )
+        if gather_for_vc:
+            logits_per_s1, logits_per_s2, gathered_s1_features, gathered_s2_features = logits_outputs
+        else:
+            logits_per_s1, logits_per_s2 = logits_outputs
+            gathered_s1_features = None
+            gathered_s2_features = None
 
         labels = self.get_ground_truth(device, logits_per_s1.shape[0])
 
@@ -180,9 +206,34 @@ class CiipLoss(nn.Module):
 
         losses = {"contrastive_loss": contrastive_loss}
 
-        if self.vc_reg_enabled and self.vc_weight != 0:
-            s1_vc = s1_features_vc if s1_features_vc is not None else s1_features
-            s2_vc = s2_features_vc if s2_features_vc is not None else s2_features
+        if need_vc:
+            s1_vc_local = s1_features_vc if s1_features_vc is not None else s1_features
+            s2_vc_local = s2_features_vc if s2_features_vc is not None else s2_features
+
+            if self.world_size > 1:
+                reuse_info_nce_gather = (
+                    self.gather_with_grad and
+                    s1_features_vc is None and
+                    s2_features_vc is None and
+                    gathered_s1_features is not None and
+                    gathered_s2_features is not None
+                )
+                if reuse_info_nce_gather:
+                    s1_vc = gathered_s1_features
+                    s2_vc = gathered_s2_features
+                else:
+                    s1_vc, s2_vc = gather_features(
+                        s1_vc_local,
+                        s2_vc_local,
+                        self.local_loss,
+                        True,
+                        self.rank,
+                        self.world_size,
+                        self.use_horovod,
+                    )
+            else:
+                s1_vc = s1_vc_local
+                s2_vc = s2_vc_local
 
             variance_loss = self._variance_regularizer(s1_vc) + self._variance_regularizer(s2_vc)
             cov_w_s1, cov_w_s2 = self.vc_covariance_weights
