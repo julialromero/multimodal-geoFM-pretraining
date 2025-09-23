@@ -30,11 +30,15 @@ Example usage::
     #     --linear-probe-csv results.csv \
     #     --linear-probe-pattern "RandomInit-hal-epoch(\\d+)" \
     #     --tsne-samples 800 \
-    #     --umap-samples 800
+    #     --umap-samples 800 \
+    #     --use-orthogonal-mapping  # opt-in to applying W.pt to s*_features_vc
 
 All plots are saved in the provided output directory; intermediate statistics
 are exported as JSON/NumPy files for downstream analysis. The VC diagnostics are
 also written to ``vc_metrics.csv`` and summarized in ``vc_metrics_timeseries.png``.
+
+By default, embeddings are exported directly from the encoders (raw ``s*_features_vc``).
+Pass ``--use-orthogonal-mapping`` to apply the optional ``W.pt`` alignment when present.
 """
 
 from __future__ import annotations
@@ -239,6 +243,7 @@ def load_model_from_checkpoint(
     input_dtype: torch.dtype,
     w_path: Optional[Path] = None,
     skip_final_fc: bool = False,
+    use_orthogonal_mapping: bool = False,
 ) -> torch.nn.Module:
     """Instantiate a CIIP model and load weights from ``checkpoint_path``."""
 
@@ -265,16 +270,18 @@ def load_model_from_checkpoint(
         else:
             state_dict = cleaned
 
-    if w_path is not None and w_path.exists():
+    use_w_mapping = bool(use_orthogonal_mapping and w_path is not None and w_path.exists())
+    if use_w_mapping:
         try:
             orthogonal = torch.load(w_path, map_location=device)
         except Exception as exc:  # pragma: no cover - defensive branch
             _LOGGER.warning("Failed to load orthogonal mapping from %s: %s", w_path, exc)
+            use_w_mapping = False
         else:
             if hasattr(model, "encoder_s1"):
                 model.encoder_s1.register_buffer("W", orthogonal)
-                if hasattr(model.encoder_s1, "apply_orthogonal_matrix"):
-                    model.encoder_s1.apply_orthogonal_matrix = True
+    if hasattr(model, "encoder_s1") and hasattr(model.encoder_s1, "apply_orthogonal_matrix"):
+        model.encoder_s1.apply_orthogonal_matrix = use_w_mapping
 
     if input_dtype is not None:
         model = model.to(device, dtype=input_dtype, non_blocking=True)
@@ -461,8 +468,13 @@ def collect_epoch_embeddings(
     include_init: bool,
     max_checkpoints: Optional[int],
     skip_final_fc: bool = False,
+    use_orthogonal_mapping: bool = False,
 ) -> List[EpochEmbeddings]:
-    """Extract embeddings for each checkpoint under ``checkpoint_root``."""
+    """Extract embeddings for each checkpoint under ``checkpoint_root``.
+
+    Raw encoder outputs are returned by default. Set ``use_orthogonal_mapping`` to ``True``
+    to apply the optional ``W.pt`` alignment when present.
+    """
 
     checkpoints = discover_checkpoints(
         checkpoint_root,
@@ -488,6 +500,7 @@ def collect_epoch_embeddings(
             input_dtype=input_dtype,
             w_path=w_path,
             skip_final_fc=skip_final_fc,
+            use_orthogonal_mapping=use_orthogonal_mapping,
         )
 
         try:
@@ -1543,6 +1556,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--use-orthogonal-mapping",
+        action="store_true",
+        help=(
+            "Apply the optional W.pt orthogonal alignment when present so s*_features_vc "
+            "match the rotated training space (defaults to raw encoder outputs)."
+        ),
+    )
+    parser.add_argument(
         "--negative-samples",
         type=int,
         default=2000,
@@ -1662,6 +1683,7 @@ def main() -> None:
         include_init=args.include_init,
         max_checkpoints=args.max_checkpoints,
         skip_final_fc=args.skip_final_fc,
+        use_orthogonal_mapping=args.use_orthogonal_mapping,
     )
 
     # metrics = compute_epoch_metrics(epochs, negative_samples=args.negative_samples, random_seed=args.random_seed)
