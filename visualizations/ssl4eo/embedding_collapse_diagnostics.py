@@ -474,6 +474,7 @@ def collect_epoch_embeddings(
     w_path = checkpoint_root / "W.pt"
     if not w_path.exists():
         w_path = None
+        print("No orthogonal mapping W.pt found in checkpoint root")
 
     epochs: List[EpochEmbeddings] = []
     for idx, checkpoint_path in enumerate(checkpoints):
@@ -1479,7 +1480,7 @@ def parse_args() -> argparse.Namespace:
 
               python -m visualizations.ssl4eo.embedding_collapse_diagnostics \
                 --checkpoint-root '/home/juro4948/ciip/logs/2025_09_22-16_02_28-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints' \
-                --output-dir diagnostics/random_init/9-11-2025-vcregstats \
+                --output-dir diagnostics/random_init/9-22-2025-vcregstats \
                 --dataset-root /local/ms-data/SSL4EO/ \
                 --vc-gamma 1 
             """
