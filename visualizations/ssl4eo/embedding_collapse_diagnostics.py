@@ -441,24 +441,29 @@ def discover_checkpoints(
     # print(candidates)
 
 
-    # # if epoch_stride > 1:
-    # # if 1,2,3,5 are in candidates, keep them all
+    epochs = [int(p.stem.split('_')[1]) for p in candidates]
+    # epochs already parsed as ints like you showed:
     # epochs = [int(p.stem.split('_')[1]) for p in candidates]
-    # epochs = sorted(list(set(epochs)))
+    epochs = sorted(set(epochs))
 
-    # # if max epoch > 10, keep every 5 after the first 5
-    # if epochs and epochs[-1] > 10:
+    keep = set()
 
-    # # max epoch is > 50, keep only every 10th epoch in 10-50 range
-    # if epochs and epochs[-1] > 50:
-    #     filtered = [e for e in epochs if e <= 10 or e >= 50 or e % 10 == 0]
-    #     epochs = filtered
-    # # if max epoch > 100, keep only every 20th epoch in 50+
-    # if epochs and epochs[-1] > 100:
-    #     filtered = [e for e in epochs if e <= 50 or e >= 100 or e % 20 == 0]
-    #     epochs = filtered
-    # print(epochs)
-    epochs = [1,2,3,5,10, 20, 25]
+    # Always keep these if present
+    keep.update(e for e in epochs if e in {1, 2, 3, 5, 10, 15, 20})
+
+    if epochs:
+        max_ep = max(epochs)
+
+        # If max epoch < 50, keep it (even if not in the above list)
+        if max_ep < 50:
+            keep.add(max_ep)
+
+        # If max epoch is between 20 and 100 (inclusive),
+        # keep only every 10th epoch AFTER 20 (i.e., 30, 40, 50, ... up to max_ep)
+        if 20 < max_ep <= 100:
+            keep.update(e for e in epochs if e > 20 and e % 10 == 0 and e <= max_ep)
+
+    epochs = sorted(keep)
 
     # filter and keep only those epochs
     selected_paths = [
@@ -472,7 +477,8 @@ def discover_checkpoints(
         key=lambda p: int(p.stem.split('_')[1])
     )
 
-    print(candidates)
+    # print(candidates)
+    # quit()
 
     # candidates = [candidates[i] for i in range(len(candidates)) if i in epochs or i == 0 or i == len(candidates)-1]
     if max_checkpoints is not None:
@@ -1995,11 +2001,13 @@ def parse_args() -> argparse.Namespace:
             Example:
 
               python -m visualizations.ssl4eo.embedding_collapse_diagnostics \
-                --checkpoint-root '/home/juro4948/ciip/logs/2025_09_23-12_27_52-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints' \
-                --output-dir diagnostics/random_init/9-23-2025-vcregstats \
+                --checkpoint-root '/home/juro4948/ciip/logs/2025_09_20-22_35_45-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints'
+                --output-dir diagnostics/random_init/9-20-2025-vcregstats \
                 --dataset-root /local/ms-data/SSL4EO/ \
                 --vc-gamma 1 
             """
+
+            # --checkpoint-root '/home/juro4948/ciip/logs/2025_09_23-12_27_52-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints' \
             # '' \
         ).strip(),
         # '/home/juro4948/ciip/logs/2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints'
