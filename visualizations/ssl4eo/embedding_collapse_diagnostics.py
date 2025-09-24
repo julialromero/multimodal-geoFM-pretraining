@@ -428,9 +428,24 @@ def discover_checkpoints(
     # print(candidates)
 
 
-    # if epoch_stride > 1:
-    #     candidates = candidates[::epoch_stride]
-    epochs = [1,2,3,4,5,6]
+    # # if epoch_stride > 1:
+    # # if 1,2,3,5 are in candidates, keep them all
+    # epochs = [int(p.stem.split('_')[1]) for p in candidates]
+    # epochs = sorted(list(set(epochs)))
+
+    # # if max epoch > 10, keep every 5 after the first 5
+    # if epochs and epochs[-1] > 10:
+
+    # # max epoch is > 50, keep only every 10th epoch in 10-50 range
+    # if epochs and epochs[-1] > 50:
+    #     filtered = [e for e in epochs if e <= 10 or e >= 50 or e % 10 == 0]
+    #     epochs = filtered
+    # # if max epoch > 100, keep only every 20th epoch in 50+
+    # if epochs and epochs[-1] > 100:
+    #     filtered = [e for e in epochs if e <= 50 or e >= 100 or e % 20 == 0]
+    #     epochs = filtered
+    # print(epochs)
+    epochs = [1,2,3,5,10, 20, 25]
 
     # filter and keep only those epochs
     selected_paths = [
@@ -1492,15 +1507,15 @@ def parse_args() -> argparse.Namespace:
             Example:
 
               python -m visualizations.ssl4eo.embedding_collapse_diagnostics \
-                --checkpoint-root '/home/juro4948/ciip/logs/2025_09_22-16_02_28-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints' \
-                --output-dir diagnostics/random_init/9-22-2025-vcregstats \
+                --checkpoint-root '/home/juro4948/ciip/logs/2025_09_23-12_27_52-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints' \
+                --output-dir diagnostics/random_init/9-23-2025-vcregstats \
                 --dataset-root /local/ms-data/SSL4EO/ \
                 --vc-gamma 1 
             """
             # '' \
         ).strip(),
         # '/home/juro4948/ciip/logs/2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints'
-
+        # '/home/juro4948/ciip/logs/2025_09_22-16_02_28-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints'
         #          /home/juro4948/ciip/logs/2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints' \
         # /home/juro4948/ciip/logs/2025_09_20-22_35_45-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints
     )
@@ -1612,13 +1627,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tsne-samples",
         type=int,
-        default=800,
+        default=500,
         help="Number of samples per modality for t-SNE projections (0 = skip)",
     )
     parser.add_argument(
         "--umap-samples",
         type=int,
-        default=800,
+        default=500,
         help="Number of samples per modality for UMAP projections (0 = skip)",
     )
     parser.add_argument(
