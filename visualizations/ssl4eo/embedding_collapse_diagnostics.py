@@ -120,12 +120,19 @@ class EpochMetrics:
     s2_condition_number: Optional[float] = None
     s1_std_min: Optional[float] = None
     s2_std_min: Optional[float] = None
-    s1_std_diff: Optional[float] = None
-    s2_std_diff: Optional[float] = None
     s1_cov_fro: Optional[float] = None
     s2_cov_fro: Optional[float] = None
     s1_participation_ratio: Optional[float] = None
     s2_participation_ratio: Optional[float] = None
+    s1_correlation_spectrum: Optional[np.ndarray] = None
+    s2_correlation_spectrum: Optional[np.ndarray] = None
+    s1_corr_participation_ratio: Optional[float] = None
+    s2_corr_participation_ratio: Optional[float] = None
+    s1_corr_spectral_entropy: Optional[float] = None
+    s2_corr_spectral_entropy: Optional[float] = None
+    cca_spectrum: Optional[np.ndarray] = None
+    cca_rho_max: Optional[float] = None
+    cca_rho_topk_mean: Optional[float] = None
 
     def to_summary_dict(self) -> Dict[str, object]:
         """Return a JSON-friendly summary of the metrics."""
@@ -153,16 +160,22 @@ class EpochMetrics:
             "vc_metrics": {
                 "s1": {
                     "std_min": self.s1_std_min,
-                    "std_diff": self.s1_std_diff,
                     "cov_fro": self.s1_cov_fro,
                     "participation_ratio": self.s1_participation_ratio,
+                    "correlation_participation_ratio": self.s1_corr_participation_ratio,
+                    "correlation_spectral_entropy": self.s1_corr_spectral_entropy,
                 },
                 "s2": {
                     "std_min": self.s2_std_min,
-                    "std_diff": self.s2_std_diff,
                     "cov_fro": self.s2_cov_fro,
                     "participation_ratio": self.s2_participation_ratio,
+                    "correlation_participation_ratio": self.s2_corr_participation_ratio,
+                    "correlation_spectral_entropy": self.s2_corr_spectral_entropy,
                 },
+            },
+            "cca": {
+                "rho_max": self.cca_rho_max,
+                "rho_topk_mean": self.cca_rho_topk_mean,
             },
         }
 
@@ -570,34 +583,142 @@ def compute_covariance(tensor: torch.Tensor) -> Optional[torch.Tensor]:
 
 def compute_vc_geometry(
     features: torch.Tensor,
-    gamma: float,
     eps: float = 1e-12,
-) -> Tuple[float, float, float, float]:
+) -> Tuple[float, float, float]:
     """Return variance-covariance diagnostics for a batch of ``features``."""
 
     if features.dim() != 2 or features.shape[0] < 2:
         nan = float("nan")
-        return nan, nan, nan, nan
+        return nan, nan, nan
 
     feats = features.to(torch.float64)
     variances = torch.var(feats, dim=0, unbiased=False)
-    std = torch.sqrt(variances + 1e-4)
+    std = torch.sqrt(torch.clamp(variances, min=0.0) + 1e-4)
     std_min = float(std.min().item())
-    std_diff = std_min - float(gamma)
 
     cov = compute_covariance(feats)
     if cov is None:
         nan = float("nan")
-        return nan, nan, nan, nan
+        return nan, nan, nan
 
     diag = torch.diag(torch.diagonal(cov))
     off_diag = (cov - diag).to(torch.float64)
     cov_fro = float(torch.linalg.norm(off_diag, ord="fro").item())
 
     eigvals = torch.linalg.eigvalsh(cov).real
+    eigvals = torch.clamp(eigvals, min=0.0)
     participation = float(((eigvals.sum() ** 2) / (eigvals.pow(2).sum() + eps)).item())
 
-    return std_min, std_diff, cov_fro, participation
+    return std_min, cov_fro, participation
+
+
+def compute_correlation_metrics(
+    features: torch.Tensor,
+    eps: float = 1e-12,
+) -> Tuple[Optional[np.ndarray], float, float]:
+    """Return correlation spectrum and scale-invariant summaries for ``features``."""
+
+    if features.dim() != 2 or features.shape[0] < 2:
+        nan = float("nan")
+        return None, nan, nan
+
+    feats = features.to(torch.float64)
+    cov = compute_covariance(feats)
+    if cov is None:
+        nan = float("nan")
+        return None, nan, nan
+
+    variances = torch.diagonal(cov)
+    std = torch.sqrt(torch.clamp(variances, min=0.0))
+    inv_std = torch.where(std > eps, 1.0 / std, torch.zeros_like(std))
+    inv_std_mat = torch.diag(inv_std)
+
+    corr = inv_std_mat @ cov @ inv_std_mat
+    corr = (corr + corr.t()) / 2
+
+    try:
+        eigvals = torch.linalg.eigvalsh(corr).flip(0)
+    except RuntimeError:
+        nan = float("nan")
+        return None, nan, nan
+
+    eigvals_np = eigvals.cpu().numpy().astype(np.float64)
+    if eigvals_np.size == 0:
+        nan = float("nan")
+        return None, nan, nan
+
+    eigvals_np = np.clip(eigvals_np, a_min=0.0, a_max=None)
+    participation = float(((eigvals_np.sum() ** 2) / (np.sum(np.square(eigvals_np)) + eps)))
+
+    total = float(np.sum(eigvals_np))
+    if total <= eps:
+        spectral_entropy = float("nan")
+    else:
+        probs = eigvals_np / total
+        entropy = -float(np.sum(probs * np.log(probs + eps)))
+        if eigvals_np.size <= 1:
+            spectral_entropy = 0.0
+        else:
+            norm = math.log(eigvals_np.size)
+            spectral_entropy = float(entropy / norm) if norm > 0 else float("nan")
+
+    return eigvals_np, participation, spectral_entropy
+
+
+def _symmetric_matrix_inverse_sqrt(
+    matrix: torch.Tensor,
+    eps: float = 1e-12,
+) -> Optional[torch.Tensor]:
+    """Return ``matrix^{-1/2}`` for a symmetric positive semi-definite matrix."""
+
+    try:
+        eigvals, eigvecs = torch.linalg.eigh((matrix + matrix.t()) / 2)
+    except RuntimeError:
+        return None
+
+    eigvals = torch.clamp(eigvals, min=eps)
+    inv_sqrt = eigvecs @ torch.diag(eigvals.rsqrt()) @ eigvecs.t()
+    return inv_sqrt
+
+
+def compute_cca_spectrum(
+    s1: torch.Tensor,
+    s2: torch.Tensor,
+    eps: float = 1e-12,
+) -> Optional[np.ndarray]:
+    """Return the canonical correlation spectrum between ``s1`` and ``s2``."""
+
+    if s1.dim() != 2 or s2.dim() != 2:
+        return None
+
+    count = min(s1.shape[0], s2.shape[0])
+    if count < 2:
+        return None
+
+    x = s1[:count].to(torch.float64)
+    y = s2[:count].to(torch.float64)
+
+    x = x - x.mean(dim=0, keepdim=True)
+    y = y - y.mean(dim=0, keepdim=True)
+
+    denom = max(count - 1, 1)
+    cov_xx = (x.t().matmul(x)) / denom
+    cov_yy = (y.t().matmul(y)) / denom
+    cov_xy = (x.t().matmul(y)) / denom
+
+    inv_sqrt_xx = _symmetric_matrix_inverse_sqrt(cov_xx, eps=eps)
+    inv_sqrt_yy = _symmetric_matrix_inverse_sqrt(cov_yy, eps=eps)
+    if inv_sqrt_xx is None or inv_sqrt_yy is None:
+        return None
+
+    t_matrix = inv_sqrt_xx @ cov_xy @ inv_sqrt_yy
+    try:
+        singular_values = torch.linalg.svdvals(t_matrix)
+    except RuntimeError:
+        return None
+
+    singular_values = torch.clamp(singular_values, min=0.0, max=1.0)
+    return singular_values.cpu().numpy()
 
 def compute_condition_number(spectrum: np.ndarray, eps: float = 1e-12) -> float:
     """Compute a safe condition number from a descending spectrum."""
@@ -662,7 +783,7 @@ def compute_epoch_metrics(
     *,
     negative_samples: Optional[int],
     random_seed: int,
-    vc_gamma: float,
+    cca_top_k: int,
 ) -> List[EpochMetrics]:
     """Compute diagnostic metrics for each epoch."""
 
@@ -689,18 +810,40 @@ def compute_epoch_metrics(
         cov_s1 = compute_covariance(s1_tensor)
         cov_s2 = compute_covariance(s2_tensor)
 
-        s1_std_min, s1_std_diff, s1_cov_fro, s1_participation = compute_vc_geometry(epoch.s1, vc_gamma)
-        s2_std_min, s2_std_diff, s2_cov_fro, s2_participation = compute_vc_geometry(epoch.s2, vc_gamma)
+        s1_std_min, s1_cov_fro, s1_participation = compute_vc_geometry(epoch.s1)
+        s2_std_min, s2_cov_fro, s2_participation = compute_vc_geometry(epoch.s2)
 
         metrics.s1_std_min = s1_std_min
         metrics.s2_std_min = s2_std_min
-        metrics.s1_std_diff = s1_std_diff
-        metrics.s2_std_diff = s2_std_diff
         metrics.s1_cov_fro = s1_cov_fro
         metrics.s2_cov_fro = s2_cov_fro
         metrics.s1_participation_ratio = s1_participation
         metrics.s2_participation_ratio = s2_participation
 
+        (
+            s1_corr_spec,
+            s1_corr_pr,
+            s1_corr_entropy,
+        ) = compute_correlation_metrics(epoch.s1)
+        (
+            s2_corr_spec,
+            s2_corr_pr,
+            s2_corr_entropy,
+        ) = compute_correlation_metrics(epoch.s2)
+
+        metrics.s1_correlation_spectrum = s1_corr_spec
+        metrics.s2_correlation_spectrum = s2_corr_spec
+        metrics.s1_corr_participation_ratio = s1_corr_pr
+        metrics.s2_corr_participation_ratio = s2_corr_pr
+        metrics.s1_corr_spectral_entropy = s1_corr_entropy
+        metrics.s2_corr_spectral_entropy = s2_corr_entropy
+
+        cca_spectrum = compute_cca_spectrum(epoch.s1, epoch.s2)
+        metrics.cca_spectrum = cca_spectrum
+        if cca_spectrum is not None and cca_spectrum.size:
+            metrics.cca_rho_max = float(cca_spectrum[0])
+            top_k = cca_spectrum.size if cca_top_k <= 0 else min(cca_top_k, cca_spectrum.size)
+            metrics.cca_rho_topk_mean = float(np.mean(cca_spectrum[:top_k]))
 
         if cov_s1 is not None:
             eigvals1 = torch.linalg.eigvalsh(cov_s1).flip(0).cpu().numpy()
@@ -923,56 +1066,399 @@ def _plot_vc_timeseries_panel(
         ax.legend(handles, legends)
 
 
+def _plot_spectrum_panel(
+    ax,
+    metrics: Sequence[EpochMetrics],
+    *,
+    attr_s1: str,
+    attr_s2: str,
+    title: str,
+    ylabel: str,
+    top_k: int,
+    log_scale: bool,
+) -> None:
+    x = [m.epoch_index for m in metrics]
+    labels = [m.label for m in metrics]
+
+    spectra_s1 = [getattr(m, attr_s1) for m in metrics]
+    spectra_s2 = [getattr(m, attr_s2) for m in metrics]
+    max_dims = max(
+        [
+            max((spec.size for spec in spectra if spec is not None), default=0)
+            for spectra in (spectra_s1, spectra_s2)
+        ]
+    )
+
+    if max_dims == 0:
+        _mark_axis_no_data(ax, title)
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=45, ha="right")
+        ax.set_xlabel("Epoch")
+        return
+
+    if top_k <= 0 or top_k > max_dims:
+        top_k = max_dims
+
+    colors = plt.cm.viridis(np.linspace(0.2, 0.95, top_k))
+    plotted = False
+    for idx in range(top_k):
+        s1_values: List[float] = []
+        s2_values: List[float] = []
+        for spec in spectra_s1:
+            if spec is None or spec.size <= idx:
+                s1_values.append(math.nan)
+            else:
+                value = float(spec[idx])
+                if log_scale and value <= 0:
+                    s1_values.append(math.nan)
+                else:
+                    s1_values.append(value)
+        for spec in spectra_s2:
+            if spec is None or spec.size <= idx:
+                s2_values.append(math.nan)
+            else:
+                value = float(spec[idx])
+                if log_scale and value <= 0:
+                    s2_values.append(math.nan)
+                else:
+                    s2_values.append(value)
+
+        if any(not math.isnan(v) for v in s1_values):
+            ax.plot(
+                x,
+                s1_values,
+                marker="o",
+                linestyle="-",
+                color=colors[idx],
+                label=f"S1 λ{idx + 1}",
+            )
+            plotted = True
+        if any(not math.isnan(v) for v in s2_values):
+            ax.plot(
+                x,
+                s2_values,
+                marker="s",
+                linestyle="--",
+                color=colors[idx],
+                label=f"S2 λ{idx + 1}",
+            )
+            plotted = True
+
+    if not plotted:
+        _mark_axis_no_data(ax, title)
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=45, ha="right")
+        ax.set_xlabel("Epoch")
+        return
+
+    ax.set_title(title)
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel(ylabel)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=45, ha="right")
+    if log_scale:
+        ax.set_yscale("log")
+        ax.grid(True, which="both", alpha=0.3)
+    else:
+        ax.grid(True, alpha=0.3)
+
+    handles, legend_labels = ax.get_legend_handles_labels()
+    if handles:
+        ax.legend(handles, legend_labels, ncol=2, fontsize="small")
+
+
+def _plot_correlation_panel(
+    ax,
+    metrics: Sequence[EpochMetrics],
+    *,
+    top_k: int,
+) -> None:
+    x = [m.epoch_index for m in metrics]
+    labels = [m.label for m in metrics]
+
+    spectra_s1 = [m.s1_correlation_spectrum for m in metrics]
+    spectra_s2 = [m.s2_correlation_spectrum for m in metrics]
+    max_dims = max(
+        [
+            max((spec.size for spec in spectra if spec is not None), default=0)
+            for spectra in (spectra_s1, spectra_s2)
+        ]
+    )
+
+    corr_pr_s1 = _extract_metric_series(metrics, "s1_corr_participation_ratio")
+    corr_pr_s2 = _extract_metric_series(metrics, "s2_corr_participation_ratio")
+    has_pr_s1 = any(not math.isnan(v) for v in corr_pr_s1)
+    has_pr_s2 = any(not math.isnan(v) for v in corr_pr_s2)
+
+    if max_dims == 0:
+        if not (has_pr_s1 or has_pr_s2):
+            _mark_axis_no_data(ax, "Correlation spectrum and participation ratio")
+            ax.set_xticks(x)
+            ax.set_xticklabels(labels, rotation=45, ha="right")
+            ax.set_xlabel("Epoch")
+            return
+
+        ax.set_title("Correlation participation ratio")
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Correlation PR")
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=45, ha="right")
+        if has_pr_s1:
+            ax.plot(
+                x,
+                corr_pr_s1,
+                marker="^",
+                linestyle="-.",
+                color="#2ca02c",
+                label="S1 Corr PR",
+            )
+        if has_pr_s2:
+            ax.plot(
+                x,
+                corr_pr_s2,
+                marker="v",
+                linestyle=":",
+                color="#d62728",
+                label="S2 Corr PR",
+            )
+        ax.grid(True, alpha=0.3)
+        handles, legend_labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(handles, legend_labels, loc="upper right", fontsize="small")
+        return
+
+    if top_k <= 0 or top_k > max_dims:
+        top_k = max_dims
+
+    colors = plt.cm.plasma(np.linspace(0.2, 0.95, top_k))
+    plotted = False
+    for idx in range(top_k):
+        s1_values: List[float] = []
+        s2_values: List[float] = []
+        for spec in spectra_s1:
+            if spec is None or spec.size <= idx:
+                s1_values.append(math.nan)
+            else:
+                s1_values.append(float(spec[idx]))
+        for spec in spectra_s2:
+            if spec is None or spec.size <= idx:
+                s2_values.append(math.nan)
+            else:
+                s2_values.append(float(spec[idx]))
+
+        if any(not math.isnan(v) for v in s1_values):
+            ax.plot(
+                x,
+                s1_values,
+                marker="o",
+                linestyle="-",
+                color=colors[idx],
+                label=f"S1 ρ{idx + 1}",
+            )
+            plotted = True
+        if any(not math.isnan(v) for v in s2_values):
+            ax.plot(
+                x,
+                s2_values,
+                marker="s",
+                linestyle="--",
+                color=colors[idx],
+                label=f"S2 ρ{idx + 1}",
+            )
+            plotted = True
+
+    ax.set_title("Correlation spectrum and participation ratio")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Correlation eigenvalue")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=45, ha="right")
+    ax.grid(True, alpha=0.3)
+
+    handles1, labels1 = ax.get_legend_handles_labels()
+
+    if has_pr_s1 or has_pr_s2:
+        ax2 = ax.twinx()
+        ax2.set_ylabel("Correlation PR")
+        ax2.grid(False)
+        if has_pr_s1:
+            ax2.plot(
+                x,
+                corr_pr_s1,
+                marker="^",
+                linestyle="-.",
+                color="#2ca02c",
+                label="S1 Corr PR",
+            )
+        if has_pr_s2:
+            ax2.plot(
+                x,
+                corr_pr_s2,
+                marker="v",
+                linestyle=":",
+                color="#d62728",
+                label="S2 Corr PR",
+            )
+        handles2, labels2 = ax2.get_legend_handles_labels()
+    else:
+        handles2, labels2 = [], []
+
+    if plotted or handles2:
+        ax.legend(handles1 + handles2, labels1 + labels2, loc="upper right", fontsize="small")
+    else:
+        _mark_axis_no_data(ax, "Correlation spectrum and participation ratio")
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=45, ha="right")
+        ax.set_xlabel("Epoch")
+
+
+def _plot_cca_panel(
+    ax,
+    metrics: Sequence[EpochMetrics],
+    *,
+    top_k: int,
+) -> None:
+    x = [m.epoch_index for m in metrics]
+    labels = [m.label for m in metrics]
+
+    spectra = [m.cca_spectrum for m in metrics]
+    max_dims = max((spec.size for spec in spectra if spec is not None), default=0)
+
+    if max_dims == 0:
+        _mark_axis_no_data(ax, "CCA canonical correlations")
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=45, ha="right")
+        ax.set_xlabel("Epoch")
+        return
+
+    requested_top_k = top_k
+    if top_k <= 0 or top_k > max_dims:
+        top_k = max_dims
+
+    colors = plt.cm.magma(np.linspace(0.2, 0.95, top_k))
+    plotted = False
+    for idx in range(top_k):
+        values: List[float] = []
+        for spec in spectra:
+            if spec is None or spec.size <= idx:
+                values.append(math.nan)
+            else:
+                values.append(float(spec[idx]))
+        if any(not math.isnan(v) for v in values):
+            ax.plot(
+                x,
+                values,
+                marker="o",
+                linestyle="-",
+                color=colors[idx],
+                label=f"ρ{idx + 1}",
+            )
+            plotted = True
+
+    topk_mean = _extract_metric_series(metrics, "cca_rho_topk_mean")
+    if any(not math.isnan(v) for v in topk_mean):
+        if requested_top_k <= 0 or requested_top_k > max_dims:
+            mean_label = "Mean (all)"
+        else:
+            mean_label = f"Mean top-{requested_top_k}"
+        ax.plot(
+            x,
+            topk_mean,
+            marker="s",
+            linestyle="--",
+            color="black",
+            label=mean_label,
+        )
+        plotted = True
+
+    if not plotted:
+        _mark_axis_no_data(ax, "CCA canonical correlations")
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=45, ha="right")
+        ax.set_xlabel("Epoch")
+        return
+
+    ax.set_title("CCA canonical correlations")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Canonical correlation")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=45, ha="right")
+    ax.set_ylim(0.0, 1.05)
+    ax.grid(True, alpha=0.3)
+
+    handles, legend_labels = ax.get_legend_handles_labels()
+    if handles:
+        ax.legend(handles, legend_labels, ncol=2, fontsize="small")
+
+
 def plot_vc_timeseries(
     metrics: Sequence[EpochMetrics],
     output_dir: Path,
     *,
     vc_gamma: float,
+    spectrum_top_k: int,
+    cca_top_k: int,
 ) -> None:
     if not metrics:
         return
 
-    specs = [
-        {
-            "attr_s1": "s1_std_min",
-            "attr_s2": "s2_std_min",
-            "title": "Minimum per-dimension std. deviation",
-            "ylabel": "Std. deviation",
-            "reference": (vc_gamma, r"γ"),
-        },
-        {
-            "attr_s1": "s1_std_diff",
-            "attr_s2": "s2_std_diff",
-            "title": "Std. deviation minus γ",
-            "ylabel": "Δ std",
-            "reference": (0.0, None),
-        },
-        {
-            "attr_s1": "s1_cov_fro",
-            "attr_s2": "s2_cov_fro",
-            "title": "Off-diagonal covariance Frobenius norm",
-            "ylabel": "‖Cov_off‖₍fro₎",
-            "reference": None,
-        },
-        {
-            "attr_s1": "s1_participation_ratio",
-            "attr_s2": "s2_participation_ratio",
-            "title": "Covariance participation ratio",
-            "ylabel": "Participation ratio",
-            "reference": None,
-        },
-    ]
-
-    fig, axes = plt.subplots(2, 2, figsize=(14, 9))
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
     axes_list = axes.flatten()
 
-    for ax, spec in zip(axes_list, specs):
-        _plot_vc_timeseries_panel(ax, metrics, **spec)
+    _plot_vc_timeseries_panel(
+        axes_list[0],
+        metrics,
+        attr_s1="s1_std_min",
+        attr_s2="s2_std_min",
+        title="Minimum per-dimension std. deviation",
+        ylabel="Std. deviation",
+        reference=(vc_gamma, r"γ"),
+    )
+    _plot_vc_timeseries_panel(
+        axes_list[1],
+        metrics,
+        attr_s1="s1_cov_fro",
+        attr_s2="s2_cov_fro",
+        title="Off-diagonal covariance Frobenius norm",
+        ylabel="‖Cov_off‖₍fro₎",
+        reference=None,
+    )
+    _plot_vc_timeseries_panel(
+        axes_list[2],
+        metrics,
+        attr_s1="s1_participation_ratio",
+        attr_s2="s2_participation_ratio",
+        title="Covariance participation ratio",
+        ylabel="Participation ratio",
+        reference=None,
+    )
 
-    for ax in axes_list[len(specs) :]:
-        fig.delaxes(ax)
+    if spectrum_top_k > 0:
+        cov_title = f"Covariance spectrum (top {spectrum_top_k})"
+    else:
+        cov_title = "Covariance spectrum (all)"
 
-    fig.suptitle("Variance-covariance diagnostics across epochs")
+    _plot_spectrum_panel(
+        axes_list[3],
+        metrics,
+        attr_s1="s1_spectrum",
+        attr_s2="s2_spectrum",
+        title=cov_title,
+        ylabel="Eigenvalue",
+        top_k=spectrum_top_k,
+        log_scale=True,
+    )
+    _plot_correlation_panel(
+        axes_list[4],
+        metrics,
+        top_k=spectrum_top_k,
+    )
+    _plot_cca_panel(
+        axes_list[5],
+        metrics,
+        top_k=cca_top_k,
+    )
+
+    fig.suptitle("Variance, correlation, and CCA diagnostics across epochs")
     fig.tight_layout(rect=[0, 0, 1, 0.97])
     fig.savefig(output_dir / "vc_metrics_timeseries.png", dpi=200)
     plt.close(fig)
@@ -1049,9 +1535,10 @@ def plot_epoch_dashboards(
 
         def _format_line(modality: str) -> str:
             std_min = getattr(metric, f"{modality}_std_min")
-            std_diff = getattr(metric, f"{modality}_std_diff")
             cov_fro = getattr(metric, f"{modality}_cov_fro")
             participation = getattr(metric, f"{modality}_participation_ratio")
+            corr_pr = getattr(metric, f"{modality}_corr_participation_ratio")
+            corr_entropy = getattr(metric, f"{modality}_corr_spectral_entropy")
 
             def _fmt(value: Optional[float], fmt: str) -> str:
                 if value is None:
@@ -1063,9 +1550,10 @@ def plot_epoch_dashboards(
 
             return (
                 f"{modality.upper()} std_min={_fmt(std_min, '.4f')}, "
-                f"Δγ={_fmt(std_diff, '.4f')}, "
                 f"‖Cov_off‖={_fmt(cov_fro, '.2e')}, "
-                f"PR={_fmt(participation, '.2f')}"
+                f"CovPR={_fmt(participation, '.2f')}, "
+                f"CorrPR={_fmt(corr_pr, '.2f')}, "
+                f"CorrH={_fmt(corr_entropy, '.3f')}"
             )
 
         fig.suptitle(
@@ -1420,20 +1908,6 @@ def export_metrics(metrics: Sequence[EpochMetrics], output_dir: Path) -> None:
     with (output_dir / "metrics_summary.json").open("w") as handle:
         json.dump(summary, handle, indent=2)
 
-    s1_var = {m.label: m.s1_variance for m in metrics if m.s1_variance is not None}
-    s2_var = {m.label: m.s2_variance for m in metrics if m.s2_variance is not None}
-    s1_spec = {m.label: m.s1_spectrum for m in metrics if m.s1_spectrum is not None}
-    s2_spec = {m.label: m.s2_spectrum for m in metrics if m.s2_spectrum is not None}
-
-    if s1_var:
-        np.savez(output_dir / "s1_variance.npz", **s1_var)
-    if s2_var:
-        np.savez(output_dir / "s2_variance.npz", **s2_var)
-    if s1_spec:
-        np.savez(output_dir / "s1_spectrum.npz", **s1_spec)
-    if s2_spec:
-        np.savez(output_dir / "s2_spectrum.npz", **s2_spec)
-
 
 def _csv_value(value: Optional[float]):
     if value is None:
@@ -1444,22 +1918,32 @@ def _csv_value(value: Optional[float]):
     return value_float
 
 
-def export_vc_metrics_csv(metrics: Sequence[EpochMetrics], output_dir: Path) -> None:
+def export_vc_metrics_csv(
+    metrics: Sequence[EpochMetrics],
+    output_dir: Path,
+    *,
+    cca_top_k: int,
+) -> None:
     if not metrics:
         return
 
+    cca_label = f"cca_rho_mean_top_{cca_top_k}" if cca_top_k > 0 else "cca_rho_mean_top_all"
     fieldnames = [
         "epoch_index",
         "label",
         "sample_count",
         "vc_std_min_s1",
         "vc_std_min_s2",
-        "vc_std_diff_s1",
-        "vc_std_diff_s2",
         "vc_cov_fro_s1",
         "vc_cov_fro_s2",
         "vc_participation_ratio_s1",
         "vc_participation_ratio_s2",
+        "corr_participation_ratio_s1",
+        "corr_participation_ratio_s2",
+        "corr_spectral_entropy_s1",
+        "corr_spectral_entropy_s2",
+        "cca_rho_max",
+        cca_label,
     ]
 
     with (output_dir / "vc_metrics.csv").open("w", newline="") as handle:
@@ -1473,12 +1957,16 @@ def export_vc_metrics_csv(metrics: Sequence[EpochMetrics], output_dir: Path) -> 
                     "sample_count": metric.sample_count,
                     "vc_std_min_s1": _csv_value(metric.s1_std_min),
                     "vc_std_min_s2": _csv_value(metric.s2_std_min),
-                    "vc_std_diff_s1": _csv_value(metric.s1_std_diff),
-                    "vc_std_diff_s2": _csv_value(metric.s2_std_diff),
                     "vc_cov_fro_s1": _csv_value(metric.s1_cov_fro),
                     "vc_cov_fro_s2": _csv_value(metric.s2_cov_fro),
                     "vc_participation_ratio_s1": _csv_value(metric.s1_participation_ratio),
                     "vc_participation_ratio_s2": _csv_value(metric.s2_participation_ratio),
+                    "corr_participation_ratio_s1": _csv_value(metric.s1_corr_participation_ratio),
+                    "corr_participation_ratio_s2": _csv_value(metric.s2_corr_participation_ratio),
+                    "corr_spectral_entropy_s1": _csv_value(metric.s1_corr_spectral_entropy),
+                    "corr_spectral_entropy_s2": _csv_value(metric.s2_corr_spectral_entropy),
+                    "cca_rho_max": _csv_value(metric.cca_rho_max),
+                    cca_label: _csv_value(metric.cca_rho_topk_mean),
                 }
             )
 
@@ -1584,6 +2072,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--random-seed", type=int, default=42, help="Random seed for sampling")
     parser.add_argument("--spectrum-top-k", type=int, default=10, help="Number of leading eigenvalues to plot")
+    parser.add_argument(
+        "--cca-top-k",
+        type=int,
+        default=5,
+        help="Number of leading canonical correlations to track (0 = all available)",
+    )
     parser.add_argument(
         "--linear-probe-csv",
         type=Path,
@@ -1711,22 +2205,30 @@ def main() -> None:
 
     _LOGGER.info("Using VC γ target of %.4f (%s)", vc_gamma, gamma_source)
 
+    cca_top_k = max(0, int(args.cca_top_k))
+
     metrics = compute_epoch_metrics(
         epochs,
         negative_samples=args.negative_samples,
         random_seed=args.random_seed,
-        vc_gamma=vc_gamma,
+        cca_top_k=cca_top_k,
     )
 
     export_metrics(metrics, output_dir)
-    export_vc_metrics_csv(metrics, output_dir)
+    export_vc_metrics_csv(metrics, output_dir, cca_top_k=cca_top_k)
     plot_cosine_summary(metrics, output_dir)
     plot_cosine_histograms(metrics, output_dir, bins=args.cosine_hist_bins)
     plot_variance_heatmap(metrics, output_dir, modality="s1")
     plot_variance_heatmap(metrics, output_dir, modality="s2")
     plot_spectrum(metrics, output_dir, modality="s1", top_k=args.spectrum_top_k)
     plot_spectrum(metrics, output_dir, modality="s2", top_k=args.spectrum_top_k)
-    plot_vc_timeseries(metrics, output_dir, vc_gamma=vc_gamma)
+    plot_vc_timeseries(
+        metrics,
+        output_dir,
+        vc_gamma=vc_gamma,
+        spectrum_top_k=args.spectrum_top_k,
+        cca_top_k=cca_top_k,
+    )
     plot_epoch_dashboards(
         metrics,
         output_dir,
