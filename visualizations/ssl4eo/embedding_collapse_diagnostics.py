@@ -118,6 +118,10 @@ class EpochMetrics:
     s2_variance: Optional[np.ndarray] = None
     s1_spectrum: Optional[np.ndarray] = None
     s2_spectrum: Optional[np.ndarray] = None
+    s1_singular_values: Optional[np.ndarray] = None
+    s2_singular_values: Optional[np.ndarray] = None
+    s1_pre_singular_values: Optional[np.ndarray] = None
+    s2_pre_singular_values: Optional[np.ndarray] = None
     s1_condition_number: Optional[float] = None
     s2_condition_number: Optional[float] = None
     s1_std_min: Optional[float] = None
@@ -726,6 +730,28 @@ def compute_covariance(tensor: torch.Tensor) -> Optional[torch.Tensor]:
     return cov
 
 
+def compute_singular_values(features: torch.Tensor) -> Optional[np.ndarray]:
+    """Return singular values for ``features`` after mean-centering."""
+
+    if features.dim() != 2:
+        return None
+    batch, dims = features.shape
+    if batch < 2 or dims < 1:
+        return None
+
+    feats = features.to(torch.float64)
+    feats = feats - feats.mean(dim=0, keepdim=True)
+
+    try:
+        singular = torch.linalg.svdvals(feats)
+    except RuntimeError:
+        return None
+
+    if singular.numel() == 0:
+        return None
+    return singular.cpu().numpy()
+
+
 def compute_vc_geometry(
     features: torch.Tensor,
     eps: float = 1e-12,
@@ -951,6 +977,8 @@ def compute_epoch_metrics(
         metrics = EpochMetrics(label=epoch.label, epoch_index=epoch.epoch_index, sample_count=sample_count)
         metrics.s1_variance = s1_var
         metrics.s2_variance = s2_var
+        metrics.s1_singular_values = compute_singular_values(s1_tensor)
+        metrics.s2_singular_values = compute_singular_values(s2_tensor)
 
         cov_s1 = compute_covariance(s1_tensor)
         cov_s2 = compute_covariance(s2_tensor)
@@ -985,6 +1013,7 @@ def compute_epoch_metrics(
 
         if epoch.s1_pre_projection is not None:
             s1_pre_tensor = epoch.s1_pre_projection.to(dtype=torch.float32)
+            metrics.s1_pre_singular_values = compute_singular_values(s1_pre_tensor)
             (
                 s1_pre_std_min,
                 s1_pre_cov_fro,
@@ -1003,6 +1032,7 @@ def compute_epoch_metrics(
 
         if epoch.s2_pre_projection is not None:
             s2_pre_tensor = epoch.s2_pre_projection.to(dtype=torch.float32)
+            metrics.s2_pre_singular_values = compute_singular_values(s2_pre_tensor)
             (
                 s2_pre_std_min,
                 s2_pre_cov_fro,
@@ -1259,22 +1289,32 @@ def _plot_spectrum_panel(
     ax,
     metrics: Sequence[EpochMetrics],
     *,
-    attr_s1: str,
-    attr_s2: str,
+    attr_s1: Optional[str] = None,
+    attr_s2: Optional[str] = None,
+    attr_s1_pre: Optional[str] = None,
+    attr_s2_pre: Optional[str] = None,
     title: str,
     ylabel: str,
     top_k: int,
     log_scale: bool,
+    component_symbol: str = "λ",
 ) -> None:
     x = [m.epoch_index for m in metrics]
     labels = [m.label for m in metrics]
 
-    spectra_s1 = [getattr(m, attr_s1) for m in metrics]
-    spectra_s2 = [getattr(m, attr_s2) for m in metrics]
+    def _collect(attr: Optional[str]) -> List[Optional[np.ndarray]]:
+        if attr is None:
+            return [None for _ in metrics]
+        return [getattr(m, attr) for m in metrics]
+
+    spectra_s1 = _collect(attr_s1)
+    spectra_s2 = _collect(attr_s2)
+    spectra_s1_pre = _collect(attr_s1_pre)
+    spectra_s2_pre = _collect(attr_s2_pre)
     max_dims = max(
         [
             max((spec.size for spec in spectra if spec is not None), default=0)
-            for spectra in (spectra_s1, spectra_s2)
+            for spectra in (spectra_s1, spectra_s2, spectra_s1_pre, spectra_s2_pre)
         ]
     )
 
@@ -1293,6 +1333,8 @@ def _plot_spectrum_panel(
     for idx in range(top_k):
         s1_values: List[float] = []
         s2_values: List[float] = []
+        s1_pre_values: List[float] = []
+        s2_pre_values: List[float] = []
         for spec in spectra_s1:
             if spec is None or spec.size <= idx:
                 s1_values.append(math.nan)
@@ -1311,6 +1353,24 @@ def _plot_spectrum_panel(
                     s2_values.append(math.nan)
                 else:
                     s2_values.append(value)
+        for spec in spectra_s1_pre:
+            if spec is None or spec.size <= idx:
+                s1_pre_values.append(math.nan)
+            else:
+                value = float(spec[idx])
+                if log_scale and value <= 0:
+                    s1_pre_values.append(math.nan)
+                else:
+                    s1_pre_values.append(value)
+        for spec in spectra_s2_pre:
+            if spec is None or spec.size <= idx:
+                s2_pre_values.append(math.nan)
+            else:
+                value = float(spec[idx])
+                if log_scale and value <= 0:
+                    s2_pre_values.append(math.nan)
+                else:
+                    s2_pre_values.append(value)
 
         if any(not math.isnan(v) for v in s1_values):
             ax.plot(
@@ -1319,7 +1379,18 @@ def _plot_spectrum_panel(
                 marker="o",
                 linestyle="-",
                 color=colors[idx],
-                label=f"S1 λ{idx + 1}",
+                label=f"S1 post {component_symbol}{idx + 1}",
+            )
+            plotted = True
+        if any(not math.isnan(v) for v in s1_pre_values):
+            ax.plot(
+                x,
+                s1_pre_values,
+                marker="o",
+                linestyle="--",
+                color=colors[idx],
+                alpha=0.8,
+                label=f"S1 pre {component_symbol}{idx + 1}",
             )
             plotted = True
         if any(not math.isnan(v) for v in s2_values):
@@ -1329,7 +1400,18 @@ def _plot_spectrum_panel(
                 marker="s",
                 linestyle="--",
                 color=colors[idx],
-                label=f"S2 λ{idx + 1}",
+                label=f"S2 post {component_symbol}{idx + 1}",
+            )
+            plotted = True
+        if any(not math.isnan(v) for v in s2_pre_values):
+            ax.plot(
+                x,
+                s2_pre_values,
+                marker="s",
+                linestyle=":",
+                color=colors[idx],
+                alpha=0.8,
+                label=f"S2 pre {component_symbol}{idx + 1}",
             )
             plotted = True
 
@@ -1698,6 +1780,50 @@ def plot_vc_timeseries(
     fig.savefig(output_dir / "vc_metrics_timeseries.png", dpi=200)
     plt.close(fig)
 
+
+def plot_singular_value_timeseries(
+    metrics: Sequence[EpochMetrics],
+    output_dir: Path,
+    *,
+    top_k: int,
+) -> None:
+    """Plot singular value trajectories for pre/post-projection features."""
+
+    if not metrics:
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+
+    _plot_spectrum_panel(
+        axes[0],
+        metrics,
+        attr_s1="s1_singular_values",
+        attr_s1_pre="s1_pre_singular_values",
+        title="S1 singular values (pre vs. post)",
+        ylabel="Singular value",
+        top_k=top_k,
+        log_scale=True,
+        component_symbol="σ",
+    )
+
+    _plot_spectrum_panel(
+        axes[1],
+        metrics,
+        attr_s2="s2_singular_values",
+        attr_s2_pre="s2_pre_singular_values",
+        title="S2 singular values (pre vs. post)",
+        ylabel="Singular value",
+        top_k=top_k,
+        log_scale=True,
+        component_symbol="σ",
+    )
+
+    fig.suptitle("Singular values across epochs")
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    fig.savefig(output_dir / "singular_values_timeseries.png", dpi=200)
+    plt.close(fig)
+
+
 def plot_spectrum(
     metrics: Sequence[EpochMetrics],
     output_dir: Path,
@@ -1927,6 +2053,98 @@ def plot_epoch_dashboards(
         safe_label = _sanitize_label(metric.label)
         filename = output_dir / f"epoch_{metric.epoch_index:04d}_{safe_label}_diagnostics.png"
         fig.savefig(filename, dpi=200)
+        plt.close(fig)
+
+
+
+def _plot_epoch_svd_panel(
+    ax,
+    *,
+    post: Optional[np.ndarray],
+    pre: Optional[np.ndarray],
+    top_k: int,
+    title: str,
+    post_color: str,
+    pre_color: str,
+) -> None:
+    if post is None and pre is None:
+        _mark_axis_no_data(ax, title)
+        return
+
+    lengths = [len(arr) for arr in (post, pre) if arr is not None]
+    if not lengths:
+        _mark_axis_no_data(ax, title)
+        return
+
+    max_len = max(lengths)
+    take = max_len if top_k <= 0 else min(top_k, max_len)
+    dims = np.arange(1, take + 1)
+
+    if post is not None and post.size:
+        ax.plot(
+            dims,
+            post[:take],
+            marker="o",
+            linestyle="-",
+            color=post_color,
+            label="Post projection",
+        )
+    if pre is not None and pre.size:
+        ax.plot(
+            dims,
+            pre[:take],
+            marker="s",
+            linestyle="--",
+            color=pre_color,
+            label="Pre projection",
+        )
+
+    ax.set_title(title)
+    ax.set_xlabel("Component")
+    ax.set_ylabel("Singular value")
+    ax.set_yscale("log")
+    ax.grid(True, which="both", alpha=0.3)
+    handles, labels = ax.get_legend_handles_labels()
+    if handles:
+        ax.legend(handles, labels)
+
+
+def plot_epoch_singular_values(
+    metrics: Sequence[EpochMetrics],
+    output_dir: Path,
+    *,
+    top_k: int,
+) -> None:
+    '''Write per-epoch singular value comparisons for pre/post features.'''
+
+    for metric in metrics:
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        fig.suptitle(f"Singular values — {metric.label}")
+
+        _plot_epoch_svd_panel(
+            axes[0],
+            post=metric.s1_singular_values,
+            pre=metric.s1_pre_singular_values,
+            top_k=top_k,
+            title="S1 singular values",
+            post_color="#2ca02c",
+            pre_color="#98df8a",
+        )
+
+        _plot_epoch_svd_panel(
+            axes[1],
+            post=metric.s2_singular_values,
+            pre=metric.s2_pre_singular_values,
+            top_k=top_k,
+            title="S2 singular values",
+            post_color="#17becf",
+            pre_color="#9edae5",
+        )
+
+        fig.tight_layout(rect=[0, 0, 1, 0.94])
+        safe_label = _sanitize_label(metric.label)
+        output_path = output_dir / f"epoch_{metric.epoch_index:04d}_{safe_label}_singular_values.png"
+        fig.savefig(output_path, dpi=200)
         plt.close(fig)
 
 
@@ -2498,11 +2716,21 @@ def main() -> None:
         spectrum_top_k=args.spectrum_top_k,
         cca_top_k=cca_top_k,
     )
+    plot_singular_value_timeseries(
+        metrics,
+        output_dir,
+        top_k=args.spectrum_top_k,
+    )
     plot_epoch_dashboards(
         metrics,
         output_dir,
         cosine_bins=args.cosine_hist_bins,
         spectrum_top_k=args.spectrum_top_k,
+    )
+    plot_epoch_singular_values(
+        metrics,
+        output_dir,
+        top_k=args.spectrum_top_k,
     )
     
 
