@@ -73,6 +73,10 @@ class CiipLoss(nn.Module):
             rank=0,
             world_size=1,
             use_horovod=False,
+            vc_reg_enabled=False,
+            vc_weight=0.0,
+            vc_gamma=1.0,
+            vc_covariance_weights=None,
     ):
         super().__init__()
         self.local_loss = local_loss
@@ -82,9 +86,41 @@ class CiipLoss(nn.Module):
         self.world_size = world_size
         self.use_horovod = use_horovod
 
+        self.vc_reg_enabled = vc_reg_enabled
+        self.vc_weight = vc_weight
+        self.vc_gamma = vc_gamma
+
+        if vc_covariance_weights is None:
+            self.vc_covariance_weights = (1.0, 1.0)
+        else:
+            if isinstance(vc_covariance_weights, torch.Tensor):
+                vc_covariance_weights = vc_covariance_weights.tolist()
+            if not isinstance(vc_covariance_weights, (list, tuple)):
+                vc_covariance_weights = [float(vc_covariance_weights)]
+            if len(vc_covariance_weights) == 1:
+                vc_covariance_weights = [vc_covariance_weights[0], vc_covariance_weights[0]]
+            elif len(vc_covariance_weights) >= 2:
+                vc_covariance_weights = vc_covariance_weights[:2]
+            self.vc_covariance_weights = tuple(float(w) for w in vc_covariance_weights)
+
         # cache state
         self.prev_num_logits = 0
         self.labels = {}
+
+    def _variance_regularizer(self, features: torch.Tensor) -> torch.Tensor:
+        if features.ndim != 2 or features.shape[0] <= 1:
+            return torch.zeros((), device=features.device, dtype=features.dtype)
+        variances = torch.var(features, dim=0, unbiased=False)
+        std = torch.sqrt(variances + 1e-4)
+        return torch.mean(F.relu(self.vc_gamma - std))
+
+    def _covariance_regularizer(self, features: torch.Tensor) -> torch.Tensor:
+        if features.ndim != 2 or features.shape[0] <= 1:
+            return torch.zeros((), device=features.device, dtype=features.dtype)
+        features = features - features.mean(dim=0)
+        cov = features.T @ features / (features.shape[0] - 1)
+        cov = cov - torch.diag(torch.diagonal(cov))
+        return cov.pow(2).sum() / cov.shape[0]
 
     def get_ground_truth(self, device, num_logits) -> torch.Tensor:
         # calculated ground-truth and cache if enabled
@@ -99,7 +135,14 @@ class CiipLoss(nn.Module):
             labels = self.labels[device]
         return labels
 
-    def get_logits(self, s1_features, s2_features, logit_scale, logit_bias=None):
+    def get_logits(
+            self,
+            s1_features,
+            s2_features,
+            logit_scale,
+            logit_bias=None,
+            return_gathered=False,
+    ):
         if self.world_size > 1:
             all_s1_features, all_s2_features = gather_features(
                 s1_features, s2_features,
@@ -114,25 +157,95 @@ class CiipLoss(nn.Module):
         else:
             logits_per_s1 = logit_scale * s1_features @ s2_features.T
             logits_per_s2 = logit_scale * s2_features @ s1_features.T
+            all_s1_features = s1_features
+            all_s2_features = s2_features
 
         if logit_bias is not None:
-            logits_per_image += logit_bias
-            logits_per_text += logit_bias
-        
+            logits_per_s1 += logit_bias
+            logits_per_s2 += logit_bias
+
+        if return_gathered:
+            return logits_per_s1, logits_per_s2, all_s1_features, all_s2_features
+
         return logits_per_s1, logits_per_s2
 
-    def forward(self, s1_features, s2_features, logit_scale, logit_bias=None, output_dict=False):
+    def forward(
+            self,
+            s1_features,
+            s2_features,
+            logit_scale,
+            logit_bias=None,
+            output_dict=False,
+            s1_features_vc=None,
+            s2_features_vc=None,
+            **kwargs,
+    ):
         device = s1_features.device
-        logits_per_s1, logits_per_s2 = self.get_logits(s1_features, s2_features, logit_scale, logit_bias=logit_bias,)
+        need_vc = self.vc_reg_enabled and self.vc_weight != 0
+        gather_for_vc = need_vc and self.world_size > 1
+        logits_outputs = self.get_logits(
+            s1_features,
+            s2_features,
+            logit_scale,
+            logit_bias=logit_bias,
+            return_gathered=gather_for_vc,
+        )
+        if gather_for_vc:
+            logits_per_s1, logits_per_s2, gathered_s1_features, gathered_s2_features = logits_outputs
+        else:
+            logits_per_s1, logits_per_s2 = logits_outputs
+            gathered_s1_features = None
+            gathered_s2_features = None
 
         labels = self.get_ground_truth(device, logits_per_s1.shape[0])
 
-        total_loss = (
+        contrastive_loss = (
             F.cross_entropy(logits_per_s1, labels) +
             F.cross_entropy(logits_per_s2, labels)
         ) / 2
 
-        return {"contrastive_loss": total_loss} if output_dict else total_loss
+        losses = {"contrastive_loss": contrastive_loss}
+
+        if need_vc:
+            s1_vc_local = s1_features_vc if s1_features_vc is not None else s1_features
+            s2_vc_local = s2_features_vc if s2_features_vc is not None else s2_features
+
+            if self.world_size > 1:
+                reuse_info_nce_gather = (
+                    self.gather_with_grad and
+                    s1_features_vc is None and
+                    s2_features_vc is None and
+                    gathered_s1_features is not None and
+                    gathered_s2_features is not None
+                )
+                if reuse_info_nce_gather:
+                    s1_vc = gathered_s1_features
+                    s2_vc = gathered_s2_features
+                else:
+                    s1_vc, s2_vc = gather_features(
+                        s1_vc_local,
+                        s2_vc_local,
+                        self.local_loss,
+                        True,
+                        self.rank,
+                        self.world_size,
+                        self.use_horovod,
+                    )
+            else:
+                s1_vc = s1_vc_local
+                s2_vc = s2_vc_local
+
+            variance_loss = self._variance_regularizer(s1_vc) + self._variance_regularizer(s2_vc)
+            cov_w_s1, cov_w_s2 = self.vc_covariance_weights
+            covariance_loss = (
+                cov_w_s1 * self._covariance_regularizer(s1_vc) +
+                cov_w_s2 * self._covariance_regularizer(s2_vc)
+            )
+            vc_loss = self.vc_weight * (variance_loss + covariance_loss)
+            losses["vc_loss"] = vc_loss
+
+        total_loss = sum(losses.values())
+        return losses if output_dict else total_loss
 
 
 # class CoCaLoss(ClipLoss):

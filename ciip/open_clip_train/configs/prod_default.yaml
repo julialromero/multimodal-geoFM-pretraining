@@ -47,6 +47,14 @@ model:
 
 
 #TODO: loss params
+loss:
+  local_loss: True
+  gather_with_grad: True
+  cache_labels: True
+  vc_enabled: True
+  vc_weight: 0.4
+  vc_gamma: 1.0
+  vc_covariance_weights: [1.0, 1.0]
 
 datamodule:
   batch_size: 128 # BS per GPU
