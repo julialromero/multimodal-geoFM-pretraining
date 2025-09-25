@@ -349,17 +349,22 @@ class CIIP(nn.Module):
     #     return x
 
     def forward(self, s1, s2):
-        # returns normalized logits
-        s1_features = self.encode_s1(s1, normalize=True)
-        s2_features = self.encode_s2(s2, normalize=True)
+        # returns normalized logits along with the raw encoder outputs
+        s1_features_vc = self.encode_s1(s1, normalize=False)
+        s2_features_vc = self.encode_s2(s2, normalize=False)
+
+        s1_features = F.normalize(s1_features_vc, dim=-1)
+        s2_features = F.normalize(s2_features_vc, dim=-1)
 
         # # cosine similarity as logits
         logit_scale = self.logit_scale.exp()
 
- 
+
         out_dict = {
             "s1_features": s1_features,
             "s2_features": s2_features,
+            "s1_features_vc": s1_features_vc,
+            "s2_features_vc": s2_features_vc,
             "logit_scale": logit_scale
             }
 

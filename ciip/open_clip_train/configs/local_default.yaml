@@ -33,6 +33,14 @@ model:
   workers: 0
 
 #TODO: loss params
+loss:
+  local_loss: False
+  gather_with_grad: False
+  cache_labels: True
+  vc_enabled: False
+  vc_weight: 0.0
+  vc_gamma: 1.0
+  vc_covariance_weights: [1.0, 1.0]
 
 datamodule:
   batch_size: 20

@@ -583,7 +583,7 @@ def main(args: DictConfig, start_epoch=0):
         # evaluate(model, data, start_epoch, args, tb_writer=writer, tokenizer=tokenizer)
         # return
 
-    loss = create_loss(args.datamodule)
+    loss = create_loss(args)
 
     
     date_str = datetime.now().strftime("%Y_%m_%d-%H_%M")
