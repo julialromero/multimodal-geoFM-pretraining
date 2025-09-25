@@ -56,6 +56,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
+from matplotlib.backends.backend_pdf import PdfPages
 import numpy as np
 import torch
 import torch.nn as nn
@@ -1245,6 +1247,79 @@ def _extract_metric_series(metrics: Sequence[EpochMetrics], attr: str) -> List[f
     return values
 
 
+def _resolve_summary_pdf_dir(output_dir: Path) -> Path:
+    """Return the directory where experiment summary PDFs should be written."""
+
+    for candidate in (output_dir, *output_dir.parents):
+        if candidate.name == "diagnostics":
+            return candidate / "experiment-summary-pdfs"
+    return output_dir / "experiment-summary-pdfs"
+
+
+def generate_summary_pdf(
+    summary_plots: Sequence[Path],
+    *,
+    metrics: Sequence[EpochMetrics],
+    output_dir: Path,
+) -> Optional[Path]:
+    """Assemble ``summary_plots`` into a single PDF for quick review."""
+
+    if not metrics:
+        return None
+
+    existing_plots: List[Path] = []
+    for path in summary_plots:
+        if path is None:
+            continue
+        if path.exists():
+            existing_plots.append(path)
+        else:
+            _LOGGER.debug("Skipping missing summary plot %s", path)
+
+    if not existing_plots:
+        _LOGGER.warning("No summary plots found; skipping PDF generation")
+        return None
+
+    max_epoch_index = max((metric.epoch_index for metric in metrics), default=0)
+    model_name = output_dir.name or "experiment"
+
+    summary_dir = _resolve_summary_pdf_dir(output_dir)
+    summary_dir.mkdir(parents=True, exist_ok=True)
+    pdf_path = summary_dir / f"{model_name}-maxepochs-{max_epoch_index}.pdf"
+
+    with PdfPages(pdf_path) as pdf:
+        metadata = pdf.infodict()
+        metadata["Title"] = f"Embedding diagnostics summary — {model_name}"
+        metadata["Author"] = "embedding_collapse_diagnostics.py"
+        metadata["Subject"] = "Summary plots for embedding collapse diagnostics"
+
+        for image_path in existing_plots:
+            image = mpimg.imread(image_path)
+            height, width = image.shape[:2]
+            if height == 0 or width == 0:
+                _LOGGER.debug("Skipping empty image %s", image_path)
+                continue
+
+            aspect = width / height
+            base_size = 11
+            if aspect >= 1:
+                figsize = (base_size, max(base_size / aspect, 4))
+            else:
+                figsize = (max(base_size * aspect, 4), base_size)
+
+            fig, ax = plt.subplots(figsize=figsize)
+            fig.patch.set_facecolor("white")
+            ax.imshow(image)
+            ax.set_axis_off()
+            title = image_path.stem.replace("_", " ").title()
+            ax.set_title(title, fontsize=12, pad=12)
+            pdf.savefig(fig, bbox_inches="tight")
+            plt.close(fig)
+
+    _LOGGER.info("Wrote summary PDF to %s", pdf_path)
+    return pdf_path
+
+
 def _plot_vc_timeseries_panel(
     ax,
     metrics: Sequence[EpochMetrics],
@@ -1256,24 +1331,32 @@ def _plot_vc_timeseries_panel(
     title: str,
     ylabel: str,
     reference: Optional[Tuple[float, Optional[str]]] = None,
+    use_dual_y: bool = False,
+    secondary_ylabel: Optional[str] = None,
 ) -> None:
     x = [m.epoch_index for m in metrics]
     labels = [m.label for m in metrics]
     series_plotted = False
 
+    if use_dual_y:
+        secondary_ax = ax.twinx()
+        secondary_ax.grid(False)
+    else:
+        secondary_ax = None
+
     series_definitions = [
-        (attr_s1, "S1 (post)", "o", "-", "#2ca02c"),
-        (attr_s1_pre, "S1 (pre)", "o", "--", "#2ca02c"),
-        (attr_s2, "S2 (post)", "s", "-", "#17becf"),
-        (attr_s2_pre, "S2 (pre)", "s", "--", "#17becf"),
+        (attr_s1, "S1 (post)", "o", "-", "#2ca02c", ax),
+        (attr_s2, "S2 (post)", "s", "-", "#17becf", ax),
+        (attr_s1_pre, "S1 (pre)", "o", "--", "#98df8a", secondary_ax if use_dual_y else ax),
+        (attr_s2_pre, "S2 (pre)", "s", "--", "#9edae5", secondary_ax if use_dual_y else ax),
     ]
 
-    for attr, label, marker, linestyle, color in series_definitions:
-        if attr is None:
+    for attr, label, marker, linestyle, color, target_ax in series_definitions:
+        if attr is None or target_ax is None:
             continue
         values = _extract_metric_series(metrics, attr)
         if any(not math.isnan(v) for v in values):
-            ax.plot(x, values, marker=marker, linestyle=linestyle, color=color, label=label)
+            target_ax.plot(x, values, marker=marker, linestyle=linestyle, color=color, label=label)
             series_plotted = True
 
     if not series_plotted:
@@ -1281,6 +1364,8 @@ def _plot_vc_timeseries_panel(
         ax.set_xticks(x)
         ax.set_xticklabels(labels, rotation=45, ha="right")
         ax.set_xlabel("Epoch")
+        if use_dual_y and secondary_ax is not None:
+            secondary_ax.set_yticks([])
         return
 
     if reference is not None:
@@ -1294,15 +1379,28 @@ def _plot_vc_timeseries_panel(
 
     ax.set_title(title)
     ax.set_xlabel("Epoch")
-    ax.set_ylabel(ylabel)
+    ax.set_ylabel(ylabel if not use_dual_y else f"{ylabel} (post)")
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=45, ha="right")
     ax.grid(True, alpha=0.3)
 
-    handles, legends = ax.get_legend_handles_labels()
-    filtered = [(h, l) for h, l in zip(handles, legends) if l != "_nolegend_"]
-    if filtered:
-        handles, legends = zip(*filtered)
+    if use_dual_y and secondary_ax is not None:
+        if secondary_ylabel is None:
+            secondary_ylabel = f"{ylabel} (pre)"
+        secondary_ax.set_ylabel(secondary_ylabel)
+
+    handles = []
+    legends = []
+
+    for axis in filter(None, (ax, secondary_ax)):
+        axis_handles, axis_legends = axis.get_legend_handles_labels()
+        filtered = [(h, l) for h, l in zip(axis_handles, axis_legends) if l != "_nolegend_"]
+        for handle, label in filtered:
+            if label not in legends:
+                handles.append(handle)
+                legends.append(label)
+
+    if handles:
         ax.legend(handles, legends)
 
 
@@ -1757,6 +1855,8 @@ def plot_vc_timeseries(
         title="Off-diagonal covariance Frobenius norm",
         ylabel="‖Cov_off‖₍fro₎",
         reference=None,
+        use_dual_y=True,
+        secondary_ylabel="‖Cov_off‖₍fro₎ (pre)",
     )
     _plot_vc_timeseries_panel(
         axes_list[2],
@@ -2724,14 +2824,30 @@ def main() -> None:
         cca_top_k=cca_top_k,
     )
 
+    summary_plot_paths: List[Path] = []
     export_metrics(metrics, output_dir)
     export_vc_metrics_csv(metrics, output_dir, cca_top_k=cca_top_k)
     plot_cosine_summary(metrics, output_dir)
+    summary_plot_paths.append(output_dir / "cosine_similarity_summary.png")
     plot_cosine_histograms(metrics, output_dir, bins=args.cosine_hist_bins)
     plot_variance_heatmap(metrics, output_dir, modality="s1")
+    summary_plot_paths.extend(
+        [
+            output_dir / "s1_variance_heatmap.png",
+            output_dir / "s1_variance_summary.png",
+        ]
+    )
     plot_variance_heatmap(metrics, output_dir, modality="s2")
+    summary_plot_paths.extend(
+        [
+            output_dir / "s2_variance_heatmap.png",
+            output_dir / "s2_variance_summary.png",
+        ]
+    )
     plot_spectrum(metrics, output_dir, modality="s1", top_k=args.spectrum_top_k)
+    summary_plot_paths.append(output_dir / "s1_spectrum.png")
     plot_spectrum(metrics, output_dir, modality="s2", top_k=args.spectrum_top_k)
+    summary_plot_paths.append(output_dir / "s2_spectrum.png")
     plot_vc_timeseries(
         metrics,
         output_dir,
@@ -2739,11 +2855,13 @@ def main() -> None:
         spectrum_top_k=args.spectrum_top_k,
         cca_top_k=cca_top_k,
     )
+    summary_plot_paths.append(output_dir / "vc_metrics_timeseries.png")
     plot_singular_value_timeseries(
         metrics,
         output_dir,
         top_k=args.spectrum_top_k,
     )
+    summary_plot_paths.append(output_dir / "singular_values_timeseries.png")
     plot_epoch_dashboards(
         metrics,
         output_dir,
@@ -2765,6 +2883,7 @@ def main() -> None:
             k_value=args.linear_probe_k,
         )
         plot_linear_probe_curve(linear_probe, output_dir, metric=args.linear_probe_metric)
+        summary_plot_paths.append(output_dir / f"linear_probe_{args.linear_probe_metric}.png")
 
     np_gen = np.random.default_rng(args.random_seed)
     if args.tsne_samples > 0:
@@ -2792,7 +2911,9 @@ def main() -> None:
             tsne_panels.append((epoch.label, coords, labels))
 
         if tsne_panels:
-            plot_projection_grid(tsne_panels, output_dir / "tsne_epochs.png", method="t-SNE")
+            tsne_path = output_dir / "tsne_epochs.png"
+            plot_projection_grid(tsne_panels, tsne_path, method="t-SNE")
+            summary_plot_paths.append(tsne_path)
         else:
             _LOGGER.warning("Skipping t-SNE projections (insufficient data)")
 
@@ -2823,12 +2944,16 @@ def main() -> None:
                 umap_panels.append((epoch.label, coords, labels))
 
             if umap_panels:
-                plot_projection_grid(umap_panels, output_dir / "umap_epochs.png", method="UMAP")
+                umap_path = output_dir / "umap_epochs.png"
+                plot_projection_grid(umap_panels, umap_path, method="UMAP")
+                summary_plot_paths.append(umap_path)
             else:
                 _LOGGER.warning("Skipping UMAP projections (insufficient data)")
-    
+
 
     _LOGGER.info("Saved plots and metrics to %s", output_dir.resolve())
+
+    generate_summary_pdf(summary_plot_paths, metrics=metrics, output_dir=output_dir)
 
 
 if __name__ == "__main__":
