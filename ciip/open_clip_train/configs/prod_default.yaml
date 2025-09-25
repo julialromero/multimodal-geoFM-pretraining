@@ -10,7 +10,12 @@ io:
   log_every_n_steps: 50
   wandb: False
   comet_ml: False
-  resume: 
+  resume:
+  #  /work/nvme/bekj/jromero5/ciip/logs/4nodes-tests/2025-09-09_19-21-57-test-compute/2025_09_09-19_29_56-model_resnet50-lr_5e-05-b_128-j_4-p_amp/checkpoints/epoch_235.pt
+  # /work/nvme/bekj/jromero5/ciip/logs/4nodes-tests/2025-09-09_13-53-49-test-compute/2025_09_09-14_01_28-model_resnet50-lr_5e-05-b_128-j_4-p_amp/checkpoints/epoch_170.pt
+  # /work/nvme/bekj/jromero5/ciip/logs/4nodes-tests/2025-08-15_12-16-54-test-compute/2025_08_15-12_24_38-model_resnet50-lr_5e-05-b_128-j_4-p_amp/checkpoints/epoch_100.pt
+  # /work/nvme/bekj/jromero5/ciip/logs/4nodes-tests/2025-08-06_14-45-31-test-compute/2025_08_06-14_53_09-model_resnet50-lr_5e-05-b_128-j_4-p_amp/checkpoints/epoch_59.pt
+  #/work/nvme/bekj/jromero5/ciip/logs/4nodes-tests/2025-08-05_09-56-35-test-compute/2025_08_05-10_05_41-model_resnet50-lr_5e-05-b_256-j_4-p_amp/checkpoints/epoch_48.pt
 comet: #personal
   api_key: 
   project_name: general
@@ -19,10 +24,10 @@ comet: #personal
 model:
   framework: resnet50 #options are resnet18, resnet50, modified_resnet, transformer
   pretrain:
-    load: True
+    load: False
     s1_weights: "MOCO" # Only support for resnet50. S1: MOCO
     s2_weights: "MOCO" # Only support for resnet50. S2: MOCO, DINO
-  embed_dim: 512
+  embed_dim: 1024
   s1_layers: [3, 4, 6, 3]
   s2_layers: [3, 4, 6, 3]
   width: 32
@@ -35,7 +40,6 @@ model:
   #TODO we should use mixed prevision
   precision: 'amp' #'fp16'
   grad_clip_norm: 1
-  accum_freq: 5
   skip_scheduler: False
   # distill_model:
   # distributed: 
@@ -45,7 +49,7 @@ model:
 #TODO: loss params
 
 datamodule:
-  batch_size: 256 # BS per GPU
+  batch_size: 128 # BS per GPU
   world_size: 
   rank: 
   horovod: False
@@ -65,8 +69,8 @@ dataset:
   dataset_type: ssl4eo
   # train_data is true for training and false for validation
   train_data: True
-  dimension: 264
-  root: /tmp/jromero5 #TEST DATA -> /projects/bekj/jromero5/ciip/data 
+  dimension: 224
+  root: /tmp/jromero5 #TEST DATA -> /projects/bekj/jromero5/ciip/data #removed test data 
   s2_tier: s2c # TOA data from Sentinel-2 tier 1C; s2a for BOA corrections
   use_transforms: False
 
@@ -75,21 +79,22 @@ train:
   # device: cuda
   use_val: False
   val_frac: 0.0
-  epochs: 100
+  epochs: 350
   lr: 0.00005
-  wd: 0.2
-  warmup: 10000
+  wd: 0.002
+  warmup: 3000
   beta1: 0.9
   beta2: 0.999
   eps: 1.0e-8
   val_frequency: 1
-  accum_freq: 5
+  accum_freq: 10
   save_logs: True
   name: ciip_test
   delete_previous_checkpoint: False
   save_most_recent: False
   debug: False # for logger
   seed: 56
+  apply_orthogonal_mapping: False
 
 #other placeholders
 remote_sync:
