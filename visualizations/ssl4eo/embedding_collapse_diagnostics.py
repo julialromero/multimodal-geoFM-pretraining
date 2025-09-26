@@ -604,6 +604,11 @@ def discover_checkpoints(
         if 20 < max_ep <= 100:
             keep.update(e for e in epochs if e > 20 and e % 10 == 0 and e <= max_ep)
 
+        if 100 < max_ep:
+            keep.update(e for e in epochs if e > 20 and e % 10 == 0 and e <= 50)
+            keep.update(e for e in epochs if e > 50 and e % 20 == 0)
+
+
     epochs = sorted(keep)
 
     # filter and keep only those epochs
@@ -2588,8 +2593,15 @@ def parse_args() -> argparse.Namespace:
             Example:
 
               python -m visualizations.ssl4eo.embedding_collapse_diagnostics \
-                --checkpoint-root '/home/juro4948/ciip/logs/2025_09_20-22_35_45-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints'
+                --checkpoint-root '/home/juro4948/ciip/logs/2025_09_20-22_35_45-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints' \
                 --output-dir diagnostics/random_init/9-20-2025-vcregstats \
+                --dataset-root /local/ms-data/SSL4EO/ \
+                --vc-gamma 1 
+            
+
+            python -m visualizations.ssl4eo.embedding_collapse_diagnostics \
+                --checkpoint-root '/home/juro4948/ciip/logs/2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints' \
+                --output-dir diagnostics/random_init/9-11-2025-vcregstats \
                 --dataset-root /local/ms-data/SSL4EO/ \
                 --vc-gamma 1 
             """
