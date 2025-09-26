@@ -251,7 +251,8 @@ class CiipLoss(nn.Module):
             vc_loss = self.vc_weight * (variance_loss + covariance_loss)
             losses["vc_loss"] = vc_loss
 
-        total_loss = sum(losses.values())
+        zero_loss = weighted_contrastive_loss.new_zeros(())
+        total_loss = sum(losses.values(), zero_loss)
         return losses if output_dict else total_loss
 
 
