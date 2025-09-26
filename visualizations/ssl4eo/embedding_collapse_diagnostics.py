@@ -63,6 +63,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
+from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 
 import sys
@@ -124,8 +125,12 @@ class EpochMetrics:
     s2_singular_values: Optional[np.ndarray] = None
     s1_pre_singular_values: Optional[np.ndarray] = None
     s2_pre_singular_values: Optional[np.ndarray] = None
+    s1_pre_spectrum: Optional[np.ndarray] = None
+    s2_pre_spectrum: Optional[np.ndarray] = None
     s1_condition_number: Optional[float] = None
     s2_condition_number: Optional[float] = None
+    s1_pre_condition_number: Optional[float] = None
+    s2_pre_condition_number: Optional[float] = None
     s1_std_min: Optional[float] = None
     s2_std_min: Optional[float] = None
     s1_cov_fro: Optional[float] = None
@@ -134,10 +139,14 @@ class EpochMetrics:
     s2_participation_ratio: Optional[float] = None
     s1_correlation_spectrum: Optional[np.ndarray] = None
     s2_correlation_spectrum: Optional[np.ndarray] = None
+    s1_pre_correlation_spectrum: Optional[np.ndarray] = None
+    s2_pre_correlation_spectrum: Optional[np.ndarray] = None
     s1_corr_participation_ratio: Optional[float] = None
     s2_corr_participation_ratio: Optional[float] = None
     s1_corr_spectral_entropy: Optional[float] = None
     s2_corr_spectral_entropy: Optional[float] = None
+    s1_corr_offdiag_fro: Optional[float] = None
+    s2_corr_offdiag_fro: Optional[float] = None
     cca_spectrum: Optional[np.ndarray] = None
     cca_rho_max: Optional[float] = None
     cca_rho_topk_mean: Optional[float] = None
@@ -151,6 +160,16 @@ class EpochMetrics:
     s2_pre_corr_participation_ratio: Optional[float] = None
     s1_pre_corr_spectral_entropy: Optional[float] = None
     s2_pre_corr_spectral_entropy: Optional[float] = None
+    s1_pre_corr_offdiag_fro: Optional[float] = None
+    s2_pre_corr_offdiag_fro: Optional[float] = None
+    s1_delta_participation_ratio: Optional[float] = None
+    s2_delta_participation_ratio: Optional[float] = None
+    s1_shape_change: Optional[np.ndarray] = None
+    s2_shape_change: Optional[np.ndarray] = None
+    s1_pre_post_cca: Optional[np.ndarray] = None
+    s2_pre_post_cca: Optional[np.ndarray] = None
+    s1_pre_post_cca_topk_mean: Optional[float] = None
+    s2_pre_post_cca_topk_mean: Optional[float] = None
 
     def to_summary_dict(self) -> Dict[str, object]:
         """Return a JSON-friendly summary of the metrics."""
@@ -172,6 +191,7 @@ class EpochMetrics:
                 "participation_ratio": self.s1_participation_ratio,
                 "correlation_participation_ratio": self.s1_corr_participation_ratio,
                 "correlation_spectral_entropy": self.s1_corr_spectral_entropy,
+                "correlation_offdiag_fro": self.s1_corr_offdiag_fro,
             },
             "s2": {
                 "std_min": self.s2_std_min,
@@ -179,6 +199,7 @@ class EpochMetrics:
                 "participation_ratio": self.s2_participation_ratio,
                 "correlation_participation_ratio": self.s2_corr_participation_ratio,
                 "correlation_spectral_entropy": self.s2_corr_spectral_entropy,
+                "correlation_offdiag_fro": self.s2_corr_offdiag_fro,
             },
         }
 
@@ -197,6 +218,7 @@ class EpochMetrics:
             self.s1_pre_participation_ratio,
             self.s1_pre_corr_participation_ratio,
             self.s1_pre_corr_spectral_entropy,
+            self.s1_pre_corr_offdiag_fro,
         ):
             vc_metrics["s1_pre_projection"] = {
                 "std_min": self.s1_pre_std_min,
@@ -204,6 +226,7 @@ class EpochMetrics:
                 "participation_ratio": self.s1_pre_participation_ratio,
                 "correlation_participation_ratio": self.s1_pre_corr_participation_ratio,
                 "correlation_spectral_entropy": self.s1_pre_corr_spectral_entropy,
+                "correlation_offdiag_fro": self.s1_pre_corr_offdiag_fro,
             }
 
         if _has_pre_metrics(
@@ -212,6 +235,7 @@ class EpochMetrics:
             self.s2_pre_participation_ratio,
             self.s2_pre_corr_participation_ratio,
             self.s2_pre_corr_spectral_entropy,
+            self.s2_pre_corr_offdiag_fro,
         ):
             vc_metrics["s2_pre_projection"] = {
                 "std_min": self.s2_pre_std_min,
@@ -219,7 +243,23 @@ class EpochMetrics:
                 "participation_ratio": self.s2_pre_participation_ratio,
                 "correlation_participation_ratio": self.s2_pre_corr_participation_ratio,
                 "correlation_spectral_entropy": self.s2_pre_corr_spectral_entropy,
+                "correlation_offdiag_fro": self.s2_pre_corr_offdiag_fro,
             }
+
+        head_metrics = {
+            "s1": {
+                "delta_participation_ratio": self.s1_delta_participation_ratio,
+                "shape_change": _safe_stats(self.s1_shape_change),
+                "pre_post_cca_topk_mean": self.s1_pre_post_cca_topk_mean,
+                "pre_post_cca": _safe_stats(self.s1_pre_post_cca),
+            },
+            "s2": {
+                "delta_participation_ratio": self.s2_delta_participation_ratio,
+                "shape_change": _safe_stats(self.s2_shape_change),
+                "pre_post_cca_topk_mean": self.s2_pre_post_cca_topk_mean,
+                "pre_post_cca": _safe_stats(self.s2_pre_post_cca),
+            },
+        }
 
         return {
             "label": self.label,
@@ -236,6 +276,7 @@ class EpochMetrics:
                 "rho_max": self.cca_rho_max,
                 "rho_topk_mean": self.cca_rho_topk_mean,
             },
+            "head_metrics": head_metrics,
         }
 
 def _sanitize_label(label: str) -> str:
@@ -814,18 +855,18 @@ def compute_vc_geometry(
 def compute_correlation_metrics(
     features: torch.Tensor,
     eps: float = 1e-12,
-) -> Tuple[Optional[np.ndarray], float, float]:
+) -> Tuple[Optional[np.ndarray], float, float, float]:
     """Return correlation spectrum and scale-invariant summaries for ``features``."""
 
     if features.dim() != 2 or features.shape[0] < 2:
         nan = float("nan")
-        return None, nan, nan
+        return None, nan, nan, nan
 
     feats = features.to(torch.float64)
     cov = compute_covariance(feats)
     if cov is None:
         nan = float("nan")
-        return None, nan, nan
+        return None, nan, nan, nan
 
     variances = torch.diagonal(cov)
     std = torch.sqrt(torch.clamp(variances, min=0.0))
@@ -834,17 +875,20 @@ def compute_correlation_metrics(
 
     corr = inv_std_mat @ cov @ inv_std_mat
     corr = (corr + corr.t()) / 2
+    diag = torch.diag(torch.diagonal(corr))
+    off_diag = corr - diag
+    corr_offdiag = float(torch.linalg.norm(off_diag, ord="fro").item())
 
     try:
         eigvals = torch.linalg.eigvalsh(corr).flip(0)
     except RuntimeError:
         nan = float("nan")
-        return None, nan, nan
+        return None, nan, nan, nan
 
     eigvals_np = eigvals.cpu().numpy().astype(np.float64)
     if eigvals_np.size == 0:
         nan = float("nan")
-        return None, nan, nan
+        return None, nan, nan, nan
 
     eigvals_np = np.clip(eigvals_np, a_min=0.0, a_max=None)
     participation = float(((eigvals_np.sum() ** 2) / (np.sum(np.square(eigvals_np)) + eps)))
@@ -861,7 +905,7 @@ def compute_correlation_metrics(
             norm = math.log(eigvals_np.size)
             spectral_entropy = float(entropy / norm) if norm > 0 else float("nan")
 
-    return eigvals_np, participation, spectral_entropy
+    return eigvals_np, participation, spectral_entropy, corr_offdiag
 
 
 def _symmetric_matrix_inverse_sqrt(
@@ -932,6 +976,36 @@ def compute_condition_number(spectrum: np.ndarray, eps: float = 1e-12) -> float:
     if smallest <= eps:
         return float("inf")
     return largest / smallest
+
+
+def compute_log_singular_shape_change(
+    post: Optional[np.ndarray],
+    pre: Optional[np.ndarray],
+    eps: float = 1e-12,
+) -> Optional[np.ndarray]:
+    """Return log-scale singular value changes between post and pre features."""
+
+    if post is None or pre is None:
+        return None
+    take = min(post.size, pre.size)
+    if take == 0:
+        return None
+
+    post_clip = np.clip(post[:take], a_min=eps, a_max=None)
+    pre_clip = np.clip(pre[:take], a_min=eps, a_max=None)
+    return np.log(post_clip) - np.log(pre_clip)
+
+
+def _safe_difference(post: Optional[float], pre: Optional[float]) -> Optional[float]:
+    """Return ``post - pre`` guarding against ``None`` and ``NaN``."""
+
+    if post is None or pre is None:
+        return None
+    post_float = float(post)
+    pre_float = float(pre)
+    if math.isnan(post_float) or math.isnan(pre_float):
+        return None
+    return post_float - pre_float
 
 
 def compute_cosine_statistics(
@@ -1011,8 +1085,8 @@ def compute_epoch_metrics(
         cov_s1 = compute_covariance(s1_tensor)
         cov_s2 = compute_covariance(s2_tensor)
 
-        s1_std_min, s1_cov_fro, s1_participation = compute_vc_geometry(epoch.s1)
-        s2_std_min, s2_cov_fro, s2_participation = compute_vc_geometry(epoch.s2)
+        s1_std_min, s1_cov_fro, s1_participation = compute_vc_geometry(s1_tensor)
+        s2_std_min, s2_cov_fro, s2_participation = compute_vc_geometry(s2_tensor)
 
         metrics.s1_std_min = s1_std_min
         metrics.s2_std_min = s2_std_min
@@ -1025,12 +1099,14 @@ def compute_epoch_metrics(
             s1_corr_spec,
             s1_corr_pr,
             s1_corr_entropy,
-        ) = compute_correlation_metrics(epoch.s1)
+            s1_corr_off,
+        ) = compute_correlation_metrics(s1_tensor)
         (
             s2_corr_spec,
             s2_corr_pr,
             s2_corr_entropy,
-        ) = compute_correlation_metrics(epoch.s2)
+            s2_corr_off,
+        ) = compute_correlation_metrics(s2_tensor)
 
         metrics.s1_correlation_spectrum = s1_corr_spec
         metrics.s2_correlation_spectrum = s2_corr_spec
@@ -1038,6 +1114,8 @@ def compute_epoch_metrics(
         metrics.s2_corr_participation_ratio = s2_corr_pr
         metrics.s1_corr_spectral_entropy = s1_corr_entropy
         metrics.s2_corr_spectral_entropy = s2_corr_entropy
+        metrics.s1_corr_offdiag_fro = s1_corr_off
+        metrics.s2_corr_offdiag_fro = s2_corr_off
 
         if epoch.s1_pre_projection is not None:
             s1_pre_tensor = epoch.s1_pre_projection.to(dtype=torch.float32)
@@ -1048,15 +1126,28 @@ def compute_epoch_metrics(
                 s1_pre_participation,
             ) = compute_vc_geometry(s1_pre_tensor)
             (
-                _s1_pre_corr_spec,
+                s1_pre_corr_spec,
                 s1_pre_corr_pr,
                 s1_pre_corr_entropy,
+                s1_pre_corr_off,
             ) = compute_correlation_metrics(s1_pre_tensor)
             metrics.s1_pre_std_min = s1_pre_std_min
             metrics.s1_pre_cov_fro = s1_pre_cov_fro
             metrics.s1_pre_participation_ratio = s1_pre_participation
             metrics.s1_pre_corr_participation_ratio = s1_pre_corr_pr
             metrics.s1_pre_corr_spectral_entropy = s1_pre_corr_entropy
+            metrics.s1_pre_corr_offdiag_fro = s1_pre_corr_off
+            metrics.s1_pre_correlation_spectrum = s1_pre_corr_spec
+            cov_s1_pre = compute_covariance(s1_pre_tensor)
+            if cov_s1_pre is not None:
+                eigvals_pre = torch.linalg.eigvalsh(cov_s1_pre).flip(0).cpu().numpy()
+                metrics.s1_pre_spectrum = eigvals_pre
+                metrics.s1_pre_condition_number = compute_condition_number(eigvals_pre)
+            cca_pre_post_s1 = compute_cca_spectrum(s1_pre_tensor, s1_tensor)
+            metrics.s1_pre_post_cca = cca_pre_post_s1
+            if cca_pre_post_s1 is not None and cca_pre_post_s1.size:
+                top_k = cca_pre_post_s1.size if cca_top_k <= 0 else min(cca_top_k, cca_pre_post_s1.size)
+                metrics.s1_pre_post_cca_topk_mean = float(np.mean(cca_pre_post_s1[:top_k]))
 
         if epoch.s2_pre_projection is not None:
             s2_pre_tensor = epoch.s2_pre_projection.to(dtype=torch.float32)
@@ -1067,15 +1158,41 @@ def compute_epoch_metrics(
                 s2_pre_participation,
             ) = compute_vc_geometry(s2_pre_tensor)
             (
-                _s2_pre_corr_spec,
+                s2_pre_corr_spec,
                 s2_pre_corr_pr,
                 s2_pre_corr_entropy,
+                s2_pre_corr_off,
             ) = compute_correlation_metrics(s2_pre_tensor)
             metrics.s2_pre_std_min = s2_pre_std_min
             metrics.s2_pre_cov_fro = s2_pre_cov_fro
             metrics.s2_pre_participation_ratio = s2_pre_participation
             metrics.s2_pre_corr_participation_ratio = s2_pre_corr_pr
             metrics.s2_pre_corr_spectral_entropy = s2_pre_corr_entropy
+            metrics.s2_pre_corr_offdiag_fro = s2_pre_corr_off
+            metrics.s2_pre_correlation_spectrum = s2_pre_corr_spec
+            cov_s2_pre = compute_covariance(s2_pre_tensor)
+            if cov_s2_pre is not None:
+                eigvals_pre = torch.linalg.eigvalsh(cov_s2_pre).flip(0).cpu().numpy()
+                metrics.s2_pre_spectrum = eigvals_pre
+                metrics.s2_pre_condition_number = compute_condition_number(eigvals_pre)
+            cca_pre_post_s2 = compute_cca_spectrum(s2_pre_tensor, s2_tensor)
+            metrics.s2_pre_post_cca = cca_pre_post_s2
+            if cca_pre_post_s2 is not None and cca_pre_post_s2.size:
+                top_k = cca_pre_post_s2.size if cca_top_k <= 0 else min(cca_top_k, cca_pre_post_s2.size)
+                metrics.s2_pre_post_cca_topk_mean = float(np.mean(cca_pre_post_s2[:top_k]))
+
+        metrics.s1_delta_participation_ratio = _safe_difference(
+            metrics.s1_participation_ratio, metrics.s1_pre_participation_ratio
+        )
+        metrics.s2_delta_participation_ratio = _safe_difference(
+            metrics.s2_participation_ratio, metrics.s2_pre_participation_ratio
+        )
+        metrics.s1_shape_change = compute_log_singular_shape_change(
+            metrics.s1_singular_values, metrics.s1_pre_singular_values
+        )
+        metrics.s2_shape_change = compute_log_singular_shape_change(
+            metrics.s2_singular_values, metrics.s2_pre_singular_values
+        )
 
         cca_spectrum = compute_cca_spectrum(epoch.s1, epoch.s2)
         metrics.cca_spectrum = cca_spectrum
@@ -1573,10 +1690,12 @@ def _plot_correlation_panel(
 
     spectra_s1 = [m.s1_correlation_spectrum for m in metrics]
     spectra_s2 = [m.s2_correlation_spectrum for m in metrics]
+    spectra_s1_pre = [m.s1_pre_correlation_spectrum for m in metrics]
+    spectra_s2_pre = [m.s2_pre_correlation_spectrum for m in metrics]
     max_dims = max(
         [
             max((spec.size for spec in spectra if spec is not None), default=0)
-            for spectra in (spectra_s1, spectra_s2)
+            for spectra in (spectra_s1, spectra_s2, spectra_s1_pre, spectra_s2_pre)
         ]
     )
 
@@ -1652,6 +1771,8 @@ def _plot_correlation_panel(
     for idx in range(top_k):
         s1_values: List[float] = []
         s2_values: List[float] = []
+        s1_pre_values: List[float] = []
+        s2_pre_values: List[float] = []
         for spec in spectra_s1:
             if spec is None or spec.size <= idx:
                 s1_values.append(math.nan)
@@ -1662,6 +1783,16 @@ def _plot_correlation_panel(
                 s2_values.append(math.nan)
             else:
                 s2_values.append(float(spec[idx]))
+        for spec in spectra_s1_pre:
+            if spec is None or spec.size <= idx:
+                s1_pre_values.append(math.nan)
+            else:
+                s1_pre_values.append(float(spec[idx]))
+        for spec in spectra_s2_pre:
+            if spec is None or spec.size <= idx:
+                s2_pre_values.append(math.nan)
+            else:
+                s2_pre_values.append(float(spec[idx]))
 
         if any(not math.isnan(v) for v in s1_values):
             ax.plot(
@@ -1681,6 +1812,28 @@ def _plot_correlation_panel(
                 linestyle="--",
                 color=colors[idx],
                 label=f"S2 ρ{idx + 1}",
+            )
+            plotted = True
+        if any(not math.isnan(v) for v in s1_pre_values):
+            ax.plot(
+                x,
+                s1_pre_values,
+                marker="o",
+                linestyle=":",
+                color=colors[idx],
+                alpha=0.8,
+                label=f"S1 pre ρ{idx + 1}",
+            )
+            plotted = True
+        if any(not math.isnan(v) for v in s2_pre_values):
+            ax.plot(
+                x,
+                s2_pre_values,
+                marker="s",
+                linestyle="-.",
+                color=colors[idx],
+                alpha=0.8,
+                label=f"S2 pre ρ{idx + 1}",
             )
             plotted = True
 
@@ -1836,7 +1989,7 @@ def plot_vc_timeseries(
     if not metrics:
         return
 
-    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    fig, axes = plt.subplots(2, 4, figsize=(22, 10))
     axes_list = axes.flatten()
 
     _plot_vc_timeseries_panel(
@@ -1866,6 +2019,19 @@ def plot_vc_timeseries(
     _plot_vc_timeseries_panel(
         axes_list[2],
         metrics,
+        attr_s1="s1_corr_offdiag_fro",
+        attr_s2="s2_corr_offdiag_fro",
+        attr_s1_pre="s1_pre_corr_offdiag_fro",
+        attr_s2_pre="s2_pre_corr_offdiag_fro",
+        title="Off-diagonal correlation Frobenius norm",
+        ylabel="‖Corr_off‖₍fro₎",
+        reference=None,
+        use_dual_y=True,
+        secondary_ylabel="‖Corr_off‖₍fro₎ (pre)",
+    )
+    _plot_vc_timeseries_panel(
+        axes_list[3],
+        metrics,
         attr_s1="s1_participation_ratio",
         attr_s2="s2_participation_ratio",
         attr_s1_pre="s1_pre_participation_ratio",
@@ -1881,24 +2047,36 @@ def plot_vc_timeseries(
         cov_title = "Covariance spectrum (all)"
 
     _plot_spectrum_panel(
-        axes_list[3],
+        axes_list[4],
         metrics,
         attr_s1="s1_spectrum",
         attr_s2="s2_spectrum",
+        attr_s1_pre="s1_pre_spectrum",
+        attr_s2_pre="s2_pre_spectrum",
         title=cov_title,
         ylabel="Eigenvalue",
         top_k=spectrum_top_k,
         log_scale=True,
     )
     _plot_correlation_panel(
-        axes_list[4],
+        axes_list[5],
         metrics,
         top_k=spectrum_top_k,
     )
     _plot_cca_panel(
-        axes_list[5],
+        axes_list[6],
         metrics,
         top_k=cca_top_k,
+    )
+
+    _plot_vc_timeseries_panel(
+        axes_list[7],
+        metrics,
+        attr_s1="s1_delta_participation_ratio",
+        attr_s2="s2_delta_participation_ratio",
+        title="Δ Covariance participation ratio (post − pre)",
+        ylabel="ΔPR",
+        reference=None,
     )
 
     fig.suptitle("Variance, correlation, and CCA diagnostics across epochs")
@@ -2026,11 +2204,14 @@ def plot_epoch_dashboards(
             participation = getattr(metric, f"{modality}_participation_ratio")
             corr_pr = getattr(metric, f"{modality}_corr_participation_ratio")
             corr_entropy = getattr(metric, f"{modality}_corr_spectral_entropy")
+            corr_off = getattr(metric, f"{modality}_corr_offdiag_fro")
             pre_std_min = getattr(metric, f"{modality}_pre_std_min")
             pre_cov_fro = getattr(metric, f"{modality}_pre_cov_fro")
             pre_participation = getattr(metric, f"{modality}_pre_participation_ratio")
             pre_corr_pr = getattr(metric, f"{modality}_pre_corr_participation_ratio")
             pre_corr_entropy = getattr(metric, f"{modality}_pre_corr_spectral_entropy")
+            pre_corr_off = getattr(metric, f"{modality}_pre_corr_offdiag_fro")
+            delta_pr = getattr(metric, f"{modality}_delta_participation_ratio")
 
             def _fmt(value: Optional[float], fmt: str) -> str:
                 if value is None:
@@ -2052,9 +2233,11 @@ def plot_epoch_dashboards(
             return (
                 f"{modality.upper()} std_min={_fmt_pair(std_min, pre_std_min, '.4f')}, "
                 f"‖Cov_off‖={_fmt_pair(cov_fro, pre_cov_fro, '.2e')}, "
+                f"‖Corr_off‖={_fmt_pair(corr_off, pre_corr_off, '.2e')}, "
                 f"CovPR={_fmt_pair(participation, pre_participation, '.2f')}, "
                 f"CorrPR={_fmt_pair(corr_pr, pre_corr_pr, '.2f')}, "
-                f"CorrH={_fmt_pair(corr_entropy, pre_corr_entropy, '.3f')}"
+                f"CorrH={_fmt_pair(corr_entropy, pre_corr_entropy, '.3f')}, "
+                f"ΔPR={_fmt(delta_pr, '.2f')}"
             )
 
         fig.suptitle(
@@ -2360,6 +2543,30 @@ def plot_linear_probe_curve(
     plt.close(fig)
 
 
+def resolve_projection_tensors(
+    epoch: EpochEmbeddings,
+    view: str,
+) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+    """Return the tensors to visualize for ``view``."""
+
+    if view == "pre_head":
+        if epoch.s1_pre_projection is None or epoch.s2_pre_projection is None:
+            return None
+        return epoch.s1_pre_projection, epoch.s2_pre_projection
+    if view == "post_head_normalized":
+        if epoch.s1 is None or epoch.s2 is None:
+            return None
+        s1 = epoch.s1_normalized if epoch.s1_normalized is not None else F.normalize(epoch.s1, dim=1)
+        s2 = epoch.s2_normalized if epoch.s2_normalized is not None else F.normalize(epoch.s2, dim=1)
+        return s1, s2
+    if view == "post_head_raw":
+        if epoch.s1 is None or epoch.s2 is None:
+            return None
+        return epoch.s1, epoch.s2
+
+    raise ValueError(f"Unknown projection view: {view}")
+
+
 def sample_for_projection(
     s1: torch.Tensor,
     s2: torch.Tensor,
@@ -2383,6 +2590,38 @@ def sample_for_projection(
     return stacked.cpu().numpy(), labels
 
 
+def preprocess_projection_data(
+    data: np.ndarray,
+    *,
+    mode: str,
+    random_state: int,
+    pca_components: int = 50,
+) -> np.ndarray:
+    """Apply preprocessing recommended for the projection ``mode``."""
+
+    data = np.asarray(data, dtype=np.float64)
+
+    if mode == "zscore":
+        mean = np.mean(data, axis=0, keepdims=True)
+        std = np.std(data, axis=0, keepdims=True)
+        std = np.where(std < 1e-12, 1.0, std)
+        data = (data - mean) / std
+    elif mode == "l2":
+        norms = np.linalg.norm(data, axis=1, keepdims=True)
+        norms = np.maximum(norms, 1e-12)
+        data = data / norms
+    else:
+        raise ValueError(f"Unknown preprocessing mode: {mode}")
+
+    if data.shape[1] > pca_components and min(data.shape[0], data.shape[1]) > 1:
+        n_components = min(pca_components, data.shape[0], data.shape[1])
+        if n_components < data.shape[1]:
+            pca = PCA(n_components=n_components, random_state=random_state)
+            data = pca.fit_transform(data)
+
+    return data
+
+
 def compute_projection(
     data: np.ndarray,
     *,
@@ -2396,12 +2635,19 @@ def compute_projection(
         perplexity = min(30, data.shape[0] - 1)
         if perplexity < 1:
             return None
-        reducer = TSNE(n_components=2, perplexity=perplexity, init="pca", random_state=random_state)
+        reducer = TSNE(
+            n_components=2,
+            perplexity=perplexity,
+            init="pca",
+            random_state=random_state,
+            metric="cosine",
+            square_distances=True,
+        )
     elif method == "umap":
         if umap is None:
             _LOGGER.warning("UMAP is not installed; skipping projection")
             return None
-        reducer = umap.UMAP(n_components=2, random_state=random_state, init="spectral")
+        reducer = umap.UMAP(n_components=2, random_state=random_state, init="spectral", metric="cosine")
     else:
         raise ValueError(f"Unknown projection method: {method}")
 
@@ -2537,6 +2783,10 @@ def export_vc_metrics_csv(
         "vc_participation_ratio_s2",
         "vc_participation_ratio_s1_pre",
         "vc_participation_ratio_s2_pre",
+        "corr_offdiag_fro_s1",
+        "corr_offdiag_fro_s2",
+        "corr_offdiag_fro_s1_pre",
+        "corr_offdiag_fro_s2_pre",
         "corr_participation_ratio_s1",
         "corr_participation_ratio_s2",
         "corr_participation_ratio_s1_pre",
@@ -2545,6 +2795,10 @@ def export_vc_metrics_csv(
         "corr_spectral_entropy_s2",
         "corr_spectral_entropy_s1_pre",
         "corr_spectral_entropy_s2_pre",
+        "delta_participation_ratio_s1",
+        "delta_participation_ratio_s2",
+        "cca_pre_post_topk_mean_s1",
+        "cca_pre_post_topk_mean_s2",
         "cca_rho_max",
         cca_label,
     ]
@@ -2570,6 +2824,10 @@ def export_vc_metrics_csv(
                     "vc_participation_ratio_s2": _csv_value(metric.s2_participation_ratio),
                     "vc_participation_ratio_s1_pre": _csv_value(metric.s1_pre_participation_ratio),
                     "vc_participation_ratio_s2_pre": _csv_value(metric.s2_pre_participation_ratio),
+                    "corr_offdiag_fro_s1": _csv_value(metric.s1_corr_offdiag_fro),
+                    "corr_offdiag_fro_s2": _csv_value(metric.s2_corr_offdiag_fro),
+                    "corr_offdiag_fro_s1_pre": _csv_value(metric.s1_pre_corr_offdiag_fro),
+                    "corr_offdiag_fro_s2_pre": _csv_value(metric.s2_pre_corr_offdiag_fro),
                     "corr_participation_ratio_s1": _csv_value(metric.s1_corr_participation_ratio),
                     "corr_participation_ratio_s2": _csv_value(metric.s2_corr_participation_ratio),
                     "corr_participation_ratio_s1_pre": _csv_value(metric.s1_pre_corr_participation_ratio),
@@ -2578,6 +2836,10 @@ def export_vc_metrics_csv(
                     "corr_spectral_entropy_s2": _csv_value(metric.s2_corr_spectral_entropy),
                     "corr_spectral_entropy_s1_pre": _csv_value(metric.s1_pre_corr_spectral_entropy),
                     "corr_spectral_entropy_s2_pre": _csv_value(metric.s2_pre_corr_spectral_entropy),
+                    "delta_participation_ratio_s1": _csv_value(metric.s1_delta_participation_ratio),
+                    "delta_participation_ratio_s2": _csv_value(metric.s2_delta_participation_ratio),
+                    "cca_pre_post_topk_mean_s1": _csv_value(metric.s1_pre_post_cca_topk_mean),
+                    "cca_pre_post_topk_mean_s2": _csv_value(metric.s2_pre_post_cca_topk_mean),
                     "cca_rho_max": _csv_value(metric.cca_rho_max),
                     cca_label: _csv_value(metric.cca_rho_topk_mean),
                 }
@@ -2897,70 +3159,90 @@ def main() -> None:
         plot_linear_probe_curve(linear_probe, output_dir, metric=args.linear_probe_metric)
         summary_plot_paths.append(output_dir / f"linear_probe_{args.linear_probe_metric}.png")
 
-    np_gen = np.random.default_rng(args.random_seed)
-    if args.tsne_samples > 0:
-        tsne_panels: List[Tuple[str, np.ndarray, np.ndarray]] = []
-        for epoch in epochs:
-            if epoch.s1 is None or epoch.s2 is None:
-                continue
-            s1_proj = epoch.s1_normalized if epoch.s1_normalized is not None else epoch.s1
-            s2_proj = epoch.s2_normalized if epoch.s2_normalized is not None else epoch.s2
-            if s1_proj is None or s2_proj is None:
-                continue
-            try:
-                data, labels = sample_for_projection(
-                    s1_proj,
-                    s2_proj,
-                    per_modality=args.tsne_samples,
-                    generator=np_gen,
-                )
-            except ValueError:
-                continue
-            coords = compute_projection(data, method="tsne", random_state=args.random_seed)
-            if coords is None:
-                continue
-            # plot_projection(coords, labels, output_dir / f"tsne_{epoch.label}.png", title=f"t-SNE — {epoch.label}")
-            tsne_panels.append((epoch.label, coords, labels))
+    projection_views: List[Tuple[str, str, str]] = [
+        ("pre_head", "Pre-head · z-score → PCA50 → cosine", "zscore"),
+        ("post_head_normalized", "Post-head L2 · PCA50 → cosine", "l2"),
+        ("post_head_raw", "Post-head raw · z-score → PCA50 → cosine", "zscore"),
+    ]
 
-        if tsne_panels:
-            tsne_path = output_dir / "tsne_epochs.png"
-            plot_projection_grid(tsne_panels, tsne_path, method="t-SNE")
-            summary_plot_paths.append(tsne_path)
-        else:
-            _LOGGER.warning("Skipping t-SNE projections (insufficient data)")
+    if args.tsne_samples > 0:
+        for view_key, view_desc, mode in projection_views:
+            view_rng = np.random.default_rng(args.random_seed)
+            tsne_panels: List[Tuple[str, np.ndarray, np.ndarray]] = []
+            for epoch in epochs:
+                tensors = resolve_projection_tensors(epoch, view_key)
+                if tensors is None:
+                    continue
+                s1_proj, s2_proj = tensors
+                try:
+                    data, labels = sample_for_projection(
+                        s1_proj,
+                        s2_proj,
+                        per_modality=args.tsne_samples,
+                        generator=view_rng,
+                    )
+                except ValueError:
+                    continue
+                data = preprocess_projection_data(
+                    data,
+                    mode=mode,
+                    random_state=args.random_seed,
+                )
+                coords = compute_projection(data, method="tsne", random_state=args.random_seed)
+                if coords is None:
+                    continue
+                tsne_panels.append((epoch.label, coords, labels))
+
+            if tsne_panels:
+                tsne_path = output_dir / f"tsne_{view_key}.png"
+                plot_projection_grid(tsne_panels, tsne_path, method=f"t-SNE ({view_desc})")
+                summary_plot_paths.append(tsne_path)
+            else:
+                _LOGGER.warning(
+                    "Skipping t-SNE projections for %s (insufficient data)",
+                    view_desc,
+                )
 
     if args.umap_samples > 0:
         if umap is None:
             _LOGGER.warning("UMAP requested but not installed; skipping")
         else:
-            umap_panels: List[Tuple[str, np.ndarray, np.ndarray]] = []
-            for epoch in epochs:
-                if epoch.s1 is None or epoch.s2 is None:
-                    continue
-                s1_proj = epoch.s1_normalized if epoch.s1_normalized is not None else epoch.s1
-                s2_proj = epoch.s2_normalized if epoch.s2_normalized is not None else epoch.s2
-                if s1_proj is None or s2_proj is None:
-                    continue
-                try:
-                    data, labels = sample_for_projection(
-                        s1_proj,
-                        s2_proj,
-                        per_modality=args.umap_samples,
-                        generator=np_gen,
+            for view_key, view_desc, mode in projection_views:
+                view_rng = np.random.default_rng(args.random_seed)
+                umap_panels: List[Tuple[str, np.ndarray, np.ndarray]] = []
+                for epoch in epochs:
+                    tensors = resolve_projection_tensors(epoch, view_key)
+                    if tensors is None:
+                        continue
+                    s1_proj, s2_proj = tensors
+                    try:
+                        data, labels = sample_for_projection(
+                            s1_proj,
+                            s2_proj,
+                            per_modality=args.umap_samples,
+                            generator=view_rng,
+                        )
+                    except ValueError:
+                        continue
+                    data = preprocess_projection_data(
+                        data,
+                        mode=mode,
+                        random_state=args.random_seed,
                     )
-                except ValueError:
-                    continue
-                coords = compute_projection(data, method="umap", random_state=args.random_seed)
-                if coords is None:
-                    continue
-                umap_panels.append((epoch.label, coords, labels))
+                    coords = compute_projection(data, method="umap", random_state=args.random_seed)
+                    if coords is None:
+                        continue
+                    umap_panels.append((epoch.label, coords, labels))
 
-            if umap_panels:
-                umap_path = output_dir / "umap_epochs.png"
-                plot_projection_grid(umap_panels, umap_path, method="UMAP")
-                summary_plot_paths.append(umap_path)
-            else:
-                _LOGGER.warning("Skipping UMAP projections (insufficient data)")
+                if umap_panels:
+                    umap_path = output_dir / f"umap_{view_key}.png"
+                    plot_projection_grid(umap_panels, umap_path, method=f"UMAP ({view_desc})")
+                    summary_plot_paths.append(umap_path)
+                else:
+                    _LOGGER.warning(
+                        "Skipping UMAP projections for %s (insufficient data)",
+                        view_desc,
+                    )
 
 
     _LOGGER.info("Saved plots and metrics to %s", output_dir.resolve())
