@@ -48,6 +48,7 @@ loss:
   local_loss: True
   gather_with_grad: True
   cache_labels: True
+  contrastive_weight: 1.0
   vc_enabled: True
   vc_weight: 0.4
   vc_gamma: 1.0

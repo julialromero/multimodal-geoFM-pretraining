@@ -144,6 +144,7 @@ def create_loss(args):
         rank=_resolve_value("rank", loss_cfg, args, datamodule_cfg, default=0),
         world_size=_resolve_value("world_size", loss_cfg, args, datamodule_cfg, default=1),
         use_horovod=_resolve_value("horovod", loss_cfg, args, datamodule_cfg, default=False),
+        contrastive_weight=_resolve_value("contrastive_weight", loss_cfg, args, default=1.0),
         vc_reg_enabled=_resolve_value("vc_enabled", loss_cfg, args, default=False),
         vc_weight=_resolve_value("vc_weight", loss_cfg, args, default=0.0),
         vc_gamma=_resolve_value("vc_gamma", loss_cfg, args, default=1.0),

@@ -453,6 +453,12 @@ def parse_args(args):
         help='Use SigLip (sigmoid) loss.'
     )
     parser.add_argument(
+        "--contrastive-weight",
+        type=float,
+        default=1.0,
+        help="Weight applied to the InfoNCE contrastive loss term.",
+    )
+    parser.add_argument(
         "--vc-regularization",
         dest="vc_enabled",
         default=False,
