@@ -73,6 +73,7 @@ class CiipLoss(nn.Module):
             rank=0,
             world_size=1,
             use_horovod=False,
+            contrastive_weight=1.0,
             vc_reg_enabled=False,
             vc_weight=0.0,
             vc_gamma=1.0,
@@ -85,6 +86,8 @@ class CiipLoss(nn.Module):
         self.rank = rank
         self.world_size = world_size
         self.use_horovod = use_horovod
+
+        self.contrastive_weight = float(contrastive_weight)
 
         self.vc_reg_enabled = vc_reg_enabled
         self.vc_weight = vc_weight
@@ -204,7 +207,11 @@ class CiipLoss(nn.Module):
             F.cross_entropy(logits_per_s2, labels)
         ) / 2
 
-        losses = {"contrastive_loss": contrastive_loss}
+        weighted_contrastive_loss = self.contrastive_weight * contrastive_loss
+
+        losses = {}
+        if output_dict or self.contrastive_weight != 0:
+            losses["contrastive_loss"] = weighted_contrastive_loss
 
         if need_vc:
             s1_vc_local = s1_features_vc if s1_features_vc is not None else s1_features

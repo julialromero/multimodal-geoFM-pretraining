@@ -28,11 +28,12 @@ Replace `cudatoolkit=11.0` above with the appropriate CUDA version on your machi
 
 The CIIP training entrypoints now expose an optional variance–covariance (VC) regularizer. When enabled, the loss augments the contrastive objective with penalties that encourage per-dimension variance above a threshold `γ` and suppress cross-feature correlations for each modality. You can tune these behaviours from both the CLI and the Hydra configuration files:
 
-* **CLI flags**: `train.py` accepts `--vc-regularization` (enables the regularizer), `--vc-weight` (overall loss weight), `--vc-gamma` (variance target γ) and `--vc-covariance-weights` (one or two floats weighting the Sentinel-1/Sentinel-2 covariance terms). Example:
+* **CLI flags**: `train.py` accepts `--vc-regularization` (enables the regularizer), `--contrastive-weight` (scales or disables the InfoNCE term), `--vc-weight` (overall VC weight), `--vc-gamma` (variance target γ) and `--vc-covariance-weights` (one or two floats weighting the Sentinel-1/Sentinel-2 covariance terms). Example:
 
   ```bash
   python -m ciip.open_clip_train.main \
       --vc-regularization \
+      --contrastive-weight 0.0 \
       --vc-weight 0.1 \
       --vc-gamma 1.0 \
       --vc-covariance-weights 1.0 0.5
@@ -45,6 +46,7 @@ The CIIP training entrypoints now expose an optional variance–covariance (VC) 
     local_loss: False
     gather_with_grad: False
     cache_labels: True
+    contrastive_weight: 1.0   # set to 0 to disable the contrastive term
     vc_enabled: False      # set to True to activate the VC regularizer
     vc_weight: 0.0         # overall VC weight
     vc_gamma: 1.0          # variance floor γ
@@ -52,6 +54,8 @@ The CIIP training entrypoints now expose an optional variance–covariance (VC) 
   ```
 
   Override these keys in your experiment-specific config to customise the regulariser while keeping the rest of the defaults untouched.
+
+  To run an experiment that optimises **only** the VC loss, set `contrastive_weight: 0.0`, ensure `vc_enabled: True`, and choose a positive `vc_weight` for your run.
 
 ```python
 import torch
