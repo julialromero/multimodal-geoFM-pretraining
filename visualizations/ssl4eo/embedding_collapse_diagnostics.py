@@ -35,7 +35,8 @@ Example usage::
 
 All plots are saved in the provided output directory; intermediate statistics
 are exported as JSON/NumPy files for downstream analysis. The VC diagnostics are
-also written to ``vc_metrics.csv`` and summarized in ``vc_metrics_timeseries.png``.
+also written to ``vc_metrics.csv`` and summarized in
+``vc_metrics_timeseries_s1.png`` / ``vc_metrics_timeseries_s2.png``.
 
 By default, embeddings are exported directly from the encoders (raw ``s*_features_vc``).
 Pass ``--use-orthogonal-mapping`` to apply the optional ``W.pt`` alignment when present.
@@ -57,6 +58,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
+from matplotlib.lines import Line2D
 from matplotlib.backends.backend_pdf import PdfPages
 import numpy as np
 import torch
@@ -1621,6 +1623,8 @@ def _plot_spectrum_panel(
     if top_k <= 0 or top_k > max_dims:
         top_k = max_dims
 
+    _ = component_symbol  # retained for backward compatibility
+
     colors = plt.cm.viridis(np.linspace(0.2, 0.95, top_k))
     plotted = False
     for idx in range(top_k):
@@ -2063,6 +2067,8 @@ def _plot_single_modality_spectrum(
 
     colors = plt.cm.viridis(np.linspace(0.2, 0.95, top_k))
     plotted = False
+    post_plotted = False
+    pre_plotted = False
     for idx in range(top_k):
         post_values: List[float] = []
         pre_values: List[float] = []
@@ -2083,9 +2089,10 @@ def _plot_single_modality_spectrum(
                 marker="o",
                 linestyle="-",
                 color=colors[idx],
-                label=f"Post {component_symbol}{idx + 1}",
+                label="Post projection" if not post_plotted else "_nolegend_",
             )
             plotted = True
+            post_plotted = True
 
         if any(not math.isnan(v) for v in pre_values):
             ax.plot(
@@ -2095,9 +2102,10 @@ def _plot_single_modality_spectrum(
                 linestyle="--",
                 color=colors[idx],
                 alpha=0.7,
-                label=f"Pre {component_symbol}{idx + 1}",
+                label="Pre projection" if not pre_plotted else "_nolegend_",
             )
             plotted = True
+            pre_plotted = True
 
     if not plotted:
         _mark_axis_no_data(ax, f"{title} — {modality.upper()}")
@@ -2117,9 +2125,21 @@ def _plot_single_modality_spectrum(
     else:
         ax.grid(True, alpha=0.3)
 
-    handles, legend_labels = ax.get_legend_handles_labels()
-    if handles:
-        ax.legend(handles, legend_labels, fontsize="small", ncol=2)
+    legend_handles: List[Line2D] = []
+    if post_plotted:
+        legend_handles.append(
+            Line2D([0], [0], color="#4c72b0", linestyle="-", label="Post projection")
+        )
+    if pre_plotted:
+        legend_handles.append(
+            Line2D([0], [0], color="#4c72b0", linestyle="--", label="Pre projection")
+        )
+    if legend_handles:
+        ax.legend(
+            legend_handles,
+            [handle.get_label() for handle in legend_handles],
+            fontsize="small",
+        )
 
 
 def _plot_single_modality_pr_panel(
@@ -2342,8 +2362,6 @@ def plot_vc_timeseries(
 
     _ = vc_gamma  # retained for backward compatibility
 
-    fig, axes = plt.subplots(2, 5, figsize=(28, 10))
-
     if spectrum_top_k > 0:
         cov_title = f"Covariance spectrum (top {spectrum_top_k})"
     else:
@@ -2358,9 +2376,11 @@ def plot_vc_timeseries(
         f"CCA ρ̄ (top-{cca_top_k})" if cca_top_k > 0 else "CCA ρ̄ (all)"
     )
 
-    for row, modality in enumerate(("s1", "s2")):
+    for modality in ("s1", "s2"):
+        fig, axes = plt.subplots(1, 5, figsize=(26, 6))
+
         _plot_single_modality_spectrum(
-            axes[row, 0],
+            axes[0],
             metrics,
             modality=modality,
             spectrum_attr=f"{modality}_spectrum",
@@ -2371,7 +2391,7 @@ def plot_vc_timeseries(
             log_scale=True,
         )
         _plot_single_modality_pr_panel(
-            axes[row, 1],
+            axes[1],
             metrics,
             modality=modality,
             pr_attr=f"{modality}_participation_ratio",
@@ -2385,7 +2405,7 @@ def plot_vc_timeseries(
             delta_ylabel="ΔPR",
         )
         _plot_single_modality_spectrum(
-            axes[row, 2],
+            axes[2],
             metrics,
             modality=modality,
             spectrum_attr=f"{modality}_correlation_spectrum",
@@ -2397,7 +2417,7 @@ def plot_vc_timeseries(
             component_symbol="ρ",
         )
         _plot_single_modality_pr_panel(
-            axes[row, 3],
+            axes[3],
             metrics,
             modality=modality,
             pr_attr=f"{modality}_corr_participation_ratio",
@@ -2411,7 +2431,7 @@ def plot_vc_timeseries(
             delta_ylabel=None,
         )
         _plot_modality_corr_offdiag_panel(
-            axes[row, 4],
+            axes[4],
             metrics,
             modality=modality,
             offdiag_attr=f"{modality}_corr_offdiag_fro",
@@ -2420,10 +2440,12 @@ def plot_vc_timeseries(
             cca_label=cca_label,
         )
 
-    fig.suptitle("Variance, correlation, and CCA diagnostics across epochs")
-    fig.tight_layout(rect=[0, 0, 1, 0.97])
-    fig.savefig(output_dir / "vc_metrics_timeseries.png", dpi=200)
-    plt.close(fig)
+        fig.suptitle(
+            f"Variance, correlation, and CCA diagnostics across epochs — {modality.upper()}"
+        )
+        fig.tight_layout(rect=[0, 0, 1, 0.94])
+        fig.savefig(output_dir / f"vc_metrics_timeseries_{modality}.png", dpi=200)
+        plt.close(fig)
 
 
 def plot_singular_value_timeseries(
@@ -3486,7 +3508,12 @@ def main() -> None:
         spectrum_top_k=args.spectrum_top_k,
         cca_top_k=cca_top_k,
     )
-    summary_plot_paths.append(output_dir / "vc_metrics_timeseries.png")
+    summary_plot_paths.extend(
+        [
+            output_dir / "vc_metrics_timeseries_s1.png",
+            output_dir / "vc_metrics_timeseries_s2.png",
+        ]
+    )
     plot_singular_value_timeseries(
         metrics,
         output_dir,
