@@ -139,8 +139,14 @@ class EpochMetrics:
     s2_cov_fro: Optional[float] = None
     s1_participation_ratio: Optional[float] = None
     s2_participation_ratio: Optional[float] = None
+    s1_participation_ratio_normalized: Optional[float] = None
+    s2_participation_ratio_normalized: Optional[float] = None
     s1_cov_top_eig_share: Optional[float] = None
     s2_cov_top_eig_share: Optional[float] = None
+    s1_variance_floor_pct: Optional[float] = None
+    s2_variance_floor_pct: Optional[float] = None
+    s1_cov_redundancy: Optional[float] = None
+    s2_cov_redundancy: Optional[float] = None
     s1_correlation_spectrum: Optional[np.ndarray] = None
     s2_correlation_spectrum: Optional[np.ndarray] = None
     s1_pre_correlation_spectrum: Optional[np.ndarray] = None
@@ -162,8 +168,14 @@ class EpochMetrics:
     s2_pre_cov_fro: Optional[float] = None
     s1_pre_participation_ratio: Optional[float] = None
     s2_pre_participation_ratio: Optional[float] = None
+    s1_pre_participation_ratio_normalized: Optional[float] = None
+    s2_pre_participation_ratio_normalized: Optional[float] = None
     s1_pre_cov_top_eig_share: Optional[float] = None
     s2_pre_cov_top_eig_share: Optional[float] = None
+    s1_pre_variance_floor_pct: Optional[float] = None
+    s2_pre_variance_floor_pct: Optional[float] = None
+    s1_pre_cov_redundancy: Optional[float] = None
+    s2_pre_cov_redundancy: Optional[float] = None
     s1_pre_corr_participation_ratio: Optional[float] = None
     s2_pre_corr_participation_ratio: Optional[float] = None
     s1_pre_corr_spectral_entropy: Optional[float] = None
@@ -208,7 +220,10 @@ class EpochMetrics:
                 "std_min": self.s1_std_min,
                 "cov_fro": self.s1_cov_fro,
                 "participation_ratio": self.s1_participation_ratio,
+                "participation_ratio_normalized": self.s1_participation_ratio_normalized,
                 "cov_top_eig_share": self.s1_cov_top_eig_share,
+                "variance_floor_pct": self.s1_variance_floor_pct,
+                "cov_redundancy": self.s1_cov_redundancy,
                 "correlation_participation_ratio": self.s1_corr_participation_ratio,
                 "correlation_spectral_entropy": self.s1_corr_spectral_entropy,
                 "correlation_offdiag_fro": self.s1_corr_offdiag_fro,
@@ -218,7 +233,10 @@ class EpochMetrics:
                 "std_min": self.s2_std_min,
                 "cov_fro": self.s2_cov_fro,
                 "participation_ratio": self.s2_participation_ratio,
+                "participation_ratio_normalized": self.s2_participation_ratio_normalized,
                 "cov_top_eig_share": self.s2_cov_top_eig_share,
+                "variance_floor_pct": self.s2_variance_floor_pct,
+                "cov_redundancy": self.s2_cov_redundancy,
                 "correlation_participation_ratio": self.s2_corr_participation_ratio,
                 "correlation_spectral_entropy": self.s2_corr_spectral_entropy,
                 "correlation_offdiag_fro": self.s2_corr_offdiag_fro,
@@ -249,7 +267,10 @@ class EpochMetrics:
                 "std_min": self.s1_pre_std_min,
                 "cov_fro": self.s1_pre_cov_fro,
                 "participation_ratio": self.s1_pre_participation_ratio,
+                "participation_ratio_normalized": self.s1_pre_participation_ratio_normalized,
                 "cov_top_eig_share": self.s1_pre_cov_top_eig_share,
+                "variance_floor_pct": self.s1_pre_variance_floor_pct,
+                "cov_redundancy": self.s1_pre_cov_redundancy,
                 "correlation_participation_ratio": self.s1_pre_corr_participation_ratio,
                 "correlation_spectral_entropy": self.s1_pre_corr_spectral_entropy,
                 "correlation_offdiag_fro": self.s1_pre_corr_offdiag_fro,
@@ -270,7 +291,10 @@ class EpochMetrics:
                 "std_min": self.s2_pre_std_min,
                 "cov_fro": self.s2_pre_cov_fro,
                 "participation_ratio": self.s2_pre_participation_ratio,
+                "participation_ratio_normalized": self.s2_pre_participation_ratio_normalized,
                 "cov_top_eig_share": self.s2_pre_cov_top_eig_share,
+                "variance_floor_pct": self.s2_pre_variance_floor_pct,
+                "cov_redundancy": self.s2_pre_cov_redundancy,
                 "correlation_participation_ratio": self.s2_pre_corr_participation_ratio,
                 "correlation_spectral_entropy": self.s2_pre_corr_spectral_entropy,
                 "correlation_offdiag_fro": self.s2_pre_corr_offdiag_fro,
@@ -831,37 +855,94 @@ def compute_singular_values(features: torch.Tensor) -> Optional[np.ndarray]:
 def compute_vc_geometry(
     features: torch.Tensor,
     eps: float = 1e-12,
-) -> Tuple[float, float, float, float]:
+    covariance: Optional[torch.Tensor] = None,
+) -> Tuple[float, float, float, float, float]:
     """Return variance-covariance diagnostics for a batch of ``features``."""
 
     if features.dim() != 2 or features.shape[0] < 2:
         nan = float("nan")
-        return nan, nan, nan, nan
+        return nan, nan, nan, nan, nan
 
-    feats = features.to(torch.float64)
-    variances = torch.var(feats, dim=0, unbiased=False)
-    std = torch.sqrt(torch.clamp(variances, min=0.0) + 1e-4)
-    std_min = float(std.min().item())
+    if covariance is None:
+        feats = features.to(torch.float64)
+        cov = compute_covariance(feats)
+    else:
+        cov = covariance.to(torch.float64)
 
-    cov = compute_covariance(feats)
     if cov is None:
         nan = float("nan")
-        return nan, nan, nan, nan
+        return nan, nan, nan, nan, nan
 
-    diag = torch.diag(torch.diagonal(cov))
-    off_diag = (cov - diag).to(torch.float64)
-    cov_fro = float(torch.linalg.norm(off_diag, ord="fro").item())
+    diag_elements = torch.diagonal(cov)
+    if diag_elements.numel() == 0:
+        nan = float("nan")
+        return nan, nan, nan, nan, nan
 
-    eigvals = torch.linalg.eigvalsh(cov).real
+    std = torch.sqrt(torch.clamp(diag_elements, min=0.0))
+    std_min = float(std.min().item())
+
+    diag = torch.diag(diag_elements)
+    off_diag = cov - diag
+    off_norm = torch.linalg.norm(off_diag, ord="fro")
+    cov_norm = torch.linalg.norm(cov, ord="fro")
+    cov_fro = float(off_norm.item())
+    cov_norm_value = float(cov_norm.item())
+    if cov_norm_value <= eps:
+        redundancy = float("nan")
+    else:
+        redundancy = float((off_norm / cov_norm).item())
+
+    eigvals = torch.linalg.eigvalsh(cov).flip(0)
     eigvals = torch.clamp(eigvals, min=0.0)
-    eigvals_sum = eigvals.sum()
-    participation = float(((eigvals_sum**2) / (eigvals.pow(2).sum() + eps)).item())
-    if float(eigvals_sum) <= eps:
+    if eigvals.numel() == 0:
+        nan = float("nan")
+        return std_min, cov_fro, nan, nan, redundancy
+
+    eigvals_sum = float(eigvals.sum().item())
+    eigvals_sq_sum = float(eigvals.pow(2).sum().item())
+    if eigvals_sq_sum <= eps:
+        participation = float("nan")
+    else:
+        participation = float((eigvals_sum**2) / (eigvals_sq_sum + eps))
+
+    if eigvals_sum <= eps:
         top_share = float("nan")
     else:
-        top_share = float((eigvals.max() / eigvals_sum).item())
+        top_share = float((eigvals.max().item()) / eigvals_sum)
 
-    return std_min, cov_fro, participation, top_share
+    return std_min, cov_fro, participation, top_share, redundancy
+
+
+def _normalized_participation_ratio(value: Optional[float], dims: int) -> float:
+    if value is None or dims <= 0:
+        return float("nan")
+    value_float = float(value)
+    if math.isnan(value_float):
+        return float("nan")
+    return value_float / float(dims)
+
+
+def _variance_floor_percentage(
+    covariance: Optional[torch.Tensor],
+    gamma: float,
+) -> float:
+    if covariance is None:
+        return float("nan")
+
+    diag = torch.diagonal(covariance.to(torch.float64))
+    if diag.numel() == 0:
+        return float("nan")
+
+    std = torch.sqrt(torch.clamp(diag, min=0.0))
+    if std.numel() == 0:
+        return float("nan")
+
+    gamma_value = float(gamma)
+    if not math.isfinite(gamma_value):
+        return float("nan")
+
+    below = (std < gamma_value).sum().item()
+    return float(100.0 * below / std.numel())
 
 
 def compute_correlation_metrics(
@@ -1071,6 +1152,7 @@ def compute_epoch_metrics(
     negative_samples: Optional[int],
     random_seed: int,
     cca_top_k: int,
+    vc_gamma: float,
 ) -> List[EpochMetrics]:
     """Compute diagnostic metrics for each epoch."""
 
@@ -1087,8 +1169,13 @@ def compute_epoch_metrics(
         s1_tensor = epoch.s1.to(dtype=torch.float32)
         s2_tensor = epoch.s2.to(dtype=torch.float32)
         sample_count = s1_tensor.shape[0]
-        s1_var = torch.var(s1_tensor, dim=0, unbiased=False).cpu().numpy()
-        s2_var = torch.var(s2_tensor, dim=0, unbiased=False).cpu().numpy()
+
+        if sample_count > 1:
+            s1_var = torch.var(s1_tensor, dim=0, unbiased=True).cpu().numpy()
+            s2_var = torch.var(s2_tensor, dim=0, unbiased=True).cpu().numpy()
+        else:
+            s1_var = np.full(s1_tensor.shape[1], np.nan, dtype=np.float32)
+            s2_var = np.full(s2_tensor.shape[1], np.nan, dtype=np.float32)
 
         metrics = EpochMetrics(label=epoch.label, epoch_index=epoch.epoch_index, sample_count=sample_count)
         metrics.s1_variance = s1_var
@@ -1099,8 +1186,20 @@ def compute_epoch_metrics(
         cov_s1 = compute_covariance(s1_tensor)
         cov_s2 = compute_covariance(s2_tensor)
 
-        s1_std_min, s1_cov_fro, s1_participation, s1_cov_share = compute_vc_geometry(s1_tensor)
-        s2_std_min, s2_cov_fro, s2_participation, s2_cov_share = compute_vc_geometry(s2_tensor)
+        (
+            s1_std_min,
+            s1_cov_fro,
+            s1_participation,
+            s1_cov_share,
+            s1_redundancy,
+        ) = compute_vc_geometry(s1_tensor, covariance=cov_s1)
+        (
+            s2_std_min,
+            s2_cov_fro,
+            s2_participation,
+            s2_cov_share,
+            s2_redundancy,
+        ) = compute_vc_geometry(s2_tensor, covariance=cov_s2)
 
         metrics.s1_std_min = s1_std_min
         metrics.s2_std_min = s2_std_min
@@ -1108,8 +1207,18 @@ def compute_epoch_metrics(
         metrics.s2_cov_fro = s2_cov_fro
         metrics.s1_participation_ratio = s1_participation
         metrics.s2_participation_ratio = s2_participation
+        metrics.s1_participation_ratio_normalized = _normalized_participation_ratio(
+            s1_participation, s1_tensor.shape[1]
+        )
+        metrics.s2_participation_ratio_normalized = _normalized_participation_ratio(
+            s2_participation, s2_tensor.shape[1]
+        )
         metrics.s1_cov_top_eig_share = s1_cov_share
         metrics.s2_cov_top_eig_share = s2_cov_share
+        metrics.s1_variance_floor_pct = _variance_floor_percentage(cov_s1, vc_gamma)
+        metrics.s2_variance_floor_pct = _variance_floor_percentage(cov_s2, vc_gamma)
+        metrics.s1_cov_redundancy = s1_redundancy
+        metrics.s2_cov_redundancy = s2_redundancy
 
         (
             s1_corr_spec,
@@ -1139,13 +1248,15 @@ def compute_epoch_metrics(
 
         if epoch.s1_pre_projection is not None:
             s1_pre_tensor = epoch.s1_pre_projection.to(dtype=torch.float32)
+            cov_s1_pre = compute_covariance(s1_pre_tensor)
             metrics.s1_pre_singular_values = compute_singular_values(s1_pre_tensor)
             (
                 s1_pre_std_min,
                 s1_pre_cov_fro,
                 s1_pre_participation,
                 s1_pre_cov_share,
-            ) = compute_vc_geometry(s1_pre_tensor)
+                s1_pre_redundancy,
+            ) = compute_vc_geometry(s1_pre_tensor, covariance=cov_s1_pre)
             (
                 s1_pre_corr_spec,
                 s1_pre_corr_pr,
@@ -1156,13 +1267,17 @@ def compute_epoch_metrics(
             metrics.s1_pre_std_min = s1_pre_std_min
             metrics.s1_pre_cov_fro = s1_pre_cov_fro
             metrics.s1_pre_participation_ratio = s1_pre_participation
+            metrics.s1_pre_participation_ratio_normalized = _normalized_participation_ratio(
+                s1_pre_participation, s1_pre_tensor.shape[1]
+            )
             metrics.s1_pre_corr_participation_ratio = s1_pre_corr_pr
             metrics.s1_pre_corr_spectral_entropy = s1_pre_corr_entropy
             metrics.s1_pre_corr_offdiag_fro = s1_pre_corr_off
             metrics.s1_pre_correlation_spectrum = s1_pre_corr_spec
             metrics.s1_pre_cov_top_eig_share = s1_pre_cov_share
             metrics.s1_pre_corr_top_eig_share = s1_pre_corr_share
-            cov_s1_pre = compute_covariance(s1_pre_tensor)
+            metrics.s1_pre_variance_floor_pct = _variance_floor_percentage(cov_s1_pre, vc_gamma)
+            metrics.s1_pre_cov_redundancy = s1_pre_redundancy
             if cov_s1_pre is not None:
                 eigvals_pre = torch.linalg.eigvalsh(cov_s1_pre).flip(0).cpu().numpy()
                 metrics.s1_pre_spectrum = eigvals_pre
@@ -1175,13 +1290,15 @@ def compute_epoch_metrics(
 
         if epoch.s2_pre_projection is not None:
             s2_pre_tensor = epoch.s2_pre_projection.to(dtype=torch.float32)
+            cov_s2_pre = compute_covariance(s2_pre_tensor)
             metrics.s2_pre_singular_values = compute_singular_values(s2_pre_tensor)
             (
                 s2_pre_std_min,
                 s2_pre_cov_fro,
                 s2_pre_participation,
                 s2_pre_cov_share,
-            ) = compute_vc_geometry(s2_pre_tensor)
+                s2_pre_redundancy,
+            ) = compute_vc_geometry(s2_pre_tensor, covariance=cov_s2_pre)
             (
                 s2_pre_corr_spec,
                 s2_pre_corr_pr,
@@ -1192,13 +1309,17 @@ def compute_epoch_metrics(
             metrics.s2_pre_std_min = s2_pre_std_min
             metrics.s2_pre_cov_fro = s2_pre_cov_fro
             metrics.s2_pre_participation_ratio = s2_pre_participation
+            metrics.s2_pre_participation_ratio_normalized = _normalized_participation_ratio(
+                s2_pre_participation, s2_pre_tensor.shape[1]
+            )
             metrics.s2_pre_corr_participation_ratio = s2_pre_corr_pr
             metrics.s2_pre_corr_spectral_entropy = s2_pre_corr_entropy
             metrics.s2_pre_corr_offdiag_fro = s2_pre_corr_off
             metrics.s2_pre_correlation_spectrum = s2_pre_corr_spec
             metrics.s2_pre_cov_top_eig_share = s2_pre_cov_share
             metrics.s2_pre_corr_top_eig_share = s2_pre_corr_share
-            cov_s2_pre = compute_covariance(s2_pre_tensor)
+            metrics.s2_pre_variance_floor_pct = _variance_floor_percentage(cov_s2_pre, vc_gamma)
+            metrics.s2_pre_cov_redundancy = s2_pre_redundancy
             if cov_s2_pre is not None:
                 eigvals_pre = torch.linalg.eigvalsh(cov_s2_pre).flip(0).cpu().numpy()
                 metrics.s2_pre_spectrum = eigvals_pre
@@ -1552,6 +1673,104 @@ def _plot_vc_timeseries_panel(
 
     if handles:
         ax.legend(handles, legends)
+
+
+def _plot_pre_post_metric_timeseries(
+    ax,
+    *,
+    metrics: Sequence[EpochMetrics],
+    attr_post: str,
+    attr_pre: Optional[str],
+    title: str,
+    ylabel: str,
+    color: str,
+    y_limits: Tuple[float, float],
+    show_legend: bool = False,
+    reference_lines: Optional[Sequence[Tuple[float, Optional[str]]]] = None,
+) -> None:
+    x = [m.epoch_index for m in metrics]
+    labels = [m.label for m in metrics]
+
+    post_values = np.asarray(_extract_metric_series(metrics, attr_post), dtype=np.float64)
+    pre_values: Optional[np.ndarray]
+    if attr_pre is None:
+        pre_values = None
+    else:
+        pre_values = np.asarray(_extract_metric_series(metrics, attr_pre), dtype=np.float64)
+
+    has_post = np.isfinite(post_values).any()
+    has_pre = pre_values is not None and np.isfinite(pre_values).any()
+
+    if not (has_post or has_pre):
+        _mark_axis_no_data(ax, title)
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel(ylabel)
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=45, ha="right")
+        ax.set_ylim(*y_limits)
+        return
+
+    if has_post:
+        ax.plot(
+            x,
+            post_values,
+            color=color,
+            linestyle="-",
+            linewidth=2.0,
+            marker="o",
+            label="Post-head" if show_legend else None,
+        )
+
+    if has_pre and pre_values is not None:
+        ax.plot(
+            x,
+            pre_values,
+            color=color,
+            linestyle="--",
+            linewidth=1.8,
+            marker="o",
+            markerfacecolor="white",
+            alpha=0.6,
+            label="Pre-head" if show_legend else None,
+        )
+
+    if reference_lines:
+        for value, label in reference_lines:
+            if show_legend and label:
+                ax.axhline(
+                    value,
+                    color="#7f7f7f",
+                    linestyle=":",
+                    linewidth=1.0,
+                    alpha=0.8,
+                    label=label,
+                )
+            else:
+                ax.axhline(
+                    value,
+                    color="#7f7f7f",
+                    linestyle=":",
+                    linewidth=1.0,
+                    alpha=0.8,
+                )
+
+    ax.set_title(title)
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel(ylabel)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=45, ha="right")
+    ax.set_ylim(*y_limits)
+    ax.grid(True, alpha=0.3)
+
+    if show_legend:
+        handles, legend_labels = ax.get_legend_handles_labels()
+        filtered = [
+            (handle, label)
+            for handle, label in zip(handles, legend_labels)
+            if label and label != "_nolegend_"
+        ]
+        if filtered:
+            ax.legend(*zip(*filtered))
 
 
 def _plot_spectrum_panel(
@@ -2334,90 +2553,55 @@ def plot_vc_timeseries(
     if not metrics:
         return
 
-    _ = vc_gamma  # retained for backward compatibility
+    _ = spectrum_top_k  # retained for backward compatibility
+    _ = cca_top_k  # retained for backward compatibility
+    _ = vc_gamma
 
-    if spectrum_top_k > 0:
-        cov_title = f"Covariance spectrum (top {spectrum_top_k})"
-    else:
-        cov_title = "Covariance spectrum (all)"
+    modality_configs = [
+        ("s1", "S1", "#1f77b4"),
+        ("s2", "S2", "#ff7f0e"),
+    ]
 
-    if spectrum_top_k > 0:
-        corr_title = f"Correlation spectrum (top {spectrum_top_k})"
-    else:
-        corr_title = "Correlation spectrum (all)"
+    for modality, title_prefix, color in modality_configs:
+        fig, axes = plt.subplots(1, 3, figsize=(18, 5), sharex=True)
 
-    cca_label = (
-        f"CCA ρ̄ (top-{cca_top_k})" if cca_top_k > 0 else "CCA ρ̄ (all)"
-    )
-
-    for modality in ("s1", "s2"):
-        fig, axes = plt.subplots(1, 5, figsize=(26, 6))
-
-        _plot_single_modality_spectrum(
+        _plot_pre_post_metric_timeseries(
             axes[0],
-            metrics,
-            modality=modality,
-            spectrum_attr=f"{modality}_spectrum",
-            spectrum_pre_attr=f"{modality}_pre_spectrum",
-            title=cov_title,
-            ylabel="Eigenvalue",
-            top_k=spectrum_top_k,
-            log_scale=True,
-        )
-        _plot_single_modality_pr_panel(
-            axes[1],
-            metrics,
-            modality=modality,
-            pr_attr=f"{modality}_participation_ratio",
-            pr_pre_attr=f"{modality}_pre_participation_ratio",
-            top_share_attr=f"{modality}_cov_top_eig_share",
-            top_share_pre_attr=f"{modality}_pre_cov_top_eig_share",
-            delta_attr=f"{modality}_delta_participation_ratio",
-            title="Covariance PR & λ₁ share",
-            ylabel="Participation ratio",
-            share_ylabel="λ₁ share",
-            delta_ylabel="ΔPR",
-        )
-        _plot_single_modality_spectrum(
-            axes[2],
-            metrics,
-            modality=modality,
-            spectrum_attr=f"{modality}_correlation_spectrum",
-            spectrum_pre_attr=f"{modality}_pre_correlation_spectrum",
-            title=corr_title,
-            ylabel="Correlation eigenvalue",
-            top_k=spectrum_top_k,
-            log_scale=False,
-            component_symbol="ρ",
-        )
-        _plot_single_modality_pr_panel(
-            axes[3],
-            metrics,
-            modality=modality,
-            pr_attr=f"{modality}_corr_participation_ratio",
-            pr_pre_attr=f"{modality}_pre_corr_participation_ratio",
-            top_share_attr=f"{modality}_corr_top_eig_share",
-            top_share_pre_attr=f"{modality}_pre_corr_top_eig_share",
-            delta_attr=None,
-            title="Correlation PR & λ₁ share",
-            ylabel="Correlation PR",
-            share_ylabel="λ₁ share",
-            delta_ylabel=None,
-        )
-        _plot_modality_corr_offdiag_panel(
-            axes[4],
-            metrics,
-            modality=modality,
-            offdiag_attr=f"{modality}_corr_offdiag_fro",
-            offdiag_pre_attr=f"{modality}_pre_corr_offdiag_fro",
-            cca_attr=f"{modality}_pre_post_cca_topk_mean",
-            cca_label=cca_label,
+            metrics=metrics,
+            attr_post=f"{modality}_participation_ratio_normalized",
+            attr_pre=f"{modality}_pre_participation_ratio_normalized",
+            title="PR/d (cov)",
+            ylabel="PR/d",
+            color=color,
+            y_limits=(0.0, 1.0),
+            show_legend=True,
         )
 
-        fig.suptitle(
-            f"Variance, correlation, and CCA diagnostics across epochs — {modality.upper()}"
+        _plot_pre_post_metric_timeseries(
+            axes[1],
+            metrics=metrics,
+            attr_post=f"{modality}_variance_floor_pct",
+            attr_pre=f"{modality}_pre_variance_floor_pct",
+            title="% dims < γ",
+            ylabel="% below γ",
+            color=color,
+            y_limits=(0.0, 100.0),
+            reference_lines=[(0.0, "Target")],
         )
-        fig.tight_layout(rect=[0, 0, 1, 0.94])
+
+        _plot_pre_post_metric_timeseries(
+            axes[2],
+            metrics=metrics,
+            attr_post=f"{modality}_cov_redundancy",
+            attr_pre=f"{modality}_pre_cov_redundancy",
+            title="Redundancy ρ (cov)",
+            ylabel="ρ",
+            color=color,
+            y_limits=(0.0, 1.0),
+        )
+
+        fig.suptitle(f"{title_prefix} VC diagnostics over epochs")
+        fig.tight_layout(rect=[0, 0, 1, 0.92])
         fig.savefig(output_dir / f"vc_metrics_timeseries_{modality}.png", dpi=200)
         plt.close(fig)
 
@@ -2539,12 +2723,18 @@ def plot_epoch_dashboards(
             std_min = getattr(metric, f"{modality}_std_min")
             cov_fro = getattr(metric, f"{modality}_cov_fro")
             participation = getattr(metric, f"{modality}_participation_ratio")
+            pr_norm = getattr(metric, f"{modality}_participation_ratio_normalized")
+            variance_floor = getattr(metric, f"{modality}_variance_floor_pct")
+            redundancy = getattr(metric, f"{modality}_cov_redundancy")
             corr_pr = getattr(metric, f"{modality}_corr_participation_ratio")
             corr_entropy = getattr(metric, f"{modality}_corr_spectral_entropy")
             corr_off = getattr(metric, f"{modality}_corr_offdiag_fro")
             pre_std_min = getattr(metric, f"{modality}_pre_std_min")
             pre_cov_fro = getattr(metric, f"{modality}_pre_cov_fro")
             pre_participation = getattr(metric, f"{modality}_pre_participation_ratio")
+            pre_pr_norm = getattr(metric, f"{modality}_pre_participation_ratio_normalized")
+            pre_variance_floor = getattr(metric, f"{modality}_pre_variance_floor_pct")
+            pre_redundancy = getattr(metric, f"{modality}_pre_cov_redundancy")
             pre_corr_pr = getattr(metric, f"{modality}_pre_corr_participation_ratio")
             pre_corr_entropy = getattr(metric, f"{modality}_pre_corr_spectral_entropy")
             pre_corr_off = getattr(metric, f"{modality}_pre_corr_offdiag_fro")
@@ -2570,6 +2760,9 @@ def plot_epoch_dashboards(
             return (
                 f"{modality.upper()} std_min={_fmt_pair(std_min, pre_std_min, '.4f')}, "
                 f"‖Cov_off‖={_fmt_pair(cov_fro, pre_cov_fro, '.2e')}, "
+                f"PR/d={_fmt_pair(pr_norm, pre_pr_norm, '.3f')}, "
+                f"%<γ={_fmt_pair(variance_floor, pre_variance_floor, '.1f')}%, "
+                f"ρ={_fmt_pair(redundancy, pre_redundancy, '.3f')}, "
                 f"‖Corr_off‖={_fmt_pair(corr_off, pre_corr_off, '.2e')}, "
                 f"CovPR={_fmt_pair(participation, pre_participation, '.2f')}, "
                 f"CorrPR={_fmt_pair(corr_pr, pre_corr_pr, '.2f')}, "
@@ -3120,10 +3313,22 @@ def export_vc_metrics_csv(
         "vc_participation_ratio_s2",
         "vc_participation_ratio_s1_pre",
         "vc_participation_ratio_s2_pre",
+        "vc_participation_ratio_norm_s1",
+        "vc_participation_ratio_norm_s2",
+        "vc_participation_ratio_norm_s1_pre",
+        "vc_participation_ratio_norm_s2_pre",
         "vc_cov_top_eig_share_s1",
         "vc_cov_top_eig_share_s2",
         "vc_cov_top_eig_share_s1_pre",
         "vc_cov_top_eig_share_s2_pre",
+        "vc_variance_floor_pct_s1",
+        "vc_variance_floor_pct_s2",
+        "vc_variance_floor_pct_s1_pre",
+        "vc_variance_floor_pct_s2_pre",
+        "vc_cov_redundancy_s1",
+        "vc_cov_redundancy_s2",
+        "vc_cov_redundancy_s1_pre",
+        "vc_cov_redundancy_s2_pre",
         "corr_offdiag_fro_s1",
         "corr_offdiag_fro_s2",
         "corr_offdiag_fro_s1_pre",
@@ -3169,10 +3374,30 @@ def export_vc_metrics_csv(
                     "vc_participation_ratio_s2": _csv_value(metric.s2_participation_ratio),
                     "vc_participation_ratio_s1_pre": _csv_value(metric.s1_pre_participation_ratio),
                     "vc_participation_ratio_s2_pre": _csv_value(metric.s2_pre_participation_ratio),
+                    "vc_participation_ratio_norm_s1": _csv_value(
+                        metric.s1_participation_ratio_normalized
+                    ),
+                    "vc_participation_ratio_norm_s2": _csv_value(
+                        metric.s2_participation_ratio_normalized
+                    ),
+                    "vc_participation_ratio_norm_s1_pre": _csv_value(
+                        metric.s1_pre_participation_ratio_normalized
+                    ),
+                    "vc_participation_ratio_norm_s2_pre": _csv_value(
+                        metric.s2_pre_participation_ratio_normalized
+                    ),
                     "vc_cov_top_eig_share_s1": _csv_value(metric.s1_cov_top_eig_share),
                     "vc_cov_top_eig_share_s2": _csv_value(metric.s2_cov_top_eig_share),
                     "vc_cov_top_eig_share_s1_pre": _csv_value(metric.s1_pre_cov_top_eig_share),
                     "vc_cov_top_eig_share_s2_pre": _csv_value(metric.s2_pre_cov_top_eig_share),
+                    "vc_variance_floor_pct_s1": _csv_value(metric.s1_variance_floor_pct),
+                    "vc_variance_floor_pct_s2": _csv_value(metric.s2_variance_floor_pct),
+                    "vc_variance_floor_pct_s1_pre": _csv_value(metric.s1_pre_variance_floor_pct),
+                    "vc_variance_floor_pct_s2_pre": _csv_value(metric.s2_pre_variance_floor_pct),
+                    "vc_cov_redundancy_s1": _csv_value(metric.s1_cov_redundancy),
+                    "vc_cov_redundancy_s2": _csv_value(metric.s2_cov_redundancy),
+                    "vc_cov_redundancy_s1_pre": _csv_value(metric.s1_pre_cov_redundancy),
+                    "vc_cov_redundancy_s2_pre": _csv_value(metric.s2_pre_cov_redundancy),
                     "corr_offdiag_fro_s1": _csv_value(metric.s1_corr_offdiag_fro),
                     "corr_offdiag_fro_s2": _csv_value(metric.s2_corr_offdiag_fro),
                     "corr_offdiag_fro_s1_pre": _csv_value(metric.s1_pre_corr_offdiag_fro),
@@ -3440,6 +3665,7 @@ def main() -> None:
         negative_samples=args.negative_samples,
         random_seed=args.random_seed,
         cca_top_k=cca_top_k,
+        vc_gamma=vc_gamma,
     )
 
     summary_plot_paths: List[Path] = []
