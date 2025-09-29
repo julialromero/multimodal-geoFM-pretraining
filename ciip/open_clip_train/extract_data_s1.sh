@@ -45,17 +45,10 @@ for tarball in "${tarballs[@]}"; do
             tar -I pigz -xf "$tmp_tar" -C "$tmp_extract_dir"
             rm -f "$tmp_tar"
 
-            shopt -s dotglob
-            for extracted_item in "$tmp_extract_dir"/*; do
-                [ -e "$extracted_item" ] || continue
-                dest="$EXTRACT_DIR/$(basename "$extracted_item")"
-                echo "$(date) S1 | Installing $(basename "$extracted_item") into $EXTRACT_DIR"
-                rm -rf "$dest"
-                mv "$extracted_item" "$dest"
-            done
-            shopt -u dotglob
+            echo "$(date) S1 | Installing contents of $chunk_name into $EXTRACT_DIR"
+            rsync -a "$tmp_extract_dir"/ "$EXTRACT_DIR"/
 
-            rmdir "$tmp_extract_dir"
+            rm -rf "$tmp_extract_dir"
             touch "$marker"
             echo "$(date) S1 | Finished processing $chunk_name"
         fi
