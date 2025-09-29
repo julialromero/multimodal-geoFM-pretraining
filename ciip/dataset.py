@@ -2,9 +2,45 @@
 
 import logging
 import os
-import numpy as np
-import rasterio
-from torch.utils.data import Dataset
+import random
+
+try:  # pragma: no cover - exercised when numpy is missing
+    import numpy as np  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - handled by runtime checks
+    np = None  # type: ignore
+
+try:  # pragma: no cover - exercised when rasterio is missing
+    import rasterio  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - handled by runtime checks
+    rasterio = None  # type: ignore
+
+try:  # pragma: no cover - exercised when torch is missing
+    from torch.utils.data import Dataset
+except ModuleNotFoundError:  # pragma: no cover - fallback for tests
+    class Dataset:  # type: ignore
+        """Minimal stand-in for :class:`torch.utils.data.Dataset`."""
+
+        def __getitem__(self, idx):  # pragma: no cover - interface definition
+            raise NotImplementedError
+
+        def __len__(self):  # pragma: no cover - interface definition
+            raise NotImplementedError
+
+
+def _require_numpy() -> "np":  # type: ignore[name-defined]
+    if np is None:
+        raise ModuleNotFoundError(
+            "numpy is required for dataset operations. Install numpy to work with raster imagery."
+        )
+    return np  # type: ignore[return-value]
+
+
+def _require_rasterio():
+    if rasterio is None:
+        raise ModuleNotFoundError(
+            "rasterio is required for dataset operations. Install rasterio to read GeoTIFF inputs."
+        )
+    return rasterio
 
 
 ### band statistics: mean & std
@@ -23,6 +59,9 @@ S2C_STD = [786.78685367, 850.34818441, 875.06484736, 1138.84957046, 1122.1777565
 
 class S12Dataset(Dataset):
     def __init__(self, root, ):
+        _require_numpy()
+        _require_rasterio()
+
         self.root = root
         self.num_locations = None
         self.length = None
@@ -67,6 +106,7 @@ class S12Dataset(Dataset):
 
     def __getitem__(self, idx):
         ### get the sample corresponding to idx
+        np_module = _require_numpy()
         location_idx, season_idx = self.int_to_filepath(idx)
 
         location_folder = self.locations[location_idx]
@@ -99,7 +139,7 @@ class S12Dataset(Dataset):
 
                 
         # Create an RGB composite using VH, VV, and their average
-        s1_composite_image = np.stack((vh_image, vv_image, (vh_image + vv_image) / 2), axis=-1)
+        s1_composite_image = np_module.stack((vh_image, vv_image, (vh_image + vv_image) / 2), axis=-1)
         # s1_composite_image = np.stack((vh_image, vv_image, vv_image / vh_image), axis=-1)
         
 
@@ -118,8 +158,8 @@ class S12Dataset(Dataset):
         # Normalize the bands
         # band_images = [self.normalize_image(band_image) for band_image in band_images]
         band_images = [self.normalize(img, mean, std) for img, mean, std in zip(band_images, S2C_MEAN, S2C_STD)]
-        
-        s2_composite_image = np.stack(band_images, axis=-1)  # Create an RGB composite
+
+        s2_composite_image = np_module.stack(band_images, axis=-1)  # Create an RGB composite
         
 
         # img1 = self.transforms(Image.open(str(self.img1_paths[idx])))
@@ -137,7 +177,8 @@ class S12Dataset(Dataset):
         return location_idx, season_idx
 
     def read_raster_image(self, image_path):
-        with rasterio.open(image_path) as src:
+        rasterio_module = _require_rasterio()
+        with rasterio_module.open(image_path) as src:
             return src.read(1), src.profile
 
     #### our custom normalization function for image-wise norm
@@ -151,10 +192,11 @@ class S12Dataset(Dataset):
     ## taken from: https://github.com/zhu-xlab/SSL4EO-S12/blob/2156913c5d8e5a2c572a5b000f0d5eaed6fc3192/src/benchmark/pretrain_ssl/datasets/SSL4EO/ssl4eo_dataset.py#L36
     # normalize: standardize + percentile
     def normalize(img, mean, std):
+        np_module = _require_numpy()
         min_value = mean - 2 * std
         max_value = mean + 2 * std
         img = (img - min_value) / (max_value - min_value) * 255.0
-        img = np.clip(img, 0, 255).astype(np.uint8)
+        img = np_module.clip(img, 0, 255).astype(np_module.uint8)
         return img
 
 
@@ -175,13 +217,29 @@ class Subset(Dataset):
         return getattr(self.dataset, name)
 
 
-def generate_splits(dataset, val_frac, seed=None):
-    rng = np.random.default_rng(seed)
-    val_indices = rng.choice(range(len(dataset)), int(val_frac * len(dataset)))
+def generate_splits(dataset: Dataset, val_frac: float, seed: int | None = None):
+    """Split a dataset into train and validation subsets.
 
-    # all other indices are for training
-    all_indices = np.arange(len(dataset))
-    train_indices = np.setdiff1d(all_indices, val_indices)
+    The implementation only relies on the Python standard library so it works in
+    lightweight environments where optional dependencies such as NumPy are not
+    available.
+    """
 
-    return Subset(dataset, train_indices), Subset(dataset, val_indices)
+    if not 0 <= val_frac <= 1:
+        raise ValueError("val_frac must be between 0 and 1 inclusive")
+
+    total_examples = len(dataset)
+    if total_examples == 0:
+        return Subset(dataset, []), Subset(dataset, [])
+
+    indices = list(range(total_examples))
+    validation_count = int(val_frac * total_examples)
+
+    rng = random.Random(seed)
+    validation_indices = rng.sample(indices, validation_count)
+
+    validation_set = set(validation_indices)
+    training_indices = [index for index in indices if index not in validation_set]
+
+    return Subset(dataset, training_indices), Subset(dataset, validation_indices)
 
