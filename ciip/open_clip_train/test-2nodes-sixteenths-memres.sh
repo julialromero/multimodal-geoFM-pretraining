@@ -14,6 +14,9 @@
 #SBATCH --mail-type="BEGIN,END"
 #SBATCH --exclusive
 #SBATCH --mem=0
+# NOTE: The extraction helpers now stage *all* chunk_XX.tar.gz archives on each
+# node (/tmp/$USER/s1 and /tmp/$USER/s2c). Ensure every node has enough local
+# scratch space for the full, extracted datasets before launching the job.
 
 
 ###NOTE: make sure to run the following to launch the script:
@@ -138,6 +141,9 @@ fi
 
 ########## Run the data extraction script on all nodes - run in the foreground
 echo "$(date) | Global rank $SLURM_PROCID | Starting data extraction script."
+# run_train_val_distributed.py will continue to block on
+# ${LOG_BASE_DIR}/data_extraction_done.txt, so all ranks must finish
+# extraction before training begins.
 # echo the full path to the output file extract_data_%j_%n.out
 
 srun --nodes=$SLURM_NNODES --ntasks-per-node=8 --cpus-per-task=6 --gpus-per-task=0 \

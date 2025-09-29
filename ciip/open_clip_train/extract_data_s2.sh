@@ -1,40 +1,60 @@
 #!/bin/bash
-set -e  # Exit on any error
+set -euo pipefail
+
 echo "Starting data extraction - S2"
 
-RANKFILE=$SLURM_NODELIST
-NODE_RANK=$SLURM_NODEID
+SOURCE_DIR="/work/nvme/bekj/jromero5/tarballs/s2c"
+EXTRACT_DIR="/tmp/$USER/s2c"
+MARKER_DIR="$EXTRACT_DIR/.extracted"
+LOCK_DIR="$EXTRACT_DIR/.locks"
 
-# Assign chunk name based on rank
-SLURM_ADJUSTED_LOCALID=$((SLURM_LOCALID % 4))
-GLOBAL_TASK_ID=$((SLURM_NODEID * 4 + SLURM_ADJUSTED_LOCALID))
-CHUNK_ID=$(printf "%02d" $GLOBAL_TASK_ID)
-# CHUNK_ID=$(printf "%02d" $NODE_RANK)
+mkdir -p "$EXTRACT_DIR" "$MARKER_DIR" "$LOCK_DIR"
 
+echo "$(date) S2 | Running on node ${SLURM_NODEID:-unknown} with local task ${SLURM_LOCALID:-unknown}"
+echo "$(date) S2 | Copying all chunks from $SOURCE_DIR to $EXTRACT_DIR"
 
-CHUNK_FILE_S2=/work/nvme/bekj/jromero5/tarballs/s2c/chunk_${CHUNK_ID}.tar.gz
-TMP_CHUNK_FILE_S2=/tmp/$USER/s2c/chunk_${CHUNK_ID}.tar.gz
-EXTRACT_DIR_S2=/tmp/$USER/s2c
+shopt -s nullglob
+tarballs=("$SOURCE_DIR"/chunk_*.tar.gz)
+if [ ${#tarballs[@]} -eq 0 ]; then
+    echo "$(date) S2 | No chunk tarballs were found in $SOURCE_DIR"
+fi
 
-# print local id
-echo "S2 Local ID: $SLURM_LOCALID"
-echo "S2 Node rank: $NODE_RANK"
-echo "S2 Global task ID: $GLOBAL_TASK_ID"
-echo "S2 Chunk ID: $CHUNK_ID"
-echo "S2 Number of CPUs per task: $SLURM_CPUS_PER_TASK"
+for tarball in "${tarballs[@]}"; do
+    chunk_basename=$(basename "$tarball")
+    chunk_name="${chunk_basename%.tar.gz}"
+    marker="$MARKER_DIR/$chunk_name"
+    tmp_tar="$EXTRACT_DIR/$chunk_basename"
 
-mkdir -p /tmp/$USER/s2c
-mkdir -p $EXTRACT_DIR_S2
+    if [ -f "$marker" ]; then
+        echo "$(date) S2 | $chunk_name already extracted, skipping"
+        continue
+    fi
 
+    (
+        flock 9
 
-####### PROCESS S2 #######
-# COPY S2 TAR FILE
-echo "$(date) S2 | Global task ID $GLOBAL_TASK_ID | Copying chunk file $CHUNK_FILE_S2 to $TMP_CHUNK_FILE_S2"
-cp $CHUNK_FILE_S2 $TMP_CHUNK_FILE_S2
-echo "$(date) S2 | Global task ID $GLOBAL_TASK_ID | Finished copying chunk file $CHUNK_FILE_S2 to $TMP_CHUNK_FILE_S2"
+        if [ -f "$marker" ]; then
+            echo "$(date) S2 | $chunk_name extracted by another rank, skipping"
+        else
+            echo "$(date) S2 | Copying $tarball to $tmp_tar"
+            rm -f "$tmp_tar"
+            rsync -a "$tarball" "$tmp_tar"
 
-# Parallel extraction using all allocated CPUs
-echo "$(date) S2 | Global task ID $GLOBAL_TASK_ID | Extracting $TMP_CHUNK_FILE_S2 to $EXTRACT_DIR_S2"
-tar -I pigz -xf $TMP_CHUNK_FILE_S2 -C $EXTRACT_DIR_S2
-rm $TMP_CHUNK_FILE_S2
-echo "$(date) S2 | Global task ID $GLOBAL_TASK_ID | Finished extracting S2 chunk $CHUNK_ID"
+            tmp_extract_dir=$(mktemp -d "$EXTRACT_DIR/.${chunk_name}_XXXXXX")
+            echo "$(date) S2 | Extracting $tmp_tar into $tmp_extract_dir"
+            tar -I pigz -xf "$tmp_tar" -C "$tmp_extract_dir"
+            rm -f "$tmp_tar"
+
+            echo "$(date) S2 | Installing contents of $chunk_name into $EXTRACT_DIR"
+            rsync -a "$tmp_extract_dir"/ "$EXTRACT_DIR"/
+
+            rm -rf "$tmp_extract_dir"
+            touch "$marker"
+            echo "$(date) S2 | Finished processing $chunk_name"
+        fi
+
+    ) 9>"$LOCK_DIR/$chunk_name.lock"
+done
+shopt -u nullglob
+
+echo "$(date) S2 | Data extraction complete"
