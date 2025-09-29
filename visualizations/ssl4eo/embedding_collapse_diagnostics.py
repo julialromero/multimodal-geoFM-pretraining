@@ -3004,7 +3004,7 @@ def compute_projection(
             init="pca",
             random_state=random_state,
             metric="cosine",
-            square_distances=True,
+            # square_distances=True,
         )
     elif method == "umap":
         if umap is None:
@@ -3245,6 +3245,20 @@ def parse_args() -> argparse.Namespace:
                 --output-dir diagnostics/random_init/9-11-2025-vcregstats \
                 --dataset-root /local/ms-data/SSL4EO/ \
                 --vc-gamma 1 
+
+            python -m visualizations.ssl4eo.embedding_collapse_diagnostics \
+                --checkpoint-root '/local/ms-data/SSL4EO/model/2025_09_26-13_32_23-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints' \
+                --output-dir diagnostics/random_init/9-26-2025-vcregstats \
+                --dataset-root /local/ms-data/SSL4EO/ \
+                --vc-gamma 1 
+
+            python -m visualizations.ssl4eo.embedding_collapse_diagnostics \
+                --checkpoint-root '/local/ms-data/SSL4EO/model/2025-09-28_11-07-06-test-compute/checkpoints' \
+                --output-dir diagnostics/random_init/9-28-2025-vcregstats \
+                --dataset-root /local/ms-data/SSL4EO/ \
+                --vc-gamma 1
+
+            python -m visualizations.ssl4eo.embedding_collapse_diagnostics                 --checkpoint-root '/local/ms-data/SSL4EO/model/2025-09-25_17-34-44-test-compute/2025_09_25-17_43_19-model_resnet50-lr_5e-05-b_128-j_4-p_amp/checkpoints'                 --output-dir diagnostics/random_init/9-25-2025-vcregstats                 --dataset-root /local/ms-data/SSL4EO/                 --vc-gamma 1
             """
 
             # --checkpoint-root '/home/juro4948/ciip/logs/2025_09_23-12_27_52-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints' \
