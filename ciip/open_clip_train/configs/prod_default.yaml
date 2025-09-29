@@ -95,7 +95,7 @@ train:
   beta2: 0.999
   eps: 1.0e-8
   val_frequency: 1
-  accum_freq: 10
+  accum_freq: 5
   save_logs: True
   name: ciip_test
   delete_previous_checkpoint: False

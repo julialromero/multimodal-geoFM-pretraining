@@ -25,7 +25,7 @@ from open_clip import get_input_dtype
 from open_clip_train.distributed import is_master
 from open_clip_train.zero_shot import zero_shot_eval
 from open_clip_train.precision import get_autocast
-from ciip.loss import gather_features
+from loss import gather_features
 
 import random
 from torch.utils.data import Dataset, DataLoader
@@ -327,15 +327,16 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
 
 
 
-            # save the model weights after the warm up phase -> random weights with appropriate batch norm stats
-            torch.save(
-            model.state_dict(),
-                os.path.join(args.io.checkpoint_path, f"epoch_init.pt"),
-            )
-            logging.info(f'Saved initial model weights to {args.io.checkpoint_path}.')
+            
 
             # delete  dataloader
             del loader
+    # save the model weights after the warm up phase -> random weights with appropriate batch norm stats
+    torch.save(
+    model.state_dict(),
+        os.path.join(args.io.checkpoint_path, f"epoch_0.pt"),
+    )
+    logging.info(f'Saved initial model weights to {args.io.checkpoint_path}.')
 
             
     model.train()
