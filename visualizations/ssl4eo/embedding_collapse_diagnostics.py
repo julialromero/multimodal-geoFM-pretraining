@@ -47,6 +47,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import csv
+import io
 import json
 import logging
 import math
@@ -61,6 +62,7 @@ import matplotlib.image as mpimg
 from matplotlib.lines import Line2D
 from matplotlib.backends.backend_pdf import PdfPages
 import numpy as np
+import imageio.v2 as imageio
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -2978,6 +2980,70 @@ def _collect_spectra(
     return specs, labels
 
 
+
+def _normalize_and_log(
+    spectrum: Optional[np.ndarray],
+    *,
+    k: int,
+    normalize: str,
+) -> Optional[np.ndarray]:
+    """Normalize and log-transform ``spectrum`` for visualization."""
+
+    if spectrum is None or spectrum.size == 0:
+        return None
+
+    values = spectrum[:k].astype(np.float64)
+    if values.size == 0:
+        return None
+
+    if normalize == "trace":
+        values = values / (np.sum(values) + 1e-12)
+    elif normalize == "max":
+        values = values / (values[0] + 1e-12)
+
+    return np.log(np.maximum(values, 1e-20))
+
+
+def plot_svd_ridgeline_animation(
+    metrics: Sequence[EpochMetrics],
+    output_dir: Path,
+    *,
+    use_correlation: bool = False,
+    top_k: Optional[int] = None,
+    normalize: str = "trace",
+    frame_duration: float = 0.8,
+) -> Optional[Path]:
+    """Generate an animated ridgeline cycling through epochs for both modalities."""
+
+    attr_post = (
+        "{modality}_correlation_spectrum"
+        if use_correlation
+        else "{modality}_singular_values"
+    )
+    attr_pre = (
+        "{modality}_pre_correlation_spectrum"
+        if use_correlation
+        else "{modality}_pre_singular_values"
+    )
+
+    entries: List[Tuple[str, Dict[str, Dict[str, Optional[np.ndarray]]]]] = []
+    max_len = 0
+    for metric in metrics:
+        modality_specs: Dict[str, Dict[str, Optional[np.ndarray]]] = {}
+        for modality in ("s1", "s2"):
+            post = _prepare_spectrum(
+                getattr(metric, attr_post.format(modality=modality), None)
+            )
+            pre = _prepare_spectrum(
+                getattr(metric, attr_pre.format(modality=modality), None)
+            )
+            modality_specs[modality] = {"post": post, "pre": pre}
+            for spec in (post, pre):
+                if spec is not None and spec.size:
+                    max_len = max(max_len, spec.size)
+        entries.append((metric.label, modality_specs))
+
+
 def plot_svd_ridgeline(
     metrics: Sequence[EpochMetrics],
     output_dir: Path,
@@ -2999,6 +3065,7 @@ def plot_svd_ridgeline(
         return None
 
     max_len = max(map(len, specs))
+    
     if max_len == 0:
         return None
 
@@ -3006,32 +3073,7 @@ def plot_svd_ridgeline(
         k = max_len
     else:
         k = min(top_k, max_len)
-    x = np.arange(1, k + 1)
 
-    fig, ax = plt.subplots(figsize=(9, 5))
-    for lab, spec in zip(labels, specs):
-        y = spec[:k].astype(np.float64)
-        if normalize == "trace":
-            y = y / (np.sum(y) + 1e-12)
-        elif normalize == "max":
-            y = y / (y[0] + 1e-12)
-        if y.size == 0:
-            continue
-        ax.plot(x[: y.size], np.log(np.maximum(y[: y.size], 1e-20)), alpha=0.35, label=lab)
-
-    title_core = "Correlation spectrum" if use_correlation else "Singular values"
-    norm_tag = "" if normalize == "none" else f" · norm={normalize}"
-    ax.set_title(f"{title_core} — {modality.upper()} across epochs{norm_tag}")
-    ax.set_xlabel("Component index")
-    ax.set_ylabel("log(value)")
-    ax.grid(True, alpha=0.3)
-    if len(labels) <= 12:
-        ax.legend(fontsize="small", ncol=2)
-    fig.tight_layout()
-    filename = f"{modality}_{'corr' if use_correlation else 'svd'}_ridgeline.png"
-    output_path = output_dir / filename
-    fig.savefig(output_path, dpi=200)
-    plt.close(fig)
     return output_path
 
 
@@ -4009,28 +4051,27 @@ def main() -> None:
     if grid_path is not None:
         summary_plot_paths.append(grid_path)
 
-    for modality in ("s1", "s2"):
-        ridge = plot_svd_ridgeline(
-            metrics,
-            output_dir,
-            modality=modality,
-            use_correlation=False,
-            top_k=args.spectrum_top_k,
-            normalize="trace",
-        )
-        if ridge is not None:
-            summary_plot_paths.append(ridge)
-        ridge_corr = plot_svd_ridgeline(
-            metrics,
-            output_dir,
-            modality=modality,
-            use_correlation=True,
-            top_k=args.spectrum_top_k,
-            normalize="trace",
-        )
-        if ridge_corr is not None:
-            summary_plot_paths.append(ridge_corr)
+    ridge = plot_svd_ridgeline_animation(
+        metrics,
+        output_dir,
+        use_correlation=False,
+        top_k=args.spectrum_top_k,
+        normalize="trace",
+    )
+    if ridge is not None:
+        summary_plot_paths.append(ridge)
 
+    ridge_corr = plot_svd_ridgeline_animation(
+        metrics,
+        output_dir,
+        use_correlation=True,
+        top_k=args.spectrum_top_k,
+        normalize="trace",
+    )
+    if ridge_corr is not None:
+        summary_plot_paths.append(ridge_corr)
+
+    for modality in ("s1", "s2"):
         heatmap = plot_svd_heatmap(
             metrics,
             output_dir,
