@@ -102,22 +102,18 @@ while [ "$ALL_ALLOCATED" == false ] && [ "$ELAPSED_TIME" -lt "$MAX_WAIT_TIME" ];
     ALL_ALLOCATED=true # Assume true, then check if any are missing
     
     # Loop through each node
-    for NODE in $(scontrol show hostnames $SLURM_JOB_NODELIST); do
-        NUM_PROCS_PER_NODE=$SLURM_GPUS_PER_NODE 
-        
-        for i in $(seq 0 $((NUM_PROCS_PER_NODE-1))); do
-            FILE_TO_CHECK="/tmp/jromero5/allocated_${i}.txt"
-            CHECK_RESULT=$(srun --nodes=1 --ntasks=1 --overlap --export=ALL -w "$NODE" bash -c "test -f \"$FILE_TO_CHECK\" && echo 'found' || echo 'not_found'")
-            echo "$(date) | Global rank $SLURM_PROCID | Checking file $FILE_TO_CHECK on node $NODE: $CHECK_RESULT"
-            if [ "$CHECK_RESULT" == "found" ]; then
-                echo "$(date) | Global rank $SLURM_PROCID | File $FILE_TO_CHECK found on node $NODE."
-            elif [ "$CHECK_RESULT" == "not_found" ]; then
-                echo "$(date) | Global rank $SLURM_PROCID | Waiting: File $FILE_TO_CHECK NOT FOUND on node $NODE."
-                ALL_ALLOCATED=false
-                break 2 # Break out of inner and outer loops (node and process loops)
-            fi
-           
-        done
+    for NODE in "${nodes_array[@]}"; do
+        NUM_PROCS_PER_NODE=$SLURM_GPUS_PER_NODE
+        CHECK_CMD='missing=0; for i in $(seq 0 $((NUM_PROCS_PER_NODE-1))); do [ -f "/tmp/jromero5/allocated_${i}.txt" ] || missing=1; done; exit $missing'
+
+        if srun --nodes=1 --ntasks=1 --overlap --export=ALL,NUM_PROCS_PER_NODE=$NUM_PROCS_PER_NODE \
+            -w "$NODE" bash -c "$CHECK_CMD"; then
+            echo "$(date) | Global rank $SLURM_PROCID | All allocation files found on node $NODE."
+        else
+            echo "$(date) | Global rank $SLURM_PROCID | Waiting: Missing allocation files on node $NODE."
+            ALL_ALLOCATED=false
+            break
+        fi
     done
 
     if [ "$ALL_ALLOCATED" == false ]; then
