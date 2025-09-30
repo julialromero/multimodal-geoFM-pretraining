@@ -24,36 +24,45 @@ for tarball in "${tarballs[@]}"; do
     chunk_name="${chunk_basename%.tar.gz}"
     marker="$MARKER_DIR/$chunk_name"
     tmp_tar="$EXTRACT_DIR/$chunk_basename"
+    lock_path="$LOCK_DIR/$chunk_name.lock"
 
     if [ -f "$marker" ]; then
         echo "$(date) S2 | $chunk_name already extracted, skipping"
         continue
     fi
 
-    (
-        flock 9
+    exec {lock_fd}>"$lock_path"
+    if ! flock -n "$lock_fd"; then
+        # Another process is already working on this chunk; skip it.
+        exec {lock_fd}>&-
+        continue
+    fi
 
-        if [ -f "$marker" ]; then
-            echo "$(date) S2 | $chunk_name extracted by another rank, skipping"
-        else
-            echo "$(date) S2 | Copying $tarball to $tmp_tar"
-            rm -f "$tmp_tar"
-            rsync -a "$tarball" "$tmp_tar"
+    if [ -f "$marker" ]; then
+        echo "$(date) S2 | $chunk_name extracted by another rank, skipping"
+        flock -u "$lock_fd"
+        exec {lock_fd}>&-
+        continue
+    fi
 
-            tmp_extract_dir=$(mktemp -d "$EXTRACT_DIR/.${chunk_name}_XXXXXX")
-            echo "$(date) S2 | Extracting $tmp_tar into $tmp_extract_dir"
-            tar -I pigz -xf "$tmp_tar" -C "$tmp_extract_dir"
-            rm -f "$tmp_tar"
+    echo "$(date) S2 | Copying $tarball to $tmp_tar"
+    rm -f "$tmp_tar"
+    rsync -a "$tarball" "$tmp_tar"
 
-            echo "$(date) S2 | Installing contents of $chunk_name into $EXTRACT_DIR"
-            rsync -a "$tmp_extract_dir"/ "$EXTRACT_DIR"/
+    tmp_extract_dir=$(mktemp -d "$EXTRACT_DIR/.${chunk_name}_XXXXXX")
+    echo "$(date) S2 | Extracting $tmp_tar into $tmp_extract_dir"
+    tar -I pigz -xf "$tmp_tar" -C "$tmp_extract_dir"
+    rm -f "$tmp_tar"
 
-            rm -rf "$tmp_extract_dir"
-            touch "$marker"
-            echo "$(date) S2 | Finished processing $chunk_name"
-        fi
+    echo "$(date) S2 | Installing contents of $chunk_name into $EXTRACT_DIR"
+    rsync -a "$tmp_extract_dir"/ "$EXTRACT_DIR"/
 
-    ) 9>"$LOCK_DIR/$chunk_name.lock"
+    rm -rf "$tmp_extract_dir"
+    touch "$marker"
+    echo "$(date) S2 | Finished processing $chunk_name"
+
+    flock -u "$lock_fd"
+    exec {lock_fd}>&-
 done
 shopt -u nullglob
 
