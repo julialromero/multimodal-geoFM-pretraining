@@ -2980,6 +2980,7 @@ def _collect_spectra(
     return specs, labels
 
 
+
 def _normalize_and_log(
     spectrum: Optional[np.ndarray],
     *,
@@ -3042,6 +3043,29 @@ def plot_svd_ridgeline_animation(
                     max_len = max(max_len, spec.size)
         entries.append((metric.label, modality_specs))
 
+
+def plot_svd_ridgeline(
+    metrics: Sequence[EpochMetrics],
+    output_dir: Path,
+    *,
+    modality: str = "s1",
+    use_correlation: bool = False,
+    top_k: Optional[int] = None,
+    normalize: str = "trace",
+) -> Optional[Path]:
+    """Overlay per-epoch spectra to visualize their evolution."""
+
+    attr = (
+        f"{modality}_correlation_spectrum"
+        if use_correlation
+        else f"{modality}_singular_values"
+    )
+    specs, labels = _collect_spectra(metrics, attr)
+    if not specs:
+        return None
+
+    max_len = max(map(len, specs))
+    
     if max_len == 0:
         return None
 
@@ -3050,88 +3074,6 @@ def plot_svd_ridgeline_animation(
     else:
         k = min(top_k, max_len)
 
-    processed: List[Tuple[str, Dict[str, Dict[str, Optional[np.ndarray]]]]] = []
-    global_min = math.inf
-    global_max = -math.inf
-    for label, modality_specs in entries:
-        processed_modalities: Dict[str, Dict[str, Optional[np.ndarray]]] = {}
-        for modality in ("s1", "s2"):
-            log_post = _normalize_and_log(modality_specs[modality]["post"], k=k, normalize=normalize)
-            log_pre = _normalize_and_log(modality_specs[modality]["pre"], k=k, normalize=normalize)
-            processed_modalities[modality] = {"post": log_post, "pre": log_pre}
-            for arr in (log_post, log_pre):
-                if arr is not None and arr.size:
-                    global_min = min(global_min, float(np.nanmin(arr)))
-                    global_max = max(global_max, float(np.nanmax(arr)))
-        processed.append((label, processed_modalities))
-
-    if not processed or not math.isfinite(global_min) or not math.isfinite(global_max):
-        return None
-
-    x = np.arange(1, k + 1)
-    frames: List[np.ndarray] = []
-    colors = {
-        "s1": ("#2ca02c", "#98df8a"),
-        "s2": ("#17becf", "#9edae5"),
-    }
-    title_core = "Correlation spectrum" if use_correlation else "Singular values"
-    norm_tag = "" if normalize == "none" else f" · norm={normalize}"
-    ylim = (global_min, global_max)
-
-    for label, modality_specs in processed:
-        fig, axes = plt.subplots(1, 2, figsize=(12, 5), sharex=True, sharey=True)
-        for ax, modality in zip(axes, ("s1", "s2")):
-            post_color, pre_color = colors[modality]
-            log_post = modality_specs[modality]["post"]
-            log_pre = modality_specs[modality]["pre"]
-            if log_post is not None:
-                length = log_post.size
-                ax.plot(
-                    x[:length],
-                    log_post,
-                    marker="o",
-                    linestyle="-",
-                    color=post_color,
-                    label="Post projection",
-                )
-            if log_pre is not None:
-                length = log_pre.size
-                ax.plot(
-                    x[:length],
-                    log_pre,
-                    marker="s",
-                    linestyle="--",
-                    color=pre_color,
-                    label="Pre projection",
-                )
-            if log_post is None and log_pre is None:
-                _mark_axis_no_data(ax, modality.upper())
-            ax.set_xlim(1, k)
-            ax.set_ylim(*ylim)
-            ax.set_title(f"{modality.upper()} — {label}")
-            ax.set_xlabel("Component index")
-            ax.set_ylabel("log(value)")
-            ax.grid(True, alpha=0.3)
-            legend_handles, legend_labels = ax.get_legend_handles_labels()
-            if legend_handles and modality == "s1":
-                ax.legend(legend_handles, legend_labels, fontsize="small")
-
-        fig.suptitle(f"{title_core}{norm_tag}\n{label}")
-        fig.tight_layout()
-        fig.subplots_adjust(top=0.82)
-
-        buffer = io.BytesIO()
-        fig.savefig(buffer, format="png", dpi=200)
-        buffer.seek(0)
-        frames.append(imageio.imread(buffer))
-        plt.close(fig)
-
-    if not frames:
-        return None
-
-    filename = f"{'corr' if use_correlation else 'svd'}_ridgeline.gif"
-    output_path = output_dir / filename
-    imageio.mimsave(output_path, frames, duration=frame_duration, loop=0)
     return output_path
 
 
