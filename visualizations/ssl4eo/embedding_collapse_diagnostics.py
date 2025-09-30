@@ -971,25 +971,22 @@ def _variance_floor_percentage(
     return float(100.0 * below / std.numel())
 
 
-def compute_correlation_metrics(
-    features: torch.Tensor,
-    eps: float = 1e-12,
-) -> Tuple[Optional[np.ndarray], float, float, float, float]:
-    """Return correlation spectrum and scale-invariant summaries for ``features``."""
-
+def compute_correlation_metrics(features: torch.Tensor, eps: float = 1e-12):
     if features.dim() != 2 or features.shape[0] < 2:
-        nan = float("nan")
-        return None, nan, nan, nan, nan
+        nan = float("nan");  return None, nan, nan, nan, nan
 
-    feats = features.to(torch.float64)
-    cov = compute_covariance(feats)
+    cov = compute_covariance(features.to(torch.float64))
     if cov is None:
-        nan = float("nan")
-        return None, nan, nan, nan, nan
+        nan = float("nan");  return None, nan, nan, nan, nan
 
     variances = torch.diagonal(cov)
     std = torch.sqrt(torch.clamp(variances, min=0.0))
-    inv_std = torch.where(std > eps, 1.0 / std, torch.zeros_like(std))
+    mask = std > eps
+    if mask.sum() < 2:
+        nan = float("nan");  return None, nan, nan, nan, nan
+
+    cov = cov[mask][:, mask]
+    inv_std = 1.0 / std[mask]
     inv_std_mat = torch.diag(inv_std)
 
     corr = inv_std_mat @ cov @ inv_std_mat
@@ -1085,18 +1082,11 @@ def compute_cca_spectrum(
     return singular_values.cpu().numpy()
 
 def compute_condition_number(spectrum: np.ndarray, eps: float = 1e-12) -> float:
-    """Compute a safe condition number from a descending spectrum."""
-
     if spectrum.size == 0:
         return float("nan")
-    finite = spectrum[spectrum > eps]
-    if finite.size == 0:
-        return float("inf")
-    smallest = float(finite[-1])
-    largest = float(spectrum[0])
-    if smallest <= eps:
-        return float("inf")
-    return largest / smallest
+    largest = float(spectrum[0])        # spectrum assumed descending
+    smallest = float(spectrum[-1])
+    return float("inf") if smallest <= eps else largest / smallest
 
 
 def compute_log_singular_shape_change(
@@ -3458,7 +3448,12 @@ def parse_args() -> argparse.Namespace:
             """
             Example:
 
-              python -m visualizations.ssl4eo.embedding_collapse_diagnostics \
+            python -m visualizations.ssl4eo.embedding_collapse_diagnostics \
+                --checkpoint-root '/home/juro4948/ciip/logs/2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints' \
+                --output-dir diagnostics/random_init/9-11-2025-vcregstats \
+                --dataset-root /local/ms-data/SSL4EO/ \
+                --vc-gamma 1 &
+            python -m visualizations.ssl4eo.embedding_collapse_diagnostics \
                 --checkpoint-root '/home/juro4948/ciip/logs/2025_09_20-22_35_45-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints' \
                 --output-dir diagnostics/random_init/9-20-2025-vcregstats \
                 --dataset-root /local/ms-data/SSL4EO/ \
@@ -3466,11 +3461,10 @@ def parse_args() -> argparse.Namespace:
             
 
             python -m visualizations.ssl4eo.embedding_collapse_diagnostics \
-                --checkpoint-root '/home/juro4948/ciip/logs/2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints' \
-                --output-dir diagnostics/random_init/9-11-2025-vcregstats \
+                --checkpoint-root '/home/juro4948/ciip/logs/2025_09_23-12_27_52-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints' \
+                --output-dir diagnostics/random_init/9-23-2025-vcregstats \
                 --dataset-root /local/ms-data/SSL4EO/ \
-                --vc-gamma 1 
-
+                --vc-gamma 1 &
             python -m visualizations.ssl4eo.embedding_collapse_diagnostics \
                 --checkpoint-root '/local/ms-data/SSL4EO/model/2025_09_26-13_32_23-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints' \
                 --output-dir diagnostics/random_init/9-26-2025-vcregstats \
