@@ -5,10 +5,12 @@ echo "Starting data extraction - S2"
 
 SOURCE_DIR="/work/nvme/bekj/jromero5/tarballs/s2c"
 EXTRACT_DIR="/tmp/$USER/s2c"
-MARKER_DIR="$EXTRACT_DIR/.extracted"
-LOCK_DIR="$EXTRACT_DIR/.locks"
+COORD_DIR="/tmp/$USER/.ciip_s2"
+MARKER_DIR="$COORD_DIR/markers"
+LOCK_DIR="$COORD_DIR/locks"
+TMP_DIR="$COORD_DIR/tmp"
 
-mkdir -p "$EXTRACT_DIR" "$MARKER_DIR" "$LOCK_DIR"
+mkdir -p "$EXTRACT_DIR" "$MARKER_DIR" "$LOCK_DIR" "$TMP_DIR"
 
 echo "$(date) S2 | Running on node ${SLURM_NODEID:-unknown} with local task ${SLURM_LOCALID:-unknown}"
 echo "$(date) S2 | Copying all chunks from $SOURCE_DIR to $EXTRACT_DIR"
@@ -42,6 +44,7 @@ for tarball in "${tarballs[@]}"; do
         echo "$(date) S2 | $chunk_name extracted by another rank, skipping"
         flock -u "$lock_fd"
         exec {lock_fd}>&-
+        rm -f "$lock_path"
         continue
     fi
 
@@ -49,7 +52,7 @@ for tarball in "${tarballs[@]}"; do
     rm -f "$tmp_tar"
     rsync -a "$tarball" "$tmp_tar"
 
-    tmp_extract_dir=$(mktemp -d "$EXTRACT_DIR/.${chunk_name}_XXXXXX")
+    tmp_extract_dir=$(mktemp -d "$TMP_DIR/${chunk_name}_XXXXXX")
     echo "$(date) S2 | Extracting $tmp_tar into $tmp_extract_dir"
     tar -I pigz -xf "$tmp_tar" -C "$tmp_extract_dir"
     rm -f "$tmp_tar"
@@ -63,6 +66,7 @@ for tarball in "${tarballs[@]}"; do
 
     flock -u "$lock_fd"
     exec {lock_fd}>&-
+    rm -f "$lock_path"
 done
 shopt -u nullglob
 
