@@ -13,10 +13,39 @@ echo "Calling s1 and s2 extraction scripts"
 echo "$(date) | Task $SLURM_PROCID with LocalID: $SLURM_LOCALID | scontrol show job $SLURM_JOBID" 
 
 
+# Helper to normalise Slurm "tasks per node" strings (e.g. "8(x2),4") into a single
+# numeric value representing the primary per-node task count for the current step/job.
+normalise_tasks_per_node() {
+    local raw=$1
+    local value=""
+
+    case ${raw:-} in
+        *"(x"*)
+            value=${raw%%(x*}
+            ;;
+        *","*)
+            value=${raw%%,*}
+            ;;
+        *)
+            value=$raw
+            ;;
+    esac
+
+    case ${value:-} in
+        ''|*[!0-9]*)
+            value=""
+            ;;
+    esac
+
+    echo "$value"
+}
+
 # Determine the S1/S2 split dynamically so job scripts can increase --ntasks-per-node
 # without having to update this file. We honour an explicit override (S1_S2_SPLIT_OVERRIDE
-# or S1_S2_SPLIT) first, then fall back to SLURM_NTASKS_PER_NODE, and finally split the
-# total SLURM_NTASKS in half when per-node information is unavailable.
+# or S1_S2_SPLIT) first, then fall back to step-scoped information
+# (SLURM_STEP_TASKS_PER_NODE/SLURM_STEP_NUM_TASKS) before considering the job-level
+# variables. This ensures the split reflects the actual srun launch even when the job was
+# submitted with different settings.
 #
 # The resulting split represents the number of S1 workers per node. We also derive
 # contiguous worker identifiers/counts for the S1 and S2 pools so the dataset scripts can
@@ -28,8 +57,24 @@ if [ -n "$S1_S2_SPLIT_OVERRIDE" ]; then
     split=$S1_S2_SPLIT_OVERRIDE
     split_source="S1_S2_SPLIT override"
 else
-    split_source="SLURM_NTASKS_PER_NODE"
-    tasks_for_split=${SLURM_NTASKS_PER_NODE:-}
+    split_source="SLURM_STEP_TASKS_PER_NODE"
+    tasks_for_split=$(normalise_tasks_per_node "${SLURM_STEP_TASKS_PER_NODE:-}")
+
+    if [ -z "$tasks_for_split" ]; then
+        split_source="SLURM_NTASKS_PER_NODE"
+        tasks_for_split=$(normalise_tasks_per_node "${SLURM_NTASKS_PER_NODE:-}")
+    fi
+
+    if [ -z "$tasks_for_split" ]; then
+        split_source="SLURM_STEP_NUM_TASKS"
+        tasks_for_split=${SLURM_STEP_NUM_TASKS:-}
+
+        case ${tasks_for_split:-} in
+            ''|*[!0-9]*)
+                tasks_for_split=""
+                ;;
+        esac
+    fi
 
     if [ -z "$tasks_for_split" ]; then
         split_source="SLURM_NTASKS"
@@ -60,22 +105,12 @@ fi
 
 split_source=${split_source:-default}
 
-# Normalise SLURM_NTASKS_PER_NODE into a numeric per-node worker count when available.
+# Normalise tasks-per-node into a numeric per-node worker count when available, preferring
+# step-scoped values.
 per_node_total=""
-if [ -n "${SLURM_NTASKS_PER_NODE:-}" ]; then
-    case $SLURM_NTASKS_PER_NODE in
-        *"(x"*)
-            per_node_total=${SLURM_NTASKS_PER_NODE%%(x*}
-            ;;
-        *)
-            per_node_total=$SLURM_NTASKS_PER_NODE
-            ;;
-    esac
-    case ${per_node_total:-} in
-        ''|*[!0-9]*)
-            per_node_total=""
-            ;;
-    esac
+per_node_total=$(normalise_tasks_per_node "${SLURM_STEP_TASKS_PER_NODE:-}")
+if [ -z "$per_node_total" ]; then
+    per_node_total=$(normalise_tasks_per_node "${SLURM_NTASKS_PER_NODE:-}")
 fi
 
 per_node_s1=$split
@@ -87,8 +122,8 @@ if [ -n "$per_node_total" ]; then
     fi
 fi
 
-# Determine the total number of nodes participating in the job.
-num_nodes=${SLURM_JOB_NUM_NODES:-${SLURM_NNODES:-}}
+# Determine the total number of nodes participating in the job/step.
+num_nodes=${SLURM_STEP_NUM_NODES:-${SLURM_JOB_NUM_NODES:-${SLURM_NNODES:-}}}
 case ${num_nodes:-} in
     ''|*[!0-9]*)
         num_nodes=""
@@ -112,13 +147,23 @@ case ${num_nodes:-} in
 esac
 
 total_tasks=""
-case ${SLURM_NTASKS:-} in
+case ${SLURM_STEP_NUM_TASKS:-} in
     ''|*[!0-9]*)
         ;;
     *)
-        total_tasks=$SLURM_NTASKS
+        total_tasks=$SLURM_STEP_NUM_TASKS
         ;;
 esac
+
+if [ -z "$total_tasks" ]; then
+    case ${SLURM_NTASKS:-} in
+        ''|*[!0-9]*)
+            ;;
+        *)
+            total_tasks=$SLURM_NTASKS
+            ;;
+    esac
+fi
 
 s1_worker_count=""
 s2_worker_count=""
@@ -126,8 +171,6 @@ if [ -n "$num_nodes" ]; then
     s1_worker_count=$((per_node_s1 * num_nodes))
     if [ -n "$per_node_total" ]; then
         s2_worker_count=$((per_node_s2 * num_nodes))
-    elif [ -n "$total_tasks" ]; then
-        s2_worker_count=$((total_tasks - s1_worker_count))
     fi
 fi
 
@@ -148,21 +191,37 @@ if [ -z "$s2_worker_count" ]; then
     fi
 fi
 
+if [ -n "$total_tasks" ] && [ -n "$s2_worker_count" ] && [ "$s2_worker_count" -lt 0 ]; then
+    s2_worker_count=0
+fi
+
 if [ -n "$total_tasks" ] && [ "$s1_worker_count" -gt "$total_tasks" ]; then
     s1_worker_count=$total_tasks
 fi
 if [ "$s1_worker_count" -lt 0 ]; then
     s1_worker_count=0
 fi
-if [ "$s2_worker_count" -lt 0 ]; then
-    s2_worker_count=0
-fi
 if [ -n "$total_tasks" ] && [ "$s2_worker_count" -gt "$total_tasks" ]; then
     s2_worker_count=$total_tasks
 fi
 
+# Ensure the per-node S2 worker count does not exceed the number of S2 tasks that actually
+# start. We cap it to the maximum possible per-node allocation given the total S2 tasks for
+# the step.
+if [ -n "$num_nodes" ] && [ "$num_nodes" -gt 0 ] && [ -n "$s2_worker_count" ]; then
+    max_per_node_s2=$(((s2_worker_count + num_nodes - 1) / num_nodes))
+    if [ "$per_node_s2" -gt "$max_per_node_s2" ]; then
+        per_node_s2=$max_per_node_s2
+    fi
+    if [ "$s2_worker_count" -gt $((per_node_s2 * num_nodes)) ]; then
+        s2_worker_count=$((per_node_s2 * num_nodes))
+    fi
+fi
+
 export CIIP_S1_WORKERS_PER_NODE=$per_node_s1
 export CIIP_S2_WORKERS_PER_NODE=$per_node_s2
+
+echo "$(date) | Derived worker layout: split=$split (source: $split_source), per_node_total=${per_node_total:-unknown}, per_node_s1=$per_node_s1, per_node_s2=$per_node_s2, total_s1=${s1_worker_count:-unknown}, total_s2=${s2_worker_count:-unknown}, num_nodes=${num_nodes:-unknown}"
 
 # Derive contiguous worker identifiers for this process within its pool.
 node_id=${SLURM_NODEID:-0}
