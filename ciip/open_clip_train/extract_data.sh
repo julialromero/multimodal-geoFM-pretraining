@@ -161,8 +161,8 @@ if [ -n "$total_tasks" ] && [ "$s2_worker_count" -gt "$total_tasks" ]; then
     s2_worker_count=$total_tasks
 fi
 
-export CIIP_S1_WORKER_COUNT=$s1_worker_count
-export CIIP_S2_WORKER_COUNT=$s2_worker_count
+export CIIP_S1_WORKERS_PER_NODE=$per_node_s1
+export CIIP_S2_WORKERS_PER_NODE=$per_node_s2
 
 # Derive contiguous worker identifiers for this process within its pool.
 node_id=${SLURM_NODEID:-0}
@@ -175,9 +175,6 @@ esac
 if [ "$SLURM_LOCALID" -lt "$split" ]; then
     local_s1_id=$SLURM_LOCALID
     worker_id=$local_s1_id
-    if [ -n "$num_nodes" ]; then
-        worker_id=$((node_id * per_node_s1 + local_s1_id))
-    fi
     export CIIP_S1_WORKER_ID=$worker_id
     unset CIIP_S2_WORKER_ID
 else
@@ -186,9 +183,6 @@ else
         local_s2_id=0
     fi
     worker_id=$local_s2_id
-    if [ -n "$num_nodes" ]; then
-        worker_id=$((node_id * per_node_s2 + local_s2_id))
-    fi
     export CIIP_S2_WORKER_ID=$worker_id
     unset CIIP_S1_WORKER_ID
 fi

@@ -24,10 +24,14 @@ if [ ${#tarballs[@]} -eq 0 ]; then
     echo "$(date) S1 | No chunk tarballs were found in $SOURCE_DIR"
 fi
 
-if [ -n "${CIIP_S1_WORKER_ID:-}" ] && [ -n "${CIIP_S1_WORKER_COUNT:-}" ]; then
+if [ -n "${CIIP_S1_WORKER_ID:-}" ] && [ -n "${CIIP_S1_WORKERS_PER_NODE:-}" ]; then
+    worker_id=${CIIP_S1_WORKER_ID}
+    worker_count=${CIIP_S1_WORKERS_PER_NODE}
+    sharding_source="CIIP per-node overrides"
+elif [ -n "${CIIP_S1_WORKER_ID:-}" ] && [ -n "${CIIP_S1_WORKER_COUNT:-}" ]; then
     worker_id=${CIIP_S1_WORKER_ID}
     worker_count=${CIIP_S1_WORKER_COUNT}
-    sharding_source="CIIP overrides"
+    sharding_source="Legacy CIIP overrides"
 else
     worker_id=${SLURM_PROCID:-0}
     worker_count=${SLURM_NTASKS:-1}
