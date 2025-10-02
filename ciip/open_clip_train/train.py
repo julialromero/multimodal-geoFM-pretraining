@@ -4,12 +4,15 @@ import math
 import os
 import time
 import sys
+import gc
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 
 from typing import Dict, Tuple
+
+import torch.distributed as dist
 
 from torch.nn.parallel.distributed import DistributedDataParallel
 from torch.autograd.profiler import record_function
@@ -63,6 +66,26 @@ class AverageMeter(object):
         self.sum += val * n
         self.count += n
         self.avg = self.sum / self.count
+
+
+def _is_cuda_out_of_memory_error(err: RuntimeError) -> bool:
+    """Return True if ``err`` corresponds to a CUDA out of memory condition."""
+    if isinstance(err, torch.cuda.OutOfMemoryError):
+        return True
+    err_str = str(err)
+    return "CUDA out of memory" in err_str or ("out of memory" in err_str and "CUDA" in err_str)
+
+
+def _handle_cuda_oom(err: RuntimeError, epoch: int, batch_idx: int, optimizer) -> None:
+    """Log and clean up after a CUDA OOM so training can continue."""
+    logging.warning(
+        "Encountered CUDA OOM at epoch %s batch %s: %s", epoch, batch_idx, err
+    )
+    if optimizer is not None:
+        optimizer.zero_grad(set_to_none=True)
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def _compute_vc_geometry(
@@ -359,91 +382,113 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
         data_time_m.update(time.time() - end)
         optimizer.zero_grad()
 
-        if args.train.accum_freq == 1:
-            with autocast():
-                model_out = model(s1, s2)
+        losses = {}
+        logit_scale = None
+        cuda_oom = False
 
-                logit_scale = model_out["logit_scale"]
-                if args.distill:
-                    with torch.no_grad():
-                        dist_model_out = dist_model(s1, s2)
-                    model_out.update({f'dist_{k}': v for k, v in dist_model_out.items()})
-                losses = loss(**model_out, output_dict=True)
-
-                _accumulate_vc_metrics(loss, model_out, vc_metrics_m, s1.shape[0])
-
-                total_loss = sum(losses.values())
-                losses["loss"] = total_loss
-
-            backward(total_loss, scaler)
-        else:
-            # First, cache the features without any gradient tracking.
-            with torch.no_grad():
+        try:
+            if args.train.accum_freq == 1:
                 with autocast():
                     model_out = model(s1, s2)
 
+                    logit_scale = model_out["logit_scale"]
+                    if args.distill:
+                        with torch.no_grad():
+                            dist_model_out = dist_model(s1, s2)
+                        model_out.update({f'dist_{k}': v for k, v in dist_model_out.items()})
+                    losses = loss(**model_out, output_dict=True)
+
                     _accumulate_vc_metrics(loss, model_out, vc_metrics_m, s1.shape[0])
 
-                    for f in ("logit_scale", "logit_bias"):
-                        model_out.pop(f, None)
+                    total_loss = sum(losses.values())
+                    losses["loss"] = total_loss
 
-                    for key, val in model_out.items():
-                        if key in accum_features:
-                            accum_features[key].append(val)
-                        else:
-                            accum_features[key] = [val]
-
-                accum_s1.append(s1)
-                accum_s2.append(s2)
-
-            # If (i + 1) % accum_freq is not zero, move on to the next batch.
-            if ((i + 1) % args.train.accum_freq) > 0:
-                # FIXME this makes data time logging unreliable when accumulating
-                continue
-
-            # Now, ready to take gradients for the last accum_freq batches.
-            # Re-do the forward pass for those batches, and use the cached features from the other batches as negatives.
-            # Call backwards each time, but only step optimizer at the end.
-            optimizer.zero_grad()
-            accum_features_current_loop = {key: list(val) for key, val in accum_features.items()} # Ensure a copy
-
-            for j in range(args.train.accum_freq):
-                s1 = accum_s1[j]
-                s2 = accum_s2[j]
-
-                is_last_backward_pass = (j == args.train.accum_freq - 1)
-                sync_context = model.no_sync() if not is_last_backward_pass else nullcontext()
-                with sync_context:
+                backward(total_loss, scaler)
+            else:
+                # First, cache the features without any gradient tracking.
+                with torch.no_grad():
                     with autocast():
-                        
                         model_out = model(s1, s2)
 
-                        inputs_no_accum = {}
-                        inputs_no_accum["logit_scale"] = logit_scale = model_out.pop("logit_scale")
-                        if "logit_bias" in model_out:
-                            inputs_no_accum["logit_bias"] = model_out.pop("logit_bias")
+                        _accumulate_vc_metrics(loss, model_out, vc_metrics_m, s1.shape[0])
 
-                        # inputs = {}
-                        # for key, val in accum_features.items():
-                        #     accumulated = accum_features[key]
-                        #     inputs[key] = torch.cat(accumulated[:j] + [model_out[key]] + accumulated[j + 1:])
-                        inputs = {}
-                        for key in accum_features_current_loop.keys(): # Iterate over keys
-                            # Use the copied list for concatenation, and replace the j-th element
-                            temp_accumulated = list(accum_features_current_loop[key]) # Create a copy for modification
-                            temp_accumulated[j] = model_out[key] # Replace with the current grad-tracked feature
-                            inputs[key] = torch.cat(temp_accumulated)
+                        for f in ("logit_scale", "logit_bias"):
+                            model_out.pop(f, None)
 
-                        losses = loss(**inputs, **inputs_no_accum, output_dict=True)
-                        # logging.info(f"Losses for batch {i_accum}, inner pass {j + 1}/{args.train.accum_freq}: {losses}")
-                        
-                        total_loss = sum(losses.values()) / args.train.accum_freq
-                        losses["loss"] = total_loss
+                        for key, val in model_out.items():
+                            if key in accum_features:
+                                accum_features[key].append(val)
+                            else:
+                                accum_features[key] = [val]
 
-                    backward(total_loss, scaler)
+                    accum_s1.append(s1)
+                    accum_s2.append(s2)
 
-                del inputs
-                del inputs_no_accum
+                # If (i + 1) % accum_freq is not zero, move on to the next batch.
+                if ((i + 1) % args.train.accum_freq) > 0:
+                    # FIXME this makes data time logging unreliable when accumulating
+                    continue
+
+                # Now, ready to take gradients for the last accum_freq batches.
+                # Re-do the forward pass for those batches, and use the cached features from the other batches as negatives.
+                # Call backwards each time, but only step optimizer at the end.
+                optimizer.zero_grad()
+                accum_features_current_loop = {key: list(val) for key, val in accum_features.items()} # Ensure a copy
+
+                for j in range(args.train.accum_freq):
+                    s1 = accum_s1[j]
+                    s2 = accum_s2[j]
+
+                    is_last_backward_pass = (j == args.train.accum_freq - 1)
+                    sync_context = model.no_sync() if not is_last_backward_pass else nullcontext()
+                    with sync_context:
+                        with autocast():
+
+                            model_out = model(s1, s2)
+
+                            inputs_no_accum = {}
+                            inputs_no_accum["logit_scale"] = logit_scale = model_out.pop("logit_scale")
+                            if "logit_bias" in model_out:
+                                inputs_no_accum["logit_bias"] = model_out.pop("logit_bias")
+
+                            inputs = {}
+                            for key in accum_features_current_loop.keys(): # Iterate over keys
+                                # Use the copied list for concatenation, and replace the j-th element
+                                temp_accumulated = list(accum_features_current_loop[key]) # Create a copy for modification
+                                temp_accumulated[j] = model_out[key] # Replace with the current grad-tracked feature
+                                inputs[key] = torch.cat(temp_accumulated)
+
+                            losses = loss(**inputs, **inputs_no_accum, output_dict=True)
+
+                            total_loss = sum(losses.values()) / args.train.accum_freq
+                            losses["loss"] = total_loss
+
+                        backward(total_loss, scaler)
+
+                    del inputs
+                    del inputs_no_accum
+        except RuntimeError as err:
+            if _is_cuda_out_of_memory_error(err):
+                cuda_oom = True
+                _handle_cuda_oom(err, epoch, i, optimizer)
+            else:
+                raise
+        except torch.cuda.OutOfMemoryError as err:
+            cuda_oom = True
+            _handle_cuda_oom(err, epoch, i, optimizer)
+
+        if args.datamodule.world_size > 1 and dist.is_available() and dist.is_initialized():
+            oom_tensor = torch.tensor([1 if cuda_oom else 0], device=device)
+            dist.all_reduce(oom_tensor, op=dist.ReduceOp.SUM)
+            cuda_oom = oom_tensor.item() > 0
+
+        if cuda_oom:
+            if args.train.accum_freq > 1:
+                accum_s1, accum_s2, accum_features = [], [], {}
+            end = time.time()
+            if is_master(args):
+                logging.warning("Skipping batch %s in epoch %s due to CUDA OOM.", i, epoch)
+            continue
 
         # log gradients
         # logit_scale_param = unwrap_model(model).logit_scale
