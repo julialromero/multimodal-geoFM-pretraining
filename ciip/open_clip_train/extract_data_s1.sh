@@ -1,7 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
+pigz_threads="${SLURM_CPUS_PER_TASK:-$(nproc)}"
+
 echo "Starting data extraction - S1"
+echo "$(date) S1 | Using pigz threads: ${pigz_threads}"
 
 SOURCE_DIR="/work/nvme/bekj/jromero5/tarballs/s1"
 EXTRACT_DIR="/tmp/$USER/s1"
@@ -54,7 +57,7 @@ for tarball in "${tarballs[@]}"; do
 
     tmp_extract_dir=$(mktemp -d "$TMP_DIR/${chunk_name}_XXXXXX")
     echo "$(date) S1 | Extracting $tmp_tar into $tmp_extract_dir"
-    tar -I pigz -xf "$tmp_tar" -C "$tmp_extract_dir"
+    tar --use-compress-program="pigz -p ${pigz_threads}" -xf "$tmp_tar" -C "$tmp_extract_dir"
     rm -f "$tmp_tar"
 
     echo "$(date) S1 | Installing contents of $chunk_name into $EXTRACT_DIR"
