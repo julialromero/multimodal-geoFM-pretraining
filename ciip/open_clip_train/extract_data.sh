@@ -17,6 +17,11 @@ echo "$(date) | Task $SLURM_PROCID with LocalID: $SLURM_LOCALID | scontrol show 
 # without having to update this file. We honour an explicit override (S1_S2_SPLIT_OVERRIDE
 # or S1_S2_SPLIT) first, then fall back to SLURM_NTASKS_PER_NODE, and finally split the
 # total SLURM_NTASKS in half when per-node information is unavailable.
+#
+# The resulting split represents the number of S1 workers per node. We also derive
+# contiguous worker identifiers/counts for the S1 and S2 pools so the dataset scripts can
+# shard over the true worker ranges rather than relying on SLURM globals that include both
+# pools.
 S1_S2_SPLIT_OVERRIDE=${S1_S2_SPLIT_OVERRIDE:-${S1_S2_SPLIT:-}}
 
 if [ -n "$S1_S2_SPLIT_OVERRIDE" ]; then
@@ -54,6 +59,139 @@ if [ "$split" -le 0 ]; then
 fi
 
 split_source=${split_source:-default}
+
+# Normalise SLURM_NTASKS_PER_NODE into a numeric per-node worker count when available.
+per_node_total=""
+if [ -n "${SLURM_NTASKS_PER_NODE:-}" ]; then
+    case $SLURM_NTASKS_PER_NODE in
+        *"(x"*)
+            per_node_total=${SLURM_NTASKS_PER_NODE%%(x*}
+            ;;
+        *)
+            per_node_total=$SLURM_NTASKS_PER_NODE
+            ;;
+    esac
+    case ${per_node_total:-} in
+        ''|*[!0-9]*)
+            per_node_total=""
+            ;;
+    esac
+fi
+
+per_node_s1=$split
+per_node_s2=0
+if [ -n "$per_node_total" ]; then
+    per_node_s2=$((per_node_total - per_node_s1))
+    if [ "$per_node_s2" -lt 0 ]; then
+        per_node_s2=0
+    fi
+fi
+
+# Determine the total number of nodes participating in the job.
+num_nodes=${SLURM_JOB_NUM_NODES:-${SLURM_NNODES:-}}
+case ${num_nodes:-} in
+    ''|*[!0-9]*)
+        num_nodes=""
+        ;;
+esac
+
+if [ -z "$num_nodes" ] && [ -n "$per_node_total" ] && [ -n "${SLURM_NTASKS:-}" ]; then
+    total_tasks=$SLURM_NTASKS
+    if [ "$per_node_total" -gt 0 ]; then
+        num_nodes=$(((total_tasks + per_node_total - 1) / per_node_total))
+    fi
+fi
+
+case ${num_nodes:-} in
+    ''|*[!0-9]*)
+        num_nodes=""
+        ;;
+    0)
+        num_nodes=""
+        ;;
+esac
+
+total_tasks=""
+case ${SLURM_NTASKS:-} in
+    ''|*[!0-9]*)
+        ;;
+    *)
+        total_tasks=$SLURM_NTASKS
+        ;;
+esac
+
+s1_worker_count=""
+s2_worker_count=""
+if [ -n "$num_nodes" ]; then
+    s1_worker_count=$((per_node_s1 * num_nodes))
+    if [ -n "$per_node_total" ]; then
+        s2_worker_count=$((per_node_s2 * num_nodes))
+    elif [ -n "$total_tasks" ]; then
+        s2_worker_count=$((total_tasks - s1_worker_count))
+    fi
+fi
+
+if [ -z "$s1_worker_count" ]; then
+    if [ -n "$total_tasks" ]; then
+        # Assume the split partitions workers as evenly as possible.
+        s1_worker_count=$(((total_tasks + 1) / 2))
+    else
+        s1_worker_count=$per_node_s1
+    fi
+fi
+
+if [ -z "$s2_worker_count" ]; then
+    if [ -n "$total_tasks" ]; then
+        s2_worker_count=$((total_tasks - s1_worker_count))
+    else
+        s2_worker_count=$per_node_s2
+    fi
+fi
+
+if [ -n "$total_tasks" ] && [ "$s1_worker_count" -gt "$total_tasks" ]; then
+    s1_worker_count=$total_tasks
+fi
+if [ "$s1_worker_count" -lt 0 ]; then
+    s1_worker_count=0
+fi
+if [ "$s2_worker_count" -lt 0 ]; then
+    s2_worker_count=0
+fi
+if [ -n "$total_tasks" ] && [ "$s2_worker_count" -gt "$total_tasks" ]; then
+    s2_worker_count=$total_tasks
+fi
+
+export CIIP_S1_WORKER_COUNT=$s1_worker_count
+export CIIP_S2_WORKER_COUNT=$s2_worker_count
+
+# Derive contiguous worker identifiers for this process within its pool.
+node_id=${SLURM_NODEID:-0}
+case ${node_id:-} in
+    ''|*[!0-9]*)
+        node_id=0
+        ;;
+esac
+
+if [ "$SLURM_LOCALID" -lt "$split" ]; then
+    local_s1_id=$SLURM_LOCALID
+    worker_id=$local_s1_id
+    if [ -n "$num_nodes" ]; then
+        worker_id=$((node_id * per_node_s1 + local_s1_id))
+    fi
+    export CIIP_S1_WORKER_ID=$worker_id
+    unset CIIP_S2_WORKER_ID
+else
+    local_s2_id=$((SLURM_LOCALID - per_node_s1))
+    if [ "$local_s2_id" -lt 0 ]; then
+        local_s2_id=0
+    fi
+    worker_id=$local_s2_id
+    if [ -n "$num_nodes" ]; then
+        worker_id=$((node_id * per_node_s2 + local_s2_id))
+    fi
+    export CIIP_S2_WORKER_ID=$worker_id
+    unset CIIP_S1_WORKER_ID
+fi
 
 # Determine which script to run based on the dynamically derived split.
 if [ "$SLURM_LOCALID" -lt "$split" ]; then

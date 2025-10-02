@@ -24,13 +24,38 @@ if [ ${#tarballs[@]} -eq 0 ]; then
     echo "$(date) S2 | No chunk tarballs were found in $SOURCE_DIR"
 fi
 
-worker_id=${SLURM_PROCID:-0}
-worker_count=${SLURM_NTASKS:-1}
+if [ -n "${CIIP_S2_WORKER_ID:-}" ] && [ -n "${CIIP_S2_WORKER_COUNT:-}" ]; then
+    worker_id=${CIIP_S2_WORKER_ID}
+    worker_count=${CIIP_S2_WORKER_COUNT}
+    sharding_source="CIIP overrides"
+else
+    worker_id=${SLURM_PROCID:-0}
+    worker_count=${SLURM_NTASKS:-1}
+    sharding_source="SLURM globals"
+fi
+
+case ${worker_count:-} in
+    ''|*[!0-9]*)
+        worker_count=1
+        ;;
+esac
+
+case ${worker_id:-} in
+    ''|*[!0-9]*)
+        worker_id=0
+        ;;
+esac
+
 if [ "$worker_count" -lt 1 ]; then
     worker_count=1
 fi
+
+if [ "$worker_id" -lt 0 ]; then
+    worker_id=0
+fi
+
 worker_id=$((worker_id % worker_count))
-echo "$(date) S2 | Worker sharding id $worker_id of $worker_count"
+echo "$(date) S2 | Worker sharding id $worker_id of $worker_count (source: $sharding_source)"
 
 for idx in "${!tarballs[@]}"; do
     tarball="${tarballs[$idx]}"
