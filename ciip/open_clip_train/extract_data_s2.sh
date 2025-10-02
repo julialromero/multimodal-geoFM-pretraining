@@ -1,7 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
+pigz_threads="${SLURM_CPUS_PER_TASK:-$(nproc)}"
+
 echo "Starting data extraction - S2"
+echo "$(date) S2 | Using pigz threads: ${pigz_threads}"
 
 SOURCE_DIR="/work/nvme/bekj/jromero5/tarballs/s2c"
 EXTRACT_DIR="/tmp/$USER/s2c"
@@ -21,12 +24,54 @@ if [ ${#tarballs[@]} -eq 0 ]; then
     echo "$(date) S2 | No chunk tarballs were found in $SOURCE_DIR"
 fi
 
-for tarball in "${tarballs[@]}"; do
+if [ -n "${CIIP_S2_WORKER_ID:-}" ] && [ -n "${CIIP_S2_WORKERS_PER_NODE:-}" ]; then
+    worker_id=${CIIP_S2_WORKER_ID}
+    worker_count=${CIIP_S2_WORKERS_PER_NODE}
+    sharding_source="CIIP per-node overrides"
+elif [ -n "${CIIP_S2_WORKER_ID:-}" ] && [ -n "${CIIP_S2_WORKER_COUNT:-}" ]; then
+    worker_id=${CIIP_S2_WORKER_ID}
+    worker_count=${CIIP_S2_WORKER_COUNT}
+    sharding_source="Legacy CIIP overrides"
+else
+    worker_id=${SLURM_PROCID:-0}
+    worker_count=${SLURM_NTASKS:-1}
+    sharding_source="SLURM globals"
+fi
+
+case ${worker_count:-} in
+    ''|*[!0-9]*)
+        worker_count=1
+        ;;
+esac
+
+case ${worker_id:-} in
+    ''|*[!0-9]*)
+        worker_id=0
+        ;;
+esac
+
+if [ "$worker_count" -lt 1 ]; then
+    worker_count=1
+fi
+
+if [ "$worker_id" -lt 0 ]; then
+    worker_id=0
+fi
+
+worker_id=$((worker_id % worker_count))
+echo "$(date) S2 | Worker sharding id $worker_id of $worker_count (source: $sharding_source)"
+
+for idx in "${!tarballs[@]}"; do
+    tarball="${tarballs[$idx]}"
     chunk_basename=$(basename "$tarball")
     chunk_name="${chunk_basename%.tar.gz}"
     marker="$MARKER_DIR/$chunk_name"
     tmp_tar="$EXTRACT_DIR/$chunk_basename"
     lock_path="$LOCK_DIR/$chunk_name.lock"
+
+    if [ $((idx % worker_count)) -ne $worker_id ]; then
+        continue
+    fi
 
     if [ -f "$marker" ]; then
         echo "$(date) S2 | $chunk_name already extracted, skipping"
@@ -35,13 +80,14 @@ for tarball in "${tarballs[@]}"; do
 
     exec {lock_fd}>"$lock_path"
     if ! flock -n "$lock_fd"; then
-        # Another process is already working on this chunk; skip it.
+        # Another process is already working on this chunk despite sharding; skipping.
+        echo "$(date) S2 | $chunk_name locked by another worker despite sharding; contention should be rare"
         exec {lock_fd}>&-
         continue
     fi
 
     if [ -f "$marker" ]; then
-        echo "$(date) S2 | $chunk_name extracted by another rank, skipping"
+        echo "$(date) S2 | $chunk_name extracted by another worker after sharding; contention should be rare, skipping"
         flock -u "$lock_fd"
         exec {lock_fd}>&-
         rm -f "$lock_path"
@@ -54,7 +100,7 @@ for tarball in "${tarballs[@]}"; do
 
     tmp_extract_dir=$(mktemp -d "$TMP_DIR/${chunk_name}_XXXXXX")
     echo "$(date) S2 | Extracting $tmp_tar into $tmp_extract_dir"
-    tar -I pigz -xf "$tmp_tar" -C "$tmp_extract_dir"
+    tar --use-compress-program="pigz -p ${pigz_threads}" -xf "$tmp_tar" -C "$tmp_extract_dir"
     rm -f "$tmp_tar"
 
     echo "$(date) S2 | Installing contents of $chunk_name into $EXTRACT_DIR"
