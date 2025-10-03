@@ -228,6 +228,23 @@ while [ $ATTEMPT -lt $MAX_RETRIES ]; do
         fi
     fi
 
+    if [ -f "$LATEST_CHECKPOINT_TRACKER" ]; then
+        RESUME_PATH="$(cat "$LATEST_CHECKPOINT_TRACKER")"
+        if [ -n "$RESUME_PATH" ]; then
+            export RESUME_FROM_CHECKPOINT="$RESUME_PATH"
+        else
+            unset RESUME_FROM_CHECKPOINT
+        fi
+    else
+        unset RESUME_FROM_CHECKPOINT
+    fi
+
+    if [ -n "${RESUME_FROM_CHECKPOINT:-}" ]; then
+        echo "$(date) | Refreshing resume checkpoint: $RESUME_FROM_CHECKPOINT"
+    else
+        echo "$(date) | No resume checkpoint available for this attempt."
+    fi
+
     run_training_attempt
     EXIT_CODE=$?
 
