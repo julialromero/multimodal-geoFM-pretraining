@@ -132,6 +132,91 @@ def setup_slurm_logging():
 
 
 LATEST_CHECKPOINT_NAME = "epoch_latest.pt"
+LATEST_CHECKPOINT_TRACKER = "latest_checkpoint.txt"
+OOM_EXIT_CODE = 42
+
+
+def get_latest_tracker_path(args: DictConfig) -> str:
+    return os.path.join(args.io.logs, LATEST_CHECKPOINT_TRACKER)
+
+
+def atomic_torch_save(state_dict, target_path: str):
+    tmp_path = f"{target_path}.tmp"
+    torch.save(state_dict, tmp_path)
+    os.replace(tmp_path, target_path)
+
+
+def update_resume_metadata(args: DictConfig, checkpoint_path: str):
+    if not checkpoint_path:
+        return
+
+    args.io.resume = checkpoint_path
+    tracker_path = get_latest_tracker_path(args)
+    os.makedirs(os.path.dirname(tracker_path), exist_ok=True)
+    with open(tracker_path, "w") as tracker_file:
+        tracker_file.write(checkpoint_path)
+
+    if is_master(args, local=getattr(args, "log_local", False)):
+        config_file = os.path.join(args.io.logs, "prod_default.yaml")
+        with open(config_file, "w") as f:
+            OmegaConf.save(args, f)
+
+
+def build_checkpoint_dict(args: DictConfig, original_model, optimizer, scaler, epoch: int):
+    checkpoint = {
+        "epoch": epoch,
+        "name": args.train.name,
+        "state_dict": original_model.state_dict(),
+    }
+    if optimizer is not None:
+        checkpoint["optimizer"] = optimizer.state_dict()
+    if scaler is not None:
+        checkpoint["scaler"] = scaler.state_dict()
+    return checkpoint
+
+
+def persist_latest_checkpoint(args: DictConfig, checkpoint_dict, epoch: int, save_epoch_file: bool):
+    latest_save_path = os.path.join(args.io.checkpoint_path, LATEST_CHECKPOINT_NAME)
+    atomic_torch_save(checkpoint_dict, latest_save_path)
+    update_resume_metadata(args, latest_save_path)
+
+    if save_epoch_file:
+        epoch_path = os.path.join(args.io.checkpoint_path, f"epoch_{epoch}.pt")
+        atomic_torch_save(checkpoint_dict, epoch_path)
+
+
+def handle_cuda_oom(
+    err: RuntimeError,
+    args: DictConfig,
+    original_model,
+    optimizer,
+    scaler,
+    last_completed_epoch: int,
+):
+    logging.error("CUDA OOM encountered: %s", err)
+    print(f"CUDA OOM encountered: {err}", flush=True)
+    if args.io.save_logs and args.io.checkpoint_path:
+        try:
+            checkpoint_dict = build_checkpoint_dict(
+                args,
+                original_model,
+                optimizer,
+                scaler,
+                last_completed_epoch,
+            )
+            persist_latest_checkpoint(
+                args,
+                checkpoint_dict,
+                last_completed_epoch,
+                save_epoch_file=False,
+            )
+            logging.info(
+                f"Saved recovery checkpoint for epoch {last_completed_epoch} at {LATEST_CHECKPOINT_NAME}."
+            )
+        except Exception as save_err:
+            logging.error("Failed to save recovery checkpoint after OOM: %s", save_err)
+    torch.cuda.empty_cache()
+    sys.exit(OOM_EXIT_CODE)
 CONF = "prod_default"
 
 def random_seed(seed=42, rank=0):
@@ -173,6 +258,16 @@ def main(args: DictConfig, start_epoch=0):
 
     # args = parse_args(args)
     args.io.logs = os.environ.get('MY_LOG_BASE_DIR')
+    resume_override = os.environ.get("RESUME_FROM_CHECKPOINT")
+    if resume_override:
+        args.io.resume = resume_override
+    elif not args.io.resume:
+        tracker_path = get_latest_tracker_path(args)
+        if os.path.exists(tracker_path):
+            with open(tracker_path, "r") as tracker_file:
+                tracked_checkpoint = tracker_file.read().strip()
+            if tracked_checkpoint:
+                args.io.resume = tracked_checkpoint
     device = init_distributed_device(args.datamodule)
     local_rank, global_rank, world_size = world_info_from_env()
 
@@ -199,7 +294,15 @@ def main(args: DictConfig, start_epoch=0):
     with open(temp_path, 'w') as f:
         f.write(f"Allocated {os.environ.get('SLURM_PROCID', '-1')} {os.environ.get('CUDA_VISIBLE_DEVICES', '-1')}")
     
-    extracting_data = True
+    skip_data_wait = os.environ.get("SKIP_DATA_EXTRACTION", "0") == "1"
+    extracting_data = not skip_data_wait
+    if skip_data_wait:
+        if os.path.exists(check_path):
+            logging.info('Skip data extraction wait requested and marker found. Continuing immediately.')
+        else:
+            logging.warning('Skip data extraction wait requested but marker missing. Waiting for extraction to complete.')
+            extracting_data = True
+
     while extracting_data:
         time.sleep(30)
         now =datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -596,75 +699,89 @@ def main(args: DictConfig, start_epoch=0):
     #    max_entries=MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT
     # )
 
-    for epoch in range(start_epoch, args.train.epochs):
-        if is_master(args):
-            logging.info(f'Start epoch {epoch}')
+    last_completed_epoch = start_epoch
+    try:
+        for epoch in range(start_epoch, args.train.epochs):
+            if is_master(args):
+                logging.info(f'Start epoch {epoch}')
 
-        # Right before training each epoch
-        # torch.cuda.empty_cache()
+            # Right before training each epoch
+            # torch.cuda.empty_cache()
 
-        # print(torch.cuda.memory_summary())
-        train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist_model, args, tb_writer=writer)
-        # print time, rank
-        print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} | Rank {args.datamodule.rank} finished epoch {epoch} |  Allocated: {torch.cuda.memory_allocated()/1024**2:.1f} MB | Reserved: {torch.cuda.memory_reserved()/1024**2:.1f} MB | Memory summary: {torch.cuda.memory_summary(device=0, abbreviated=True)}', flush=True)
-       
-   
-        # if epoch < 10: 
-        #     try:
-        #         save_dir = os.path.join(args.io.mem_snapshots, date_str)
-        #         os.makedirs(save_dir, exist_ok=True)
-        #         save_path = os.path.join(save_dir, F'rank{args.datamodule.rank}_gpu{args.datamodule.local_rank}_epoch{epoch}.pickle')
-        #         torch.cuda.memory._dump_snapshot(save_path)
-        #         logging.info(f"Captured memory snapshot {save_path}")
-        #         print(f"Captured memory snapshot {save_path}")
-        #     except Exception as e:
-        #         logging.error(f"Failed to capture memory snapshot {e}")
-        #         print(f'Failed to capture memory snapshot {e}')
-        # else:
-        #     torch.cuda.memory._record_memory_history(enabled=None)
-        completed_epoch = epoch + 1
+            # print(torch.cuda.memory_summary())
+            train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist_model, args, tb_writer=writer)
+            # print time, rank
+            print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} | Rank {args.datamodule.rank} finished epoch {epoch} |  Allocated: {torch.cuda.memory_allocated()/1024**2:.1f} MB | Reserved: {torch.cuda.memory_reserved()/1024**2:.1f} MB | Memory summary: {torch.cuda.memory_summary(device=0, abbreviated=True)}', flush=True)
 
-        # if any(v in data for v in ('val', 'imagenet-val', 'imagenet-v2')):
-        #     evaluate(model, data, completed_epoch, args, tb_writer=writer, tokenizer=tokenizer)
 
-        # Saving checkpoints.
-        if args.io.save_logs:
-            checkpoint_dict = {
-                "epoch": completed_epoch,
-                "name": args.train.name,
-                "state_dict": original_model.state_dict(),
-                "optimizer": optimizer.state_dict(),
-            }
-            if scaler is not None:
-                checkpoint_dict["scaler"] = scaler.state_dict()
+            # if epoch < 10:
+            #     try:
+            #         save_dir = os.path.join(args.io.mem_snapshots, date_str)
+            #         os.makedirs(save_dir, exist_ok=True)
+            #         save_path = os.path.join(save_dir, F'rank{args.datamodule.rank}_gpu{args.datamodule.local_rank}_epoch{epoch}.pickle')
+            #         torch.cuda.memory._dump_snapshot(save_path)
+            #         logging.info(f"Captured memory snapshot {save_path}")
+            #         print(f"Captured memory snapshot {save_path}")
+            #     except Exception as e:
+            #         logging.error(f"Failed to capture memory snapshot {e}")
+            #         print(f'Failed to capture memory snapshot {e}')
+            # else:
+            #     torch.cuda.memory._record_memory_history(enabled=None)
+            completed_epoch = epoch + 1
+            last_completed_epoch = completed_epoch
 
-            if completed_epoch == args.train.epochs \
-                    or (args.io.save_frequency > 0 and (completed_epoch % args.io.save_frequency) == 0) \
-                        or completed_epoch == 1:
-                # save checkpoints within outputs file
-                torch.save(
-                    checkpoint_dict,
-                    os.path.join(args.io.checkpoint_path, f"epoch_{completed_epoch}.pt"),
+            # if any(v in data for v in ('val', 'imagenet-val', 'imagenet-v2')):
+            #     evaluate(model, data, completed_epoch, args, tb_writer=writer, tokenizer=tokenizer)
+
+            # Saving checkpoints.
+            checkpoint_dict = None
+            if args.io.save_logs:
+                checkpoint_dict = build_checkpoint_dict(
+                    args,
+                    original_model,
+                    optimizer,
+                    scaler,
+                    completed_epoch,
+                )
+                save_epoch_file = (
+                    completed_epoch == args.train.epochs
+                    or (
+                        args.io.save_frequency > 0
+                        and (completed_epoch % args.io.save_frequency) == 0
+                    )
+                    or completed_epoch == 1
                 )
 
-                # log out via comet
-                # TBD if we want the whole checkpoint dict or just some specific hyper-params . . .
-                if is_master(args, local=args.log_local):
-                    if(args.io.comet_ml):
-                        experiment.log_parameters(checkpoint_dict)
-                        log_model(experiment, model=original_model, model_name="CIIP!")
+                persist_latest_checkpoint(
+                    args,
+                    checkpoint_dict,
+                    completed_epoch,
+                    save_epoch_file=save_epoch_file,
+                )
 
-        if args.train.delete_previous_checkpoint:
-            previous_checkpoint = os.path.join(args.io.checkpoint_path, f"epoch_{completed_epoch - 1}.pt")
-            if os.path.exists(previous_checkpoint):
-                os.remove(previous_checkpoint)
+                if (
+                    save_epoch_file
+                    and is_master(args, local=args.log_local)
+                    and args.io.comet_ml
+                ):
+                    experiment.log_parameters(checkpoint_dict)
+                    log_model(experiment, model=original_model, model_name="CIIP!")
 
-        if args.train.save_most_recent:
-            # try not to corrupt the latest checkpoint if save fails
-            tmp_save_path = os.path.join(args.io.checkpoint_path, "tmp.pt")
-            latest_save_path = os.path.join(args.io.checkpoint_path, LATEST_CHECKPOINT_NAME)
-            torch.save(checkpoint_dict, tmp_save_path)
-            os.replace(tmp_save_path, latest_save_path)
+            if args.train.delete_previous_checkpoint:
+                previous_checkpoint = os.path.join(args.io.checkpoint_path, f"epoch_{completed_epoch - 1}.pt")
+                if os.path.exists(previous_checkpoint):
+                    os.remove(previous_checkpoint)
+
+            if args.train.save_most_recent and checkpoint_dict is not None:
+                latest_save_path = os.path.join(args.io.checkpoint_path, LATEST_CHECKPOINT_NAME)
+                atomic_torch_save(checkpoint_dict, latest_save_path)
+    except torch.cuda.OutOfMemoryError as err:
+        handle_cuda_oom(err, args, original_model, optimizer, scaler, last_completed_epoch)
+    except RuntimeError as err:
+        if 'out of memory' in str(err).lower():
+            handle_cuda_oom(err, args, original_model, optimizer, scaler, last_completed_epoch)
+        else:
+            raise
 
 
     if args.wandb and is_master(args):
