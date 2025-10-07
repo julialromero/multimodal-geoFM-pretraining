@@ -141,6 +141,8 @@ def get_latest_tracker_path(args: DictConfig) -> str:
 
 
 def atomic_torch_save(state_dict, target_path: str):
+    directory = os.path.dirname(target_path) or "."
+    os.makedirs(directory, exist_ok=True)
     tmp_path = f"{target_path}.tmp"
     torch.save(state_dict, tmp_path)
     os.replace(tmp_path, target_path)
@@ -156,10 +158,11 @@ def update_resume_metadata(args: DictConfig, checkpoint_path: str):
     with open(tracker_path, "w") as tracker_file:
         tracker_file.write(checkpoint_path)
 
-    if is_master(args, local=getattr(args, "log_local", False)):
-        config_file = os.path.join(args.io.logs, "prod_default.yaml")
-        with open(config_file, "w") as f:
-            OmegaConf.save(args, f)
+    if args.io.save_logs and args.io.checkpoint_path:
+        if is_master(args, local=getattr(args, "log_local", False)):
+            config_file = os.path.join(args.io.logs, "prod_default.yaml")
+            with open(config_file, "w") as f:
+                OmegaConf.save(args, f)
 
 
 def build_checkpoint_dict(args: DictConfig, original_model, optimizer, scaler, epoch: int):
@@ -176,6 +179,8 @@ def build_checkpoint_dict(args: DictConfig, original_model, optimizer, scaler, e
 
 
 def persist_latest_checkpoint(args: DictConfig, checkpoint_dict, epoch: int, save_epoch_file: bool):
+    if not getattr(args.io, "checkpoint_path", None):
+        return
     latest_save_path = os.path.join(args.io.checkpoint_path, LATEST_CHECKPOINT_NAME)
     atomic_torch_save(checkpoint_dict, latest_save_path)
     update_resume_metadata(args, latest_save_path)
@@ -195,7 +200,11 @@ def handle_cuda_oom(
 ):
     logging.error("CUDA OOM encountered: %s", err)
     print(f"CUDA OOM encountered: {err}", flush=True)
-    if args.io.save_logs and args.io.checkpoint_path:
+    if (
+        args.io.save_logs
+        and args.io.checkpoint_path
+        and is_master(args, local=getattr(args, "log_local", False))
+    ):
         try:
             checkpoint_dict = build_checkpoint_dict(
                 args,
@@ -640,9 +649,13 @@ def main(args: DictConfig, start_epoch=0):
         #     exit(1)
 
     # determine if this worker should save logs and checkpoints. only do so if it is rank == 0
-    args.save_logs = args.io.save_logs and is_master(args)
+    should_save_logs = (
+        bool(getattr(args.io, "checkpoint_path", None))
+        and getattr(args.io, "save_logs", False)
+        and is_master(args, local=getattr(args, "log_local", False))
+    )
     writer = None
-    if args.save_logs and args.tensorboard:
+    if should_save_logs and args.tensorboard:
         assert tensorboard is not None, "Please install tensorboard."
         writer = tensorboard.SummaryWriter(args.tensorboard_path)
 
@@ -735,7 +748,7 @@ def main(args: DictConfig, start_epoch=0):
 
             # Saving checkpoints.
             checkpoint_dict = None
-            if args.io.save_logs:
+            if should_save_logs:
                 checkpoint_dict = build_checkpoint_dict(
                     args,
                     original_model,
@@ -772,7 +785,7 @@ def main(args: DictConfig, start_epoch=0):
                 if os.path.exists(previous_checkpoint):
                     os.remove(previous_checkpoint)
 
-            if args.train.save_most_recent and checkpoint_dict is not None:
+            if args.train.save_most_recent and should_save_logs and checkpoint_dict is not None:
                 latest_save_path = os.path.join(args.io.checkpoint_path, LATEST_CHECKPOINT_NAME)
                 atomic_torch_save(checkpoint_dict, latest_save_path)
     except torch.cuda.OutOfMemoryError as err:
