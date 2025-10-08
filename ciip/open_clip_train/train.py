@@ -480,11 +480,21 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
         if args.datamodule.world_size > 1 and dist.is_available() and dist.is_initialized():
             oom_tensor = torch.tensor([1 if cuda_oom else 0], device=device)
             oom_group = get_oom_sync_group()
-            if oom_group is not None:
-                dist.all_reduce(oom_tensor, op=dist.ReduceOp.SUM, group=oom_group)
+            try:
+                if oom_group is not None:
+                    dist.all_reduce(oom_tensor, op=dist.ReduceOp.SUM, group=oom_group)
+                else:
+                    dist.all_reduce(oom_tensor, op=dist.ReduceOp.SUM)
+            except RuntimeError as dist_err:
+                logging.warning(
+                    "Encountered distributed error while synchronizing CUDA OOM state at epoch %s batch %s: %s",
+                    epoch,
+                    i,
+                    dist_err,
+                )
+                cuda_oom = True
             else:
-                dist.all_reduce(oom_tensor, op=dist.ReduceOp.SUM)
-            cuda_oom = oom_tensor.item() > 0
+                cuda_oom = oom_tensor.item() > 0
 
         if cuda_oom:
             if args.train.accum_freq > 1:
