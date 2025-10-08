@@ -86,6 +86,58 @@ def _handle_cuda_oom(err: RuntimeError, epoch: int, batch_idx: int, optimizer) -
         torch.cuda.empty_cache()
 
 
+def _sync_cuda_oom_flag(
+    cuda_oom: bool,
+    *,
+    device: torch.device,
+    epoch: int,
+    batch_idx: int,
+    optimizer,
+    world_size: int,
+) -> bool:
+    """Share CUDA OOM state across ranks and ensure all optimizers are cleared.
+
+    When any rank encounters an out-of-memory error, the distributed run must
+    skip the offending batch on *all* ranks to keep gradients aligned. This
+    helper performs an ``all_reduce`` over a dedicated process group so that a
+    single ``True`` value propagates to every worker. If a different rank raised
+    the OOM, the local optimizer is also reset to avoid stepping with stale
+    gradients.
+    """
+
+    if world_size <= 1 or not dist.is_available() or not dist.is_initialized():
+        return cuda_oom
+
+    oom_tensor = torch.tensor([1 if cuda_oom else 0], device=device)
+    oom_group = get_oom_sync_group()
+
+    try:
+        if oom_group is not None:
+            dist.all_reduce(oom_tensor, op=dist.ReduceOp.SUM, group=oom_group)
+        else:
+            dist.all_reduce(oom_tensor, op=dist.ReduceOp.SUM)
+    except RuntimeError as dist_err:
+        logging.warning(
+            "Encountered distributed error while synchronizing CUDA OOM state at epoch %s batch %s: %s",
+            epoch,
+            batch_idx,
+            dist_err,
+        )
+        return True
+
+    aggregated_oom = oom_tensor.item() > 0
+    if aggregated_oom and not cuda_oom:
+        logging.warning(
+            "Skipping batch %s in epoch %s due to CUDA OOM reported on another rank.",
+            batch_idx,
+            epoch,
+        )
+        if optimizer is not None:
+            optimizer.zero_grad(set_to_none=True)
+
+    return aggregated_oom
+
+
 def postprocess_clip_output(model_out):
     return {
         # TODO: make sure the same keys are used in all models
@@ -349,24 +401,15 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
             cuda_oom = True
             _handle_cuda_oom(err, epoch, i, optimizer)
 
-        if args.datamodule.world_size > 1 and dist.is_available() and dist.is_initialized():
-            oom_tensor = torch.tensor([1 if cuda_oom else 0], device=device)
-            oom_group = get_oom_sync_group()
-            try:
-                if oom_group is not None:
-                    dist.all_reduce(oom_tensor, op=dist.ReduceOp.SUM, group=oom_group)
-                else:
-                    dist.all_reduce(oom_tensor, op=dist.ReduceOp.SUM)
-            except RuntimeError as dist_err:
-                logging.warning(
-                    "Encountered distributed error while synchronizing CUDA OOM state at epoch %s batch %s: %s",
-                    epoch,
-                    i,
-                    dist_err,
-                )
-                cuda_oom = True
-            else:
-                cuda_oom = oom_tensor.item() > 0
+        if args.datamodule.world_size > 1:
+            cuda_oom = _sync_cuda_oom_flag(
+                cuda_oom,
+                device=device,
+                epoch=epoch,
+                batch_idx=i,
+                optimizer=optimizer,
+                world_size=args.datamodule.world_size,
+            )
 
         if cuda_oom:
             if args.datamodule.world_size > 1 and dist.is_available() and dist.is_initialized():

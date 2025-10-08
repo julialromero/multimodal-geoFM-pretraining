@@ -104,13 +104,22 @@ def allocate_gpu_memory_for_fragmentation(device: torch.device, current_rank: in
     return allocated_tensor # Return the tensor so it stays in scope in the main function
 
 
-torch.cuda.current_device()  # <-- or torch.empty(1, device='cuda')
-torch.cuda.synchronize()
+if torch.cuda.is_available():
+    # Ensure the CUDA context is initialized for the current process before
+    # attempting to reserve memory or launch kernels. Skip when CUDA is not
+    # present so that CPU-only development environments do not crash on import.
+    torch.cuda.current_device()  # <-- or torch.empty(1, device='cuda')
+    torch.cuda.synchronize()
 
 
 def setup_slurm_logging():
     local_rank, global_rank, world_size = world_info_from_env()
     date_dir = os.environ.get('MY_LOG_BASE_DIR')
+    if not date_dir:
+        # Default to the current working directory if the SLURM-specific
+        # environment variable has not been provided. This keeps local runs
+        # functional instead of raising an exception while joining paths.
+        date_dir = os.getcwd()
     log_dir = os.path.join(date_dir, 'torchrun_logs')
     os.makedirs(log_dir, exist_ok=True)
     stdout_log = os.path.join(log_dir, f"stdout_rank{global_rank}.log")
@@ -692,7 +701,14 @@ def main(args: DictConfig, start_epoch=0):
         # print(torch.cuda.memory_summary())
         train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist_model, args, tb_writer=writer)
         # print time, rank
-        print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} | Rank {args.datamodule.rank} finished epoch {epoch} |  Allocated: {torch.cuda.memory_allocated()/1024**2:.1f} MB | Reserved: {torch.cuda.memory_reserved()/1024**2:.1f} MB | Memory summary: {torch.cuda.memory_summary(device=0, abbreviated=True)}', flush=True)
+        print(
+            f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} | '
+            f'Rank {args.datamodule.rank} finished epoch {epoch} |  '
+            f'Allocated: {torch.cuda.memory_allocated()/1024**2:.1f} MB | '
+            f'Reserved: {torch.cuda.memory_reserved()/1024**2:.1f} MB | '
+            f'Memory summary: {torch.cuda.memory_summary(device=device, abbreviated=True)}',
+            flush=True,
+        )
 
 
         # if epoch < 10:
