@@ -40,6 +40,22 @@ def is_using_distributed():
     return False
 
 
+_OOM_SYNC_GROUP = None
+
+
+def get_oom_sync_group():
+    """Return a dedicated process group for CUDA OOM coordination."""
+    global _OOM_SYNC_GROUP
+    if _OOM_SYNC_GROUP is not None:
+        return _OOM_SYNC_GROUP
+
+    if not dist.is_available() or not dist.is_initialized():
+        return None
+
+    _OOM_SYNC_GROUP = dist.new_group()
+    return _OOM_SYNC_GROUP
+
+
 def world_info_from_env():
     local_rank = 0
     for v in ('LOCAL_RANK', 'MPI_LOCALRANKID', 'SLURM_LOCALID', 'OMPI_COMM_WORLD_LOCAL_RANK'):

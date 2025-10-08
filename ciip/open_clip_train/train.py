@@ -25,7 +25,7 @@ except ImportError:
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 sys.path.insert(0, parent_dir)
 from open_clip import get_input_dtype
-from open_clip_train.distributed import is_master
+from open_clip_train.distributed import get_oom_sync_group, is_master
 from open_clip_train.zero_shot import zero_shot_eval
 from open_clip_train.precision import get_autocast
 from loss import gather_features
@@ -479,7 +479,11 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
 
         if args.datamodule.world_size > 1 and dist.is_available() and dist.is_initialized():
             oom_tensor = torch.tensor([1 if cuda_oom else 0], device=device)
-            dist.all_reduce(oom_tensor, op=dist.ReduceOp.SUM)
+            oom_group = get_oom_sync_group()
+            if oom_group is not None:
+                dist.all_reduce(oom_tensor, op=dist.ReduceOp.SUM, group=oom_group)
+            else:
+                dist.all_reduce(oom_tensor, op=dist.ReduceOp.SUM)
             cuda_oom = oom_tensor.item() > 0
 
         if cuda_oom:
