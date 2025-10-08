@@ -10,7 +10,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from typing import Dict, Tuple
 
 import torch.distributed as dist
 
@@ -28,7 +27,6 @@ from open_clip import get_input_dtype
 from open_clip_train.distributed import get_oom_sync_group, is_master
 from open_clip_train.zero_shot import zero_shot_eval
 from open_clip_train.precision import get_autocast
-from loss import gather_features
 
 import random
 from torch.utils.data import Dataset, DataLoader
@@ -86,127 +84,6 @@ def _handle_cuda_oom(err: RuntimeError, epoch: int, batch_idx: int, optimizer) -
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-
-
-def _compute_vc_geometry(
-        features: torch.Tensor,
-        gamma: float,
-        eps: float = 1e-12,
-) -> Tuple[float, float, float, float]:
-    """Compute diagnostic statistics for the variance-covariance regularizer."""
-    if features.ndim != 2 or features.shape[0] < 2:
-        nan = float("nan")
-        return nan, nan, nan, nan
-
-    autocast_off = (
-        torch.cuda.amp.autocast(enabled=False)
-        if features.is_cuda and torch.cuda.is_available()
-        else nullcontext()
-    )
-
-    with autocast_off:
-        feats = features.float()
-        variances = torch.var(feats, dim=0, unbiased=False)
-        std = torch.sqrt(variances + 1e-4)
-        std_min = torch.min(std)
-        gamma_tensor = torch.as_tensor(gamma, dtype=std.dtype, device=std.device)
-        std_diff = std_min - gamma_tensor
-
-        centered = feats - feats.mean(dim=0, keepdim=True)
-        cov = centered.t().matmul(centered) / (centered.shape[0] - 1)
-        off_diag = cov - torch.diag(torch.diagonal(cov))
-        cov_fro = torch.linalg.norm(off_diag, ord="fro")
-
-        eigvals = torch.linalg.eigvalsh(cov).real
-        participation = (eigvals.sum() ** 2) / (eigvals.pow(2).sum() + eps)
-
-    return (
-        std_min.item(),
-        std_diff.item(),
-        cov_fro.item(),
-        participation.item(),
-    )
-
-
-def _update_vc_metric_meter(meters: Dict[str, AverageMeter], name: str, value: float, weight: int) -> None:
-    meter = meters.setdefault(name, AverageMeter())
-    if math.isnan(value):
-        meter.val = value
-        meter.avg = value
-    else:
-        meter.update(value, weight)
-
-
-def _accumulate_vc_metrics(
-        loss,
-        model_out: Dict[str, torch.Tensor],
-        vc_metrics_m: Dict[str, AverageMeter],
-        batch_size: int,
-) -> None:
-    if not getattr(loss, "vc_reg_enabled", False):
-        return
-    with torch.no_grad():
-        gathered_features = {}
-        for modality in ("s1", "s2"):
-            raw_key = f"{modality}_features_vc"
-            feature_key = f"{modality}_features"
-            features = model_out.get(raw_key)
-            if features is None:
-                features = model_out.get(feature_key)
-            gathered_features[modality] = features
-
-        world_size = getattr(loss, "world_size", 1)
-        if world_size > 1:
-            local_loss = getattr(loss, "local_loss", False)
-            rank = getattr(loss, "rank", 0)
-            use_horovod = getattr(loss, "use_horovod", False)
-
-            s1_tensor = gathered_features.get("s1")
-            s2_tensor = gathered_features.get("s2")
-            if s1_tensor is not None or s2_tensor is not None:
-                if s1_tensor is not None and s2_tensor is not None:
-                    s1_tensor, s2_tensor = gather_features(
-                        s1_tensor,
-                        s2_tensor,
-                        local_loss,
-                        False,
-                        rank,
-                        world_size,
-                        use_horovod,
-                    )
-                else:
-                    if s1_tensor is not None:
-                        s1_tensor, _ = gather_features(
-                            s1_tensor,
-                            s1_tensor,
-                            local_loss,
-                            False,
-                            rank,
-                            world_size,
-                            use_horovod,
-                        )
-                    if s2_tensor is not None:
-                        s2_tensor, _ = gather_features(
-                            s2_tensor,
-                            s2_tensor,
-                            local_loss,
-                            False,
-                            rank,
-                            world_size,
-                            use_horovod,
-                        )
-                gathered_features["s1"] = s1_tensor
-                gathered_features["s2"] = s2_tensor
-
-        for modality, features in gathered_features.items():
-            if features is None:
-                continue
-            features = features.detach()
-            std_min, std_diff, cov_fro, participation = _compute_vc_geometry(features, loss.vc_gamma)
-            _update_vc_metric_meter(vc_metrics_m, f"vc_std_min_{modality}", std_min, batch_size)
-            _update_vc_metric_meter(vc_metrics_m, f"vc_std_diff_{modality}", std_diff, batch_size)
-            _update_vc_metric_meter(vc_metrics_m, f"vc_cov_fro_{modality}", cov_fro, batch_size)
-            _update_vc_metric_meter(vc_metrics_m, f"vc_participation_ratio_{modality}", participation, batch_size)
 
 
 def postprocess_clip_output(model_out):
@@ -364,7 +241,6 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
             
     model.train()
     losses_m = {}
-    vc_metrics_m: Dict[str, AverageMeter] = {}
     batch_time_m = AverageMeter()
     data_time_m = AverageMeter()
     end = time.time()
@@ -380,7 +256,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
         s2 = s2.to(device=device, dtype=input_dtype, non_blocking=True)
 
         data_time_m.update(time.time() - end)
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
 
         losses = {}
         logit_scale = None
@@ -398,8 +274,6 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                         model_out.update({f'dist_{k}': v for k, v in dist_model_out.items()})
                     losses = loss(**model_out, output_dict=True)
 
-                    _accumulate_vc_metrics(loss, model_out, vc_metrics_m, s1.shape[0])
-
                     total_loss = sum(losses.values())
                     losses["loss"] = total_loss
 
@@ -409,8 +283,6 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 with torch.no_grad():
                     with autocast():
                         model_out = model(s1, s2)
-
-                        _accumulate_vc_metrics(loss, model_out, vc_metrics_m, s1.shape[0])
 
                         for f in ("logit_scale", "logit_bias"):
                             model_out.pop(f, None)
@@ -432,7 +304,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 # Now, ready to take gradients for the last accum_freq batches.
                 # Re-do the forward pass for those batches, and use the cached features from the other batches as negatives.
                 # Call backwards each time, but only step optimizer at the end.
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
                 accum_features_current_loop = {key: list(val) for key, val in accum_features.items()} # Ensure a copy
 
                 for j in range(args.train.accum_freq):
@@ -497,6 +369,8 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 cuda_oom = oom_tensor.item() > 0
 
         if cuda_oom:
+            if args.datamodule.world_size > 1 and dist.is_available() and dist.is_initialized():
+                dist.barrier()
             if args.train.accum_freq > 1:
                 accum_s1, accum_s2, accum_features = [], [], {}
             end = time.time()
@@ -556,16 +430,10 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 losses_m[key].update(val.item(), batch_size)
 
             logit_scale_scalar = logit_scale.item()
-            metrics_log_parts = [
+            metrics_log = " ".join(
                 f"{loss_name.capitalize()}: {loss_m.val:#.5g} ({loss_m.avg:#.5g})"
                 for loss_name, loss_m in losses_m.items()
-            ]
-            if vc_metrics_m:
-                metrics_log_parts.extend(
-                    f"{name}: {meter.val:#.5g} ({meter.avg:#.5g})"
-                    for name, meter in vc_metrics_m.items()
-                )
-            metrics_log = " ".join(metrics_log_parts)
+            )
             samples_per_second = args.train.accum_freq * args.datamodule.batch_size * args.datamodule.world_size / batch_time_m.val
             samples_per_second_per_gpu = args.train.accum_freq * args.datamodule.batch_size / batch_time_m.val
             logging.info(
@@ -586,8 +454,6 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 "lr": optimizer.param_groups[0]["lr"]
             }            
             log_data.update({name: val.val for name, val in losses_m.items()})
-            if vc_metrics_m:
-                log_data.update({name: meter.val for name, meter in vc_metrics_m.items()})
 
             log_data = {"train/" + name: val for name, val in log_data.items()}
 
