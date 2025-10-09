@@ -8,21 +8,23 @@
 #SBATCH --ntasks-per-node=12 # 8x + 1x#GPUs # 8 tasks for each node for data extraction, + 1task per gpu for memory grab
 #SBATCH --cpus-per-task=6 # use x CPUs for each one GPU
 #SBATCH --account=bekj-dtai-gh
-#SBATCH --time=02:00:00
+#SBATCH --time=02:45:00
 #SBATCH --gpus-per-node=4
 #SBATCH --mail-user=julia.romero@colorado.edu
 #SBATCH --mail-type="BEGIN,END"
 #SBATCH --exclusive
 #SBATCH --mem=0
-# NOTE: The extraction helpers now stage *all* chunk_XX.tar.gz archives on each
-# node (/tmp/$USER/s1 and /tmp/$USER/s2c). Ensure every node has enough local
-# scratch space for the full, extracted datasets before launching the job.
+
 
 
 ###NOTE: make sure to run the following to launch the script:
 # module load cuda/12.6.1  # will error if not run
 # conda activate cii
 # sbatch /projects/bekj/jromero5/ciip/ciip/open_clip_train/test-2nodes-sixteenths-memres.sh
+
+NCCL_ASYNC_ERROR_HANDLING=1
+NCCL_BLOCKING_WAIT=1
+HYDRA_FULL_ERROR=1
 
 CUDA_MALLOC_SCRIPT="/projects/bekj/jromero5/ciip/ciip/open_clip_train/cuda_malloc.py" # Adjust path
 EXTRACT_DATA_SCRIPT="/projects/bekj/jromero5/ciip/ciip/open_clip_train/extract_data.sh" # Adjust path

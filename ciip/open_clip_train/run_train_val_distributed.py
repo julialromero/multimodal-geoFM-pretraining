@@ -309,7 +309,8 @@ def main(args: DictConfig, start_epoch=0):
         print('####### DELETING 80GB ALLOCATED TENSOR #######')
         logging.info('####### DELETING 80GB ALLOCATED TENSOR #######')
     del _reserved_memory_tensor
-    # torch.cuda.empty_cache()
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
 
     
 

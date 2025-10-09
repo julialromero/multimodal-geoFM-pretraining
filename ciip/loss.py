@@ -15,53 +15,90 @@ try:
 except ImportError:
     hvd = None
 
+def _dist_ready() -> bool:
+    return dist.is_available() and dist.is_initialized()
 
 def gather_features(
-        s1_features,
-        s2_features,
-        local_loss=False,
-        gather_with_grad=False,
-        rank=0,
-        world_size=1,
-        use_horovod=False
+    s1_features: torch.Tensor,
+    s2_features: torch.Tensor,
+    local_loss: bool = False,
+    gather_with_grad: bool = False,
+    rank: int = 0,
+    world_size: int = 1,
+    use_horovod: bool = False,
 ):
-    assert has_distributed, 'torch.distributed did not import correctly, please use a PyTorch version with support.'
+    """
+    Gather features across ranks for contrastive loss.
+
+    Safety + OOM behavior:
+      • If local_loss=True (recommended for robust OOM skip), no collectives are performed.
+      • Autograd-enabled gathers are disallowed; all gathers are under torch.no_grad().
+      • When gathering (global negatives), we reinsert the local tensors so gradients
+        still flow for the local slice.
+
+    Returns:
+        (all_s1_features, all_s2_features) with batch dimension concatenated across ranks,
+        or the original (s1_features, s2_features) if no gather is performed.
+    """
+
+    # Fast paths: avoid any collective (safest when skipping batches on OOM)
+    if local_loss or world_size <= 1 or (not use_horovod and not _dist_ready()):
+        return s1_features, s2_features
+
+    if gather_with_grad:
+        raise RuntimeError("gather_with_grad=True is not supported (autograd collectives).")
+
+
+    # Resolve rank/world_size if not provided
     if use_horovod:
-        assert hvd is not None, 'Please install horovod'
-        if gather_with_grad:
-            all_s1_features = hvd.allgather(s1_features)
-            all_s2_features = hvd.allgather(s2_features)
-        else:
-            with torch.no_grad():
-                all_s1_features = hvd.allgather(s1_features)
-                all_s2_features = hvd.allgather(s2_features)
-            if not local_loss:
-                # ensure grads for local rank when all_* features don't have a gradient
-                gathered_s1_features = list(all_s1_features.chunk(world_size, dim=0))
-                gathered_s2_features = list(all_s2_features.chunk(world_size, dim=0))
-                gathered_s1_features[rank] = s1_features
-                gathered_s2_features[rank] = s2_features
-                all_s1_features = torch.cat(gathered_s1_features, dim=0)
-                all_s2_features = torch.cat(gathered_s2_features, dim=0)
-    else:
-        # We gather tensors from all gpus
-        if gather_with_grad:
-            all_s1_features = torch.cat(torch.distributed.nn.all_gather(s1_features), dim=0)
-            all_s2_features = torch.cat(torch.distributed.nn.all_gather(s2_features), dim=0)
-        else:
-            gathered_s1_features = [torch.zeros_like(s1_features) for _ in range(world_size)]
-            gathered_s2_features = [torch.zeros_like(s2_features) for _ in range(world_size)]
-            dist.all_gather(gathered_s1_features, s1_features)
-            dist.all_gather(gathered_s2_features, s2_features)
-            if not local_loss:
-                # ensure grads for local rank when all_* features don't have a gradient
-                gathered_s1_features[rank] = s1_features
-                gathered_s2_features[rank] = s2_features
-            all_s1_features = torch.cat(gathered_s1_features, dim=0)
-            all_s2_features = torch.cat(gathered_s2_features, dim=0)
+        if hvd is None:
+            raise RuntimeError("Horovod requested but not available.")
+        if world_size <= 1:
+            world_size = hvd.size()
+        if rank < 0 or rank >= world_size:
+            rank = hvd.rank()
 
-    return all_s1_features, all_s2_features
+        with torch.no_grad():
+            all_s1 = hvd.allgather(s1_features)
+            all_s2 = hvd.allgather(s2_features)
 
+        if not local_loss:
+            # Keep gradients for the local slice by replacing that chunk
+            chunks1 = list(all_s1.chunk(world_size, dim=0))
+            chunks2 = list(all_s2.chunk(world_size, dim=0))
+            chunks1[rank] = s1_features
+            chunks2[rank] = s2_features
+            all_s1 = torch.cat(chunks1, dim=0)
+            all_s2 = torch.cat(chunks2, dim=0)
+
+        return all_s1, all_s2
+
+    # torch.distributed path (no-grad all_gather)
+    if world_size <= 1:
+        try:
+            world_size = dist.get_world_size()
+        except Exception:
+            world_size = 1
+    if rank < 0 or rank >= world_size:
+        try:
+            rank = dist.get_rank()
+        except Exception:
+            rank = 0
+
+    with torch.no_grad():
+        gather_s1 = [torch.empty_like(s1_features) for _ in range(world_size)]
+        gather_s2 = [torch.empty_like(s2_features) for _ in range(world_size)]
+        dist.all_gather(gather_s1, s1_features)
+        dist.all_gather(gather_s2, s2_features)
+
+    if not local_loss:
+        # Preserve grad for local portion
+        gather_s1[rank] = s1_features
+        gather_s2[rank] = s2_features
+
+    all_s1 = torch.cat(gather_s1, dim=0)
+    all_s2 = torch.cat(gather_s2, dim=0)
+    return all_s1, all_s2
 
 class CiipLoss(nn.Module):
 

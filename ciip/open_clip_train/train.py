@@ -31,6 +31,7 @@ from open_clip_train.precision import get_autocast
 import random
 from torch.utils.data import Dataset, DataLoader
 from contextlib import nullcontext
+from open_clip_train.distributed import is_master
 
 class Subset(Dataset):
 
@@ -283,12 +284,15 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
 
             # delete  dataloader
             del loader
-    # save the model weights after the warm up phase -> random weights with appropriate batch norm stats
-    torch.save(
-    model.state_dict(),
-        os.path.join(args.io.checkpoint_path, f"epoch_0.pt"),
-    )
-    logging.info(f'Saved initial model weights to {args.io.checkpoint_path}.')
+    
+        if epoch == 0: # save the model weights after the warm up phase -> random weights with appropriate batch norm stats
+            if is_master(args, local=getattr(args, "log_local", False)):
+                from run_train_val_distributed import atomic_torch_save  # or duplicate the helper
+                atomic_torch_save(
+                    model.state_dict(),
+                    os.path.join(args.io.checkpoint_path, "epoch_0.pt"),
+                )
+                logging.info(f"Saved initial model weights to {args.io.checkpoint_path}.")
 
             
     model.train()

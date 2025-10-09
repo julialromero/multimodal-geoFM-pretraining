@@ -11,12 +11,12 @@ EXTRACT_DIR="/tmp/$USER/s2c"
 COORD_DIR="/tmp/$USER/.ciip_s2"
 MARKER_DIR="$COORD_DIR/markers"
 LOCK_DIR="$COORD_DIR/locks"
-TMP_DIR="$COORD_DIR/tmp"
+# TMP_DIR="$COORD_DIR/tmp"
 
-mkdir -p "$EXTRACT_DIR" "$MARKER_DIR" "$LOCK_DIR" "$TMP_DIR"
+mkdir -p "$EXTRACT_DIR" "$MARKER_DIR" "$LOCK_DIR"
 
 echo "$(date) S2 | Running on node ${SLURM_NODEID:-unknown} with local task ${SLURM_LOCALID:-unknown}"
-echo "$(date) S2 | Copying all chunks from $SOURCE_DIR to $EXTRACT_DIR"
+echo "$(date) S2 | Streaming extract from $SOURCE_DIR into $EXTRACT_DIR"
 
 shopt -s nullglob
 tarballs=("$SOURCE_DIR"/chunk_*.tar.gz)
@@ -94,19 +94,30 @@ for idx in "${!tarballs[@]}"; do
         continue
     fi
 
-    echo "$(date) S2 | Copying $tarball to $tmp_tar"
-    rm -f "$tmp_tar"
-    rsync -a "$tarball" "$tmp_tar"
+    # echo "$(date) S2 | Copying $tarball to $tmp_tar"
+    # rm -f "$tmp_tar"
+    # rsync -a "$tarball" "$tmp_tar"
 
-    tmp_extract_dir=$(mktemp -d "$TMP_DIR/${chunk_name}_XXXXXX")
-    echo "$(date) S2 | Extracting $tmp_tar into $tmp_extract_dir"
-    tar --use-compress-program="pigz -p ${pigz_threads}" -xf "$tmp_tar" -C "$tmp_extract_dir"
-    rm -f "$tmp_tar"
+    # tmp_extract_dir=$(mktemp -d "$TMP_DIR/${chunk_name}_XXXXXX")
+    # echo "$(date) S2 | Extracting $tmp_tar into $tmp_extract_dir"
+    # tar --use-compress-program="pigz -p ${pigz_threads}" -xf "$tmp_tar" -C "$tmp_extract_dir"
+    # rm -f "$tmp_tar"
 
-    echo "$(date) S2 | Installing contents of $chunk_name into $EXTRACT_DIR"
-    rsync -a "$tmp_extract_dir"/ "$EXTRACT_DIR"/
+    # echo "$(date) S2 | Installing contents of $chunk_name into $EXTRACT_DIR"
+    # rsync -a "$tmp_extract_dir"/ "$EXTRACT_DIR"/
 
-    rm -rf "$tmp_extract_dir"
+    # rm -rf "$tmp_extract_dir"
+
+    inprog="$MARKER_DIR/${chunk_name}.inprogress"
+    > "$inprog"
+    echo "$(date) S2 | Extracting $tarball directly into $EXTRACT_DIR"
+    # Streamed, multithreaded decompression straight to the final location.
+    # 'pigz -d -p N' ensures decompression only; tar handles the rest.
+    tar --use-compress-program="pigz -d -p ${pigz_threads}" \
+        --skip-old-files --no-same-owner --no-same-permissions -xf "$tarball" -C "$EXTRACT_DIR"
+    rm -f "$inprog"
+
+
     touch "$marker"
     echo "$(date) S2 | Finished processing $chunk_name"
 
