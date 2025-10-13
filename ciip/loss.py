@@ -172,6 +172,11 @@ class CiipLoss(nn.Module):
             labels = self.labels[device]
         return labels
 
+    def _cosine_logits(self, left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
+        left_norms = left.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+        right_norms = right.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+        return (left @ right.T) / (left_norms * right_norms.T)
+
     def get_logits(
             self,
             s1_features,
@@ -186,14 +191,16 @@ class CiipLoss(nn.Module):
                 self.local_loss, self.gather_with_grad, self.rank, self.world_size, self.use_horovod)
 
             if self.local_loss:
-                logits_per_s1 = logit_scale * s1_features @ all_s2_features.T
-                logits_per_s2 = logit_scale * s2_features @ all_s1_features.T
+                logits_per_s1 = logit_scale * self._cosine_logits(s1_features, all_s2_features)
+                logits_per_s2 = logit_scale * self._cosine_logits(s2_features, all_s1_features)
             else:
-                logits_per_s1 = logit_scale * all_s1_features @ all_s2_features.T
+                cosine_logits = self._cosine_logits(all_s1_features, all_s2_features)
+                logits_per_s1 = logit_scale * cosine_logits
                 logits_per_s2 = logits_per_s1.T
         else:
-            logits_per_s1 = logit_scale * s1_features @ s2_features.T
-            logits_per_s2 = logit_scale * s2_features @ s1_features.T
+            cosine_logits = self._cosine_logits(s1_features, s2_features)
+            logits_per_s1 = logit_scale * cosine_logits
+            logits_per_s2 = logit_scale * cosine_logits.T
             all_s1_features = s1_features
             all_s2_features = s2_features
 

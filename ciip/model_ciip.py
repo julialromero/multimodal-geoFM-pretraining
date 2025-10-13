@@ -349,24 +349,19 @@ class CIIP(nn.Module):
     #     return x
 
     def forward(self, s1, s2):
-        # returns normalized logits along with the raw encoder outputs
-        s1_features_vc = self.encode_s1(s1, normalize=False)
-        s2_features_vc = self.encode_s2(s2, normalize=False)
+        # Return raw encoder outputs; downstream losses compute cosine similarities
+        # without materializing a second normalized copy so we don't double memory
+        # usage for the CIIP activations.
+        s1_features = self.encode_s1(s1, normalize=False)
+        s2_features = self.encode_s2(s2, normalize=False)
 
-        s1_features = F.normalize(s1_features_vc, dim=-1)
-        s2_features = F.normalize(s2_features_vc, dim=-1)
-
-        # # cosine similarity as logits
         logit_scale = self.logit_scale.exp()
-
 
         out_dict = {
             "s1_features": s1_features,
             "s2_features": s2_features,
-            "s1_features_vc": s1_features_vc,
-            "s2_features_vc": s2_features_vc,
-            "logit_scale": logit_scale
-            }
+            "logit_scale": logit_scale,
+        }
 
         if self.logit_bias is not None:
             out_dict['logit_bias'] = self.logit_bias
@@ -374,9 +369,13 @@ class CIIP(nn.Module):
         return out_dict
 
     def get_logits(self, s1, s2):
-        s1_features = self.encode_s1(s1, normalize=True)
-        s2_features = self.encode_s2(s2, normalize=True)
-        s1_logits = self.logit_scale.exp() * s1_features @ s2_features.T
+        s1_features = self.encode_s1(s1, normalize=False)
+        s2_features = self.encode_s2(s2, normalize=False)
+
+        s1_norms = s1_features.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+        s2_norms = s2_features.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+        cosine_logits = (s1_features @ s2_features.T) / (s1_norms * s2_norms.T)
+        s1_logits = self.logit_scale.exp() * cosine_logits
         if self.logit_bias is not None:
             s1_logits += self.logit_bias
         s2_logits = s1_logits.T
