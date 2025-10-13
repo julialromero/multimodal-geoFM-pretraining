@@ -148,6 +148,14 @@ def postprocess_clip_output(model_out):
     }
 
 
+def compute_normalized_logits(s1_features: torch.Tensor, s2_features: torch.Tensor, logit_scale: torch.Tensor) -> torch.Tensor:
+    """Compute logit_scale * cosine_similarity(s1, s2) without storing normalized copies."""
+    s1_norms = s1_features.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+    s2_norms = s2_features.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+    cosine_sim = (s1_features @ s2_features.t()) / (s1_norms * s2_norms.t())
+    return logit_scale * cosine_sim
+
+
 def unwrap_model(model):
     if hasattr(model, 'module'):
         return model.module
@@ -563,7 +571,7 @@ def evaluate(model, data, epoch, args, tb_writer=None, tokenizer=None):
                     all_s1_features.append(s1_features.cpu())
                     all_s2_features.append(s2_features.cpu())
                     logit_scale = logit_scale.mean()
-                    logits_per_s1 = logit_scale * s1_features @ s2_features.t()
+                    logits_per_s1 = compute_normalized_logits(s1_features, s2_features, logit_scale)
                     logits_per_s2 = logits_per_s1.t()
 
                     batch_size = s1.shape[0]
@@ -638,7 +646,7 @@ def evaluate(model, data, epoch, args, tb_writer=None, tokenizer=None):
 
 def get_clip_metrics(s1_features, s2_features, logit_scale):
     metrics = {}
-    logits_per_s1 = (logit_scale * s1_features @ s2_features.t()).detach().cpu()
+    logits_per_s1 = compute_normalized_logits(s1_features, s2_features, logit_scale).detach().cpu()
     logits_per_s2 = logits_per_s1.t().detach().cpu()
 
     logits = {"s1_to_s2": logits_per_s1, "s2_to_s1": logits_per_s2}
