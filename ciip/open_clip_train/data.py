@@ -83,9 +83,6 @@ class SSL4EODataset(Dataset):
 
 
     def __getitem__(self, idx):
-        # if idx >= self.max_samples:
-        #     raise IndexError("Index out of bounds")
-
         ### get the sample corresponding to idx
         location_idx, season_idx = self.int_to_filepath(idx)
 
@@ -100,38 +97,56 @@ class SSL4EODataset(Dataset):
         path_to_s1_season = os.path.join(path_to_s1, s1_season_folders[season_idx])
         path_to_s2_season = os.path.join(path_to_s2, s2_season_folders[season_idx])
 
-        ############ Load and stack s1 images ##############
+        # ############ Load and stack s1 images ##############
         vh_path = os.path.join(path_to_s1_season, 'VH.tif')
         vv_path = os.path.join(path_to_s1_season, 'VV.tif')
+
+
         vh_image, _ = self.read_raster_image(vh_path)
         vv_image, _ = self.read_raster_image(vv_path)
 
-        # Normalize the VH and VV bands
-        # vh_image = self.normalize_image(vh_image)
-        # vv_image = self.normalize_image(vv_image)
+        # # Normalize the VH and VV bands
+        # # vh_image = self.normalize_image(vh_image)
+        # # vv_image = self.normalize_image(vv_image)
 
-        vv_image = torch.from_numpy(self.normalize(vv_image, S1_MEAN[0], S1_STD[0])).unsqueeze(0)
-        vh_image = torch.from_numpy(self.normalize(vh_image, S1_MEAN[1], S1_STD[1])).unsqueeze(0)
+        # vv_image = torch.from_numpy(self.normalize(vv_image, S1_MEAN[0], S1_STD[0])).unsqueeze(0)
+        # vh_image = torch.from_numpy(self.normalize(vh_image, S1_MEAN[1], S1_STD[1])).unsqueeze(0)
 
-        vh_image = self.resize_transform(vh_image).squeeze(0)
-        vv_image = self.resize_transform(vv_image).squeeze(0)
+        # vh_image = self.resize_transform(vh_image).squeeze(0)
+        # vv_image = self.resize_transform(vv_image).squeeze(0)
 
-        s1_composite_image = torch.stack((vh_image, vv_image), dim=0)
+        # s1_composite_image = torch.stack((vh_image, vv_image), dim=0)
         
 
-        ############### Load s2 images ###################
-        s2_band_images = []
-        for band in self.s2_bands:
-            band_path = os.path.join(path_to_s2_season, f'B{band}.tif')
-            band_img, _ = self.read_raster_image(band_path)
-            if band not in self.s2_stats:
-                raise ValueError(f"Statistics for band {band} not found")
-            mean, std = self.s2_stats[band]
-            band_img = torch.from_numpy(self.normalize(band_img, mean, std)).unsqueeze(0)
-            band_img = self.resize_transform(band_img).squeeze(0)
-            s2_band_images.append(band_img)
+        # ############### Load s2 images ###################
+        # s2_band_images = []
+        # for band in self.s2_bands:
+        #     band_path = os.path.join(path_to_s2_season, f'B{band}.tif')
+        #     band_img, _ = self.read_raster_image(band_path)
+        #     if band not in self.s2_stats:
+        #         raise ValueError(f"Statistics for band {band} not found")
+        #     mean, std = self.s2_stats[band]
+        #     band_img = torch.from_numpy(self.normalize(band_img, mean, std)).unsqueeze(0)
+        #     band_img = self.resize_transform(band_img).squeeze(0)
+        #     s2_band_images.append(band_img)
 
-        s2_composite_image = torch.stack(s2_band_images, dim=0)
+        # s2_composite_image = torch.stack(s2_band_images, dim=0)
+
+        vh = torch.from_numpy(vh_image).float().unsqueeze(0)
+        vv = torch.from_numpy(vv_image).float().unsqueeze(0)
+
+        # Geometry first (resize); no normalization yet
+        vh = self.resize_transform(vh).squeeze(0)
+        vv = self.resize_transform(vv).squeeze(0)
+        s1_composite_image = torch.stack([vh, vv], dim=0)   # [2,H,W]
+
+        s2_bands_t = []
+        for band in self.s2_bands:
+            arr, _ = self.read_raster_image(os.path.join(path_to_s2_season, f'B{band}.tif'))
+            t = torch.from_numpy(arr).float().unsqueeze(0)
+            t = self.resize_transform(t).squeeze(0)   # geometry first
+            s2_bands_t.append(t)
+        s2_composite_image = torch.stack(s2_bands_t, dim=0)
 
         # print(f'S1 composite image shape: {s1_composite_image.shape}')
         # print(f'S2 composite image shape: {s2_composite_image.shape}')
@@ -142,8 +157,26 @@ class SSL4EODataset(Dataset):
             s1_composite_image = self.transforms(s1_composite_image)
             s2_composite_image = self.transforms(s2_composite_image)
 
+        s1_composite_image = self.normalize_s1(s1_composite_image)
+        s2_composite_image = self.normalize_s2(s2_composite_image, self.s2_stats, self.s2_bands)
+
         return (s1_composite_image, s2_composite_image)
 
+
+  
+    def normalize_s1(self, x):  # x: [2,H,W] in your chosen S1 domain
+        mean = torch.tensor(S1_MEAN, dtype=x.dtype, device=x.device)[:, None, None]
+        std  = torch.tensor(S1_STD,  dtype=x.dtype, device=x.device)[:, None, None]
+        return (x - mean) / std
+
+    def normalize_s2(self, x , s2_stats, s2_bands):
+        means, stds = [], []
+        for b in s2_bands:
+            m, s = s2_stats[str(b)]     # <-- string key
+            means.append(m); stds.append(s)
+        mean = torch.tensor(means, dtype=x.dtype, device=x.device)[:, None, None]
+        std  = torch.tensor(stds,  dtype=x.dtype, device=x.device)[:, None, None]
+        return (x - mean) / std
 
     def int_to_filepath(self, i):
         if i < 0 or i >= self.length:

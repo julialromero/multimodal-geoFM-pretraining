@@ -52,9 +52,9 @@ model:
 #TODO: loss params
 loss:
   local_loss: True
-  gather_with_grad: False
-  cache_labels: True
-  vc_enabled: True
+  gather_with_grad: True
+  cache_labels: False
+  vc_enabled: False
   vc_weight: 0.4
   vc_gamma: 1.0
   vc_covariance_weights: [1.0, 1.0]
@@ -98,7 +98,7 @@ train:
   beta2: 0.98
   eps: 1.0e-8
   val_frequency: 1
-  accum_freq: 3
+  accum_freq: 5
   save_logs: True
   name: ciip_test
   delete_previous_checkpoint: False
