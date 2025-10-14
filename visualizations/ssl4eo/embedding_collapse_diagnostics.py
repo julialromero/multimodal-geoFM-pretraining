@@ -672,19 +672,17 @@ def discover_checkpoints(
     if not include_init:
         candidates = [path for path in candidates if "epoch_init" not in path.name]
 
-    # candidates.sort(key=lambda p: _natural_key(p.name))
-    # sort candidates
-    # candidates = sorted(
-    #     candidates,
-    #     key=lambda p: int(p.stem.split('_')[1])
-    # )
-    # print(candidates)
-
 
     epochs = [int(p.stem.split('_')[1]) for p in candidates]
-    # epochs already parsed as ints like you showed:
-    # epochs = [int(p.stem.split('_')[1]) for p in candidates]
     epochs = sorted(set(epochs))
+
+    # if min epoch is > 5
+    subtract = False
+    if min(epochs) > 5:
+        subtract = True
+        minimum = min(epochs)
+        # subtract min from all
+        epochs = [e - minimum for e in epochs]
 
     keep = set()
 
@@ -708,7 +706,15 @@ def discover_checkpoints(
             keep.update(e for e in epochs if e > 50 and e % 20 == 0)
 
 
+    
+
     epochs = sorted(keep)
+
+    if subtract == True:
+        epochs = [e + minimum for e in epochs]
+
+    print(epochs)
+
 
     # filter and keep only those epochs
     selected_paths = [
@@ -722,8 +728,6 @@ def discover_checkpoints(
         key=lambda p: int(p.stem.split('_')[1])
     )
 
-    # print(candidates)
-    # quit()
 
     # candidates = [candidates[i] for i in range(len(candidates)) if i in epochs or i == 0 or i == len(candidates)-1]
     if max_checkpoints is not None:
@@ -2274,6 +2278,29 @@ def _prepare_spectrum(values: Optional[np.ndarray]) -> Optional[np.ndarray]:
     return arr
 
 
+def _normalize_and_log(
+    spectrum: Optional[np.ndarray],
+    *,
+    k: int,
+    normalize: str,
+) -> Optional[np.ndarray]:
+    """Normalize and log-transform ``spectrum`` for visualization."""
+
+    if spectrum is None or spectrum.size == 0:
+        return None
+
+    values = spectrum[:k].astype(np.float64)
+    if values.size == 0:
+        return None
+
+    if normalize == "trace":
+        values = values / (np.sum(values) + 1e-12)
+    elif normalize == "max":
+        values = values / (values[0] + 1e-12)
+
+    return np.log(np.maximum(values, 1e-20))
+
+
 def _collect_spectra(
     metrics: Sequence[EpochMetrics], attr: str
 ) -> Tuple[List[np.ndarray], List[str]]:
@@ -2329,6 +2356,137 @@ def plot_svd_ridgeline_animation(
                 if spec is not None and spec.size:
                     max_len = max(max_len, spec.size)
         entries.append((metric.label, modality_specs))
+
+    if max_len == 0:
+        return None
+
+    if top_k is None or top_k <= 0:
+        k = max_len
+    else:
+        k = min(top_k, max_len)
+
+    normalized_entries: List[
+        Tuple[str, Dict[str, Dict[str, Optional[np.ndarray]]]]
+    ] = []
+    global_min = math.inf
+    global_max = -math.inf
+    valid_arrays = 0
+
+    for label, modality_specs in entries:
+        normalized_modalities: Dict[str, Dict[str, Optional[np.ndarray]]] = {}
+        for modality in ("s1", "s2"):
+            post = _normalize_and_log(
+                modality_specs[modality]["post"], k=k, normalize=normalize
+            )
+            pre = _normalize_and_log(
+                modality_specs[modality]["pre"], k=k, normalize=normalize
+            )
+
+            for arr in (post, pre):
+                if arr is not None and arr.size:
+                    arr_min = float(np.nanmin(arr))
+                    arr_max = float(np.nanmax(arr))
+                    global_min = min(global_min, arr_min)
+                    global_max = max(global_max, arr_max)
+                    valid_arrays += 1
+
+            normalized_modalities[modality] = {"post": post, "pre": pre}
+
+        normalized_entries.append((label, normalized_modalities))
+
+    if valid_arrays == 0 or not math.isfinite(global_min) or not math.isfinite(global_max):
+        return None
+
+    y_range = global_max - global_min
+    if not math.isfinite(y_range) or y_range <= 0:
+        y_range = 1.0
+
+    offset = 0.25 * y_range
+    x = np.arange(1, k + 1)
+
+    frames: List[np.ndarray] = []
+    for label, modality_specs in normalized_entries:
+        fig, axes = plt.subplots(2, 1, figsize=(8, 6), sharex=True)
+        fig.suptitle(
+            f"{label} — {'Correlation' if use_correlation else 'Singular value'} ridgeline"
+        )
+        for ax, modality in zip(axes, ("s1", "s2")):
+            spectra = modality_specs[modality]
+            post = spectra["post"]
+            pre = spectra["pre"]
+            has_data = False
+
+            ax.set_xlim(1, k)
+            ax.set_yticks([])
+            ax.set_ylabel(modality.upper())
+
+            if post is not None and post.size:
+                length = min(k, post.size)
+                y_vals = post[:length] + offset
+                ax.fill_between(
+                    x[:length],
+                    np.full(length, offset),
+                    y_vals,
+                    color="#2ca02c" if modality == "s1" else "#17becf",
+                    alpha=0.35,
+                )
+                ax.plot(
+                    x[:length],
+                    y_vals,
+                    color="#2ca02c" if modality == "s1" else "#17becf",
+                    label="Post projection",
+                )
+                has_data = True
+
+            if pre is not None and pre.size:
+                length = min(k, pre.size)
+                y_vals = pre[:length] - offset
+                ax.fill_between(
+                    x[:length],
+                    np.full(length, -offset),
+                    y_vals,
+                    color="#98df8a" if modality == "s1" else "#9edae5",
+                    alpha=0.35,
+                )
+                ax.plot(
+                    x[:length],
+                    y_vals,
+                    color="#98df8a" if modality == "s1" else "#9edae5",
+                    linestyle="--",
+                    label="Pre projection",
+                )
+                has_data = True
+
+            ax.set_ylim(global_min - offset * 1.5, global_max + offset * 1.5)
+            ax.grid(True, alpha=0.2)
+            if has_data:
+                handles, labels = ax.get_legend_handles_labels()
+                if handles:
+                    ax.legend(handles, labels, fontsize="small")
+            else:
+                _mark_axis_no_data(
+                    ax, f"{modality.upper()} spectrum", "No spectrum available"
+                )
+
+        axes[-1].set_xlabel("Component index")
+        fig.tight_layout(rect=[0, 0, 1, 0.95])
+
+        buffer = io.BytesIO()
+        fig.savefig(buffer, format="png", dpi=150)
+        plt.close(fig)
+        buffer.seek(0)
+        frames.append(imageio.imread(buffer))
+
+    if not frames:
+        return None
+
+    animations_dir = output_dir / "animations"
+    animations_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"svd_ridgeline_{'corr' if use_correlation else 'svd'}.gif"
+    output_path = animations_dir / filename
+    imageio.mimsave(output_path, frames, duration=frame_duration)
+
+    return output_path
 
 
 def plot_svd_heatmap(
@@ -2760,6 +2918,46 @@ def _flatten_axes(axes) -> List:
         return flattened
     return [axes]
 
+# def plot_projection(
+def _plot_projection_panel(
+    ax,
+    coords: np.ndarray,
+    labels: np.ndarray,
+    # output_path: Path,
+    *,
+    title: str,
+    ):
+# ) -> None:
+    # fig, ax = plt.subplots(figsize=(6, 5))
+    unique_labels = np.unique(labels)
+    handles = []
+    for label in unique_labels:
+        mask = labels == label
+        handle = ax.scatter(coords[mask, 0], coords[mask, 1], label=label, alpha=0.7, s=18)
+        handles.append(handle)
+    ax.set_title(title)
+    ax.set_xlabel("Component 1")
+    ax.set_ylabel("Component 2")
+    # ax.legend()
+    ax.grid(True, alpha=0.2)
+    return handles
+
+
+def plot_projection(
+    coords: np.ndarray,
+    labels: np.ndarray,
+    output_path: Path,
+    *,
+    title: str,
+) -> None:
+    fig, ax = plt.subplots(figsize=(6, 5))
+    handles = _plot_projection_panel(ax, coords, labels, title=title)
+    if handles:
+        ax.legend()
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+
 
 def plot_projection_grid(
     panels: Sequence[Tuple[str, np.ndarray, np.ndarray]],
@@ -2959,10 +3157,16 @@ def parse_args() -> argparse.Namespace:
             Example:
 
             python -m visualizations.ssl4eo.embedding_collapse_diagnostics \
-                --checkpoint-root '/home/juro4948/ciip/logs/2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints' \
-                --output-dir diagnostics/random_init/9-11-2025-vcregstats \
+                --checkpoint-root '/local/ms-data/SSL4EO/model/2025-09-28_11-07-06-test-compute/checkpoints' \
+                --output-dir diagnostics/random_init/init-vcregstats \
                 --dataset-root /local/ms-data/SSL4EO/ \
-                --vc-gamma 1 &
+                --vc-gamma 1
+
+            python -m visualizations.ssl4eo.embedding_collapse_diagnostics \
+                --checkpoint-root '/home/juro4948/ciip/logs/2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints' \
+                --output-dir diagnostics/random_init/9-11-2025-vcregstats-testing \
+                --dataset-root /local/ms-data/SSL4EO/ \
+                --vc-gamma 1 
             python -m visualizations.ssl4eo.embedding_collapse_diagnostics \
                 --checkpoint-root '/home/juro4948/ciip/logs/2025_09_20-22_35_45-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints' \
                 --output-dir diagnostics/random_init/9-20-2025-vcregstats \
@@ -2988,6 +3192,28 @@ def parse_args() -> argparse.Namespace:
                 --vc-gamma 1
 
             python -m visualizations.ssl4eo.embedding_collapse_diagnostics                 --checkpoint-root '/local/ms-data/SSL4EO/model/2025-09-25_17-34-44-test-compute/2025_09_25-17_43_19-model_resnet50-lr_5e-05-b_128-j_4-p_amp/checkpoints'                 --output-dir diagnostics/random_init/9-25-2025-vcregstats                 --dataset-root /local/ms-data/SSL4EO/                 --vc-gamma 1
+            
+            
+            python -m visualizations.ssl4eo.embedding_collapse_diagnostics \
+                --checkpoint-root '/home/juro4948/ciip/logs/2025_10_07-19_45_47-model_resnet50-lr_0.001-b_128-j_6-p_amp/checkpoints' \
+                --output-dir diagnostics/random_init/10-07-2025-vcregstats \
+                --dataset-root /local/ms-data/SSL4EO/ \
+                --vc-gamma 1
+
+            python -m visualizations.ssl4eo.embedding_collapse_diagnostics \
+                --checkpoint-root '/home/juro4948/ciip/logs/2025_10_09-11_04_30-model_resnet50-lr_0.001-b_128-j_6-p_amp/checkpoints' \
+                --output-dir diagnostics/random_init/10-09-2025-vcregstats \
+                --dataset-root /local/ms-data/SSL4EO/ \
+                --vc-gamma 1
+
+            python -m visualizations.ssl4eo.embedding_collapse_diagnostics \
+                --checkpoint-root '/home/juro4948/ciip/logs/2025_10_13-17_12_45-model_resnet50-lr_0.001-b_128-j_6-p_amp/checkpoints' \
+                --output-dir diagnostics/random_init/10-13-2025-vcregstats \
+                --dataset-root /local/ms-data/SSL4EO/ \
+                --vc-gamma 1
+
+
+            
             """
 
             # --checkpoint-root '/home/juro4948/ciip/logs/2025_09_23-12_27_52-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints' \
@@ -3003,7 +3229,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--config-name",
         type=str,
-        default="diagnostics",
+        default="prod_default",
         help="Name of the Hydra config to load (without .yaml)",
     )
     parser.add_argument(
@@ -3077,7 +3303,7 @@ def parse_args() -> argparse.Namespace:
         help="Override the variance floor γ used when computing VC diagnostics (defaults to config)",
     )
     parser.add_argument("--random-seed", type=int, default=42, help="Random seed for sampling")
-    parser.add_argument("--spectrum-top-k", type=int, default=10, help="Number of leading eigenvalues to plot")
+    parser.add_argument("--spectrum-top-k", type=int, default=500, help="Number of leading eigenvalues to plot")
     parser.add_argument(
         "--cca-top-k",
         type=int,
