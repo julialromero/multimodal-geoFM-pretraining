@@ -8,7 +8,7 @@ representation collapse:
 * Positive vs. negative cosine similarity statistics.
 * Cosine similarity histograms per epoch.
 * Per-dimension embedding variance heatmaps and summaries.
-* Covariance spectrum (singular values) and condition numbers.
+* Singular value epoch grids for raw and normalized embeddings.
 * Variance-covariance geometry diagnostics (std minima, γ gap, off-diagonal Frobenius norm, participation ratio).
 * Linear probe accuracy overlays (optional, from CSV exports).
 * t-SNE / UMAP projections of the embedding space across epochs.
@@ -47,7 +47,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import csv
-import io
 import json
 import logging
 import math
@@ -61,7 +60,6 @@ import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 from matplotlib.backends.backend_pdf import PdfPages
 import numpy as np
-import imageio.v2 as imageio
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -128,6 +126,8 @@ class EpochMetrics:
     s2_singular_values: Optional[np.ndarray] = None
     s1_pre_singular_values: Optional[np.ndarray] = None
     s2_pre_singular_values: Optional[np.ndarray] = None
+    s1_normalized_singular_values: Optional[np.ndarray] = None
+    s2_normalized_singular_values: Optional[np.ndarray] = None
     s1_pre_spectrum: Optional[np.ndarray] = None
     s2_pre_spectrum: Optional[np.ndarray] = None
     s1_condition_number: Optional[float] = None
@@ -852,17 +852,19 @@ def build_subset(
 
 
 def compute_covariance(tensor: torch.Tensor) -> Optional[torch.Tensor]:
-    """Return the covariance matrix for ``tensor`` (N x D)."""
+    """Return the covariance matrix for ``tensor`` (N x D) using 1/N normalization."""
 
     if tensor.dim() != 2 or tensor.shape[0] < 2:
         return None
     centered = tensor.to(torch.float64) - tensor.mean(dim=0, keepdim=True).to(torch.float64)
-    cov = centered.t().matmul(centered) / max(centered.shape[0] - 1, 1)
+    cov = centered.t().matmul(centered) / max(centered.shape[0], 1)
     return cov
 
 
-def compute_singular_values(features: torch.Tensor) -> Optional[np.ndarray]:
-    """Return singular values for ``features`` after mean-centering."""
+def compute_singular_values(
+    features: torch.Tensor, *, covariance: Optional[torch.Tensor] = None
+) -> Optional[np.ndarray]:
+    """Return singular values of the covariance of ``features``."""
 
     if features.dim() != 2:
         return None
@@ -870,16 +872,25 @@ def compute_singular_values(features: torch.Tensor) -> Optional[np.ndarray]:
     if batch < 2 or dims < 1:
         return None
 
-    feats = features.to(torch.float64)
-    feats = feats - feats.mean(dim=0, keepdim=True)
+    if covariance is None:
+        cov = compute_covariance(features)
+    else:
+        cov = covariance
+
+    if cov is None or cov.numel() == 0:
+        return None
+
+    cov64 = cov.to(torch.float64)
 
     try:
-        singular = torch.linalg.svdvals(feats)
+        singular = torch.linalg.svdvals(cov64)
     except RuntimeError:
         return None
 
     if singular.numel() == 0:
         return None
+
+    singular = torch.clamp(singular, min=0.0)
     return singular.cpu().numpy()
 
 
@@ -1198,14 +1209,18 @@ def compute_epoch_metrics(
             s1_var = np.full(s1_tensor.shape[1], np.nan, dtype=np.float32)
             s2_var = np.full(s2_tensor.shape[1], np.nan, dtype=np.float32)
 
+        cov_s1 = compute_covariance(s1_tensor)
+        cov_s2 = compute_covariance(s2_tensor)
+
         metrics = EpochMetrics(label=epoch.label, epoch_index=epoch.epoch_index, sample_count=sample_count)
         metrics.s1_variance = s1_var
         metrics.s2_variance = s2_var
-        metrics.s1_singular_values = compute_singular_values(s1_tensor)
-        metrics.s2_singular_values = compute_singular_values(s2_tensor)
-
-        cov_s1 = compute_covariance(s1_tensor)
-        cov_s2 = compute_covariance(s2_tensor)
+        metrics.s1_singular_values = compute_singular_values(s1_tensor, covariance=cov_s1)
+        metrics.s2_singular_values = compute_singular_values(s2_tensor, covariance=cov_s2)
+        if epoch.s1_normalized is not None:
+            metrics.s1_normalized_singular_values = compute_singular_values(epoch.s1_normalized)
+        if epoch.s2_normalized is not None:
+            metrics.s2_normalized_singular_values = compute_singular_values(epoch.s2_normalized)
 
         (
             s1_std_min,
@@ -1270,7 +1285,9 @@ def compute_epoch_metrics(
         if epoch.s1_pre_projection is not None:
             s1_pre_tensor = epoch.s1_pre_projection.to(dtype=torch.float32)
             cov_s1_pre = compute_covariance(s1_pre_tensor)
-            metrics.s1_pre_singular_values = compute_singular_values(s1_pre_tensor)
+            metrics.s1_pre_singular_values = compute_singular_values(
+                s1_pre_tensor, covariance=cov_s1_pre
+            )
             (
                 s1_pre_std_min,
                 s1_pre_cov_fro,
@@ -1312,7 +1329,9 @@ def compute_epoch_metrics(
         if epoch.s2_pre_projection is not None:
             s2_pre_tensor = epoch.s2_pre_projection.to(dtype=torch.float32)
             cov_s2_pre = compute_covariance(s2_pre_tensor)
-            metrics.s2_pre_singular_values = compute_singular_values(s2_pre_tensor)
+            metrics.s2_pre_singular_values = compute_singular_values(
+                s2_pre_tensor, covariance=cov_s2_pre
+            )
             (
                 s2_pre_std_min,
                 s2_pre_cov_fro,
@@ -1710,161 +1729,6 @@ def _plot_pre_post_metric_timeseries(
             ax.legend(*zip(*filtered))
 
 
-def _plot_spectrum_panel(
-    ax,
-    metrics: Sequence[EpochMetrics],
-    *,
-    attr_s1: Optional[str] = None,
-    attr_s2: Optional[str] = None,
-    attr_s1_pre: Optional[str] = None,
-    attr_s2_pre: Optional[str] = None,
-    title: str,
-    ylabel: str,
-    top_k: int,
-    log_scale: bool,
-    component_symbol: str = "λ",
-) -> None:
-    x = [m.epoch_index for m in metrics]
-    labels = [m.label for m in metrics]
-
-    def _collect(attr: Optional[str]) -> List[Optional[np.ndarray]]:
-        if attr is None:
-            return [None for _ in metrics]
-        return [getattr(m, attr) for m in metrics]
-
-    spectra_s1 = _collect(attr_s1)
-    spectra_s2 = _collect(attr_s2)
-    spectra_s1_pre = _collect(attr_s1_pre)
-    spectra_s2_pre = _collect(attr_s2_pre)
-    max_dims = max(
-        [
-            max((spec.size for spec in spectra if spec is not None), default=0)
-            for spectra in (spectra_s1, spectra_s2, spectra_s1_pre, spectra_s2_pre)
-        ]
-    )
-
-    if max_dims == 0:
-        _mark_axis_no_data(ax, title)
-        ax.set_xticks(x)
-        ax.set_xticklabels(labels, rotation=45, ha="right")
-        ax.set_xlabel("Epoch")
-        return
-
-    if top_k <= 0 or top_k > max_dims:
-        top_k = max_dims
-
-    _ = component_symbol  # retained for backward compatibility
-
-    colors = plt.cm.viridis(np.linspace(0.2, 0.95, top_k))
-    plotted = False
-    for idx in range(top_k):
-        s1_values: List[float] = []
-        s2_values: List[float] = []
-        s1_pre_values: List[float] = []
-        s2_pre_values: List[float] = []
-        for spec in spectra_s1:
-            if spec is None or spec.size <= idx:
-                s1_values.append(math.nan)
-            else:
-                value = float(spec[idx])
-                if log_scale and value <= 0:
-                    s1_values.append(math.nan)
-                else:
-                    s1_values.append(value)
-        for spec in spectra_s2:
-            if spec is None or spec.size <= idx:
-                s2_values.append(math.nan)
-            else:
-                value = float(spec[idx])
-                if log_scale and value <= 0:
-                    s2_values.append(math.nan)
-                else:
-                    s2_values.append(value)
-        for spec in spectra_s1_pre:
-            if spec is None or spec.size <= idx:
-                s1_pre_values.append(math.nan)
-            else:
-                value = float(spec[idx])
-                if log_scale and value <= 0:
-                    s1_pre_values.append(math.nan)
-                else:
-                    s1_pre_values.append(value)
-        for spec in spectra_s2_pre:
-            if spec is None or spec.size <= idx:
-                s2_pre_values.append(math.nan)
-            else:
-                value = float(spec[idx])
-                if log_scale and value <= 0:
-                    s2_pre_values.append(math.nan)
-                else:
-                    s2_pre_values.append(value)
-
-        if any(not math.isnan(v) for v in s1_values):
-            ax.plot(
-                x,
-                s1_values,
-                marker="o",
-                linestyle="-",
-                color=colors[idx],
-                label=f"S1 post {component_symbol}{idx + 1}",
-            )
-            plotted = True
-        if any(not math.isnan(v) for v in s1_pre_values):
-            ax.plot(
-                x,
-                s1_pre_values,
-                marker="o",
-                linestyle="--",
-                color=colors[idx],
-                alpha=0.8,
-                label=f"S1 pre {component_symbol}{idx + 1}",
-            )
-            plotted = True
-        if any(not math.isnan(v) for v in s2_values):
-            ax.plot(
-                x,
-                s2_values,
-                marker="s",
-                linestyle="--",
-                color=colors[idx],
-                label=f"S2 post {component_symbol}{idx + 1}",
-            )
-            plotted = True
-        if any(not math.isnan(v) for v in s2_pre_values):
-            ax.plot(
-                x,
-                s2_pre_values,
-                marker="s",
-                linestyle=":",
-                color=colors[idx],
-                alpha=0.8,
-                label=f"S2 pre {component_symbol}{idx + 1}",
-            )
-            plotted = True
-
-    if not plotted:
-        _mark_axis_no_data(ax, title)
-        ax.set_xticks(x)
-        ax.set_xticklabels(labels, rotation=45, ha="right")
-        ax.set_xlabel("Epoch")
-        return
-
-    ax.set_title(title)
-    ax.set_xlabel("Epoch")
-    ax.set_ylabel(ylabel)
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=45, ha="right")
-    if log_scale:
-        ax.set_yscale("log")
-        ax.grid(True, which="both", alpha=0.3)
-    else:
-        ax.grid(True, alpha=0.3)
-
-    handles, legend_labels = ax.get_legend_handles_labels()
-    if handles:
-        ax.legend(handles, legend_labels, ncol=2, fontsize="small")
-
-
 def plot_vc_timeseries(
     metrics: Sequence[EpochMetrics],
     output_dir: Path,
@@ -1921,100 +1785,6 @@ def plot_vc_timeseries(
         fig.tight_layout(rect=[0, 0, 1, 0.92])
         fig.savefig(output_dir / f"vc_metrics_timeseries_{modality}.png", dpi=200)
         plt.close(fig)
-
-def plot_singular_value_timeseries(
-    metrics: Sequence[EpochMetrics],
-    output_dir: Path,
-    *,
-    top_k: int,
-) -> None:
-    """Plot singular value trajectories for pre/post-projection features."""
-
-    if not metrics:
-        return
-
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-
-    _plot_spectrum_panel(
-        axes[0],
-        metrics,
-        attr_s1="s1_singular_values",
-        attr_s1_pre="s1_pre_singular_values",
-        title="S1 singular values (pre vs. post)",
-        ylabel="Singular value",
-        top_k=top_k,
-        log_scale=True,
-        component_symbol="σ",
-    )
-
-    _plot_spectrum_panel(
-        axes[1],
-        metrics,
-        attr_s2="s2_singular_values",
-        attr_s2_pre="s2_pre_singular_values",
-        title="S2 singular values (pre vs. post)",
-        ylabel="Singular value",
-        top_k=top_k,
-        log_scale=True,
-        component_symbol="σ",
-    )
-
-    fig.suptitle("Singular values across epochs")
-    fig.tight_layout(rect=[0, 0, 1, 0.94])
-    fig.savefig(output_dir / "singular_values_timeseries.png", dpi=200)
-    plt.close(fig)
-
-
-def plot_spectrum(
-    metrics: Sequence[EpochMetrics],
-    output_dir: Path,
-    *,
-    modality: str,
-    top_k: int,
-) -> None:
-    spectra = [m.s1_spectrum if modality == "s1" else m.s2_spectrum for m in metrics]
-    valid_spectra = [s for s in spectra if s is not None]
-    if not valid_spectra:
-        _LOGGER.warning("Skipping spectrum plot for %s (missing data)", modality)
-        return
-
-    max_len = min(top_k, min(len(s) for s in valid_spectra))
-    if max_len == 0:
-        _LOGGER.warning("No eigenvalues available to plot for %s", modality)
-        return
-
-    x = [m.epoch_index for m in metrics]
-    labels = [m.label for m in metrics]
-    fig, ax = plt.subplots(figsize=(10, 5))
-    for idx in range(max_len):
-        values = [s[idx] if s is not None and len(s) > idx else math.nan for s in spectra]
-        ax.plot(x, values, marker="o", label=f"λ{idx + 1}")
-    ax.set_xlabel("Epoch")
-    ax.set_ylabel("Eigenvalue")
-    ax.set_title(f"{modality.upper()} covariance spectrum (top {max_len})")
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=45, ha="right")
-    ax.set_yscale("log")
-    ax.grid(True, which="both", alpha=0.3)
-    ax.legend(ncol=2)
-    fig.tight_layout()
-    fig.savefig(output_dir / f"{modality}_spectrum.png", dpi=200)
-    plt.close(fig)
-
-    condition_numbers = [m.s1_condition_number if modality == "s1" else m.s2_condition_number for m in metrics]
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.plot(x, condition_numbers, marker="o", color="#d62728")
-    ax.set_xlabel("Epoch")
-    ax.set_ylabel("Condition number")
-    ax.set_title(f"{modality.upper()} covariance condition number")
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=45, ha="right")
-    ax.set_yscale("log")
-    ax.grid(True, which="both", alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(output_dir / f"{modality}_condition_number.png", dpi=200)
-    plt.close(fig)
-
 
 def plot_epoch_dashboards(
     metrics: Sequence[EpochMetrics],
@@ -2278,277 +2048,6 @@ def _prepare_spectrum(values: Optional[np.ndarray]) -> Optional[np.ndarray]:
     return arr
 
 
-def _normalize_and_log(
-    spectrum: Optional[np.ndarray],
-    *,
-    k: int,
-    normalize: str,
-) -> Optional[np.ndarray]:
-    """Normalize and log-transform ``spectrum`` for visualization."""
-
-    if spectrum is None or spectrum.size == 0:
-        return None
-
-    values = spectrum[:k].astype(np.float64)
-    if values.size == 0:
-        return None
-
-    if normalize == "trace":
-        values = values / (np.sum(values) + 1e-12)
-    elif normalize == "max":
-        values = values / (values[0] + 1e-12)
-
-    return np.log(np.maximum(values, 1e-20))
-
-
-def _collect_spectra(
-    metrics: Sequence[EpochMetrics], attr: str
-) -> Tuple[List[np.ndarray], List[str]]:
-    """Collect the spectra referenced by ``attr`` from ``metrics``."""
-
-    specs: List[np.ndarray] = []
-    labels: List[str] = []
-    for metric in metrics:
-        spec = _prepare_spectrum(getattr(metric, attr, None))
-        if spec is None:
-            continue
-        specs.append(spec)
-        labels.append(metric.label)
-    return specs, labels
-
-
-
-def plot_svd_ridgeline_animation(
-    metrics: Sequence[EpochMetrics],
-    output_dir: Path,
-    *,
-    use_correlation: bool = False,
-    top_k: Optional[int] = None,
-    normalize: str = "trace",
-    frame_duration: float = 0.8,
-) -> Optional[Path]:
-    """Generate an animated ridgeline cycling through epochs for both modalities."""
-
-    attr_post = (
-        "{modality}_correlation_spectrum"
-        if use_correlation
-        else "{modality}_singular_values"
-    )
-    attr_pre = (
-        "{modality}_pre_correlation_spectrum"
-        if use_correlation
-        else "{modality}_pre_singular_values"
-    )
-
-    entries: List[Tuple[str, Dict[str, Dict[str, Optional[np.ndarray]]]]] = []
-    max_len = 0
-    for metric in metrics:
-        modality_specs: Dict[str, Dict[str, Optional[np.ndarray]]] = {}
-        for modality in ("s1", "s2"):
-            post = _prepare_spectrum(
-                getattr(metric, attr_post.format(modality=modality), None)
-            )
-            pre = _prepare_spectrum(
-                getattr(metric, attr_pre.format(modality=modality), None)
-            )
-            modality_specs[modality] = {"post": post, "pre": pre}
-            for spec in (post, pre):
-                if spec is not None and spec.size:
-                    max_len = max(max_len, spec.size)
-        entries.append((metric.label, modality_specs))
-
-    if max_len == 0:
-        return None
-
-    if top_k is None or top_k <= 0:
-        k = max_len
-    else:
-        k = min(top_k, max_len)
-
-    normalized_entries: List[
-        Tuple[str, Dict[str, Dict[str, Optional[np.ndarray]]]]
-    ] = []
-    global_min = math.inf
-    global_max = -math.inf
-    valid_arrays = 0
-
-    for label, modality_specs in entries:
-        normalized_modalities: Dict[str, Dict[str, Optional[np.ndarray]]] = {}
-        for modality in ("s1", "s2"):
-            post = _normalize_and_log(
-                modality_specs[modality]["post"], k=k, normalize=normalize
-            )
-            pre = _normalize_and_log(
-                modality_specs[modality]["pre"], k=k, normalize=normalize
-            )
-
-            for arr in (post, pre):
-                if arr is not None and arr.size:
-                    arr_min = float(np.nanmin(arr))
-                    arr_max = float(np.nanmax(arr))
-                    global_min = min(global_min, arr_min)
-                    global_max = max(global_max, arr_max)
-                    valid_arrays += 1
-
-            normalized_modalities[modality] = {"post": post, "pre": pre}
-
-        normalized_entries.append((label, normalized_modalities))
-
-    if valid_arrays == 0 or not math.isfinite(global_min) or not math.isfinite(global_max):
-        return None
-
-    y_range = global_max - global_min
-    if not math.isfinite(y_range) or y_range <= 0:
-        y_range = 1.0
-
-    offset = 0.25 * y_range
-    x = np.arange(1, k + 1)
-
-    frames: List[np.ndarray] = []
-    for label, modality_specs in normalized_entries:
-        fig, axes = plt.subplots(2, 1, figsize=(8, 6), sharex=True)
-        fig.suptitle(
-            f"{label} — {'Correlation' if use_correlation else 'Singular value'} ridgeline"
-        )
-        for ax, modality in zip(axes, ("s1", "s2")):
-            spectra = modality_specs[modality]
-            post = spectra["post"]
-            pre = spectra["pre"]
-            has_data = False
-
-            ax.set_xlim(1, k)
-            ax.set_yticks([])
-            ax.set_ylabel(modality.upper())
-
-            if post is not None and post.size:
-                length = min(k, post.size)
-                y_vals = post[:length] + offset
-                ax.fill_between(
-                    x[:length],
-                    np.full(length, offset),
-                    y_vals,
-                    color="#2ca02c" if modality == "s1" else "#17becf",
-                    alpha=0.35,
-                )
-                ax.plot(
-                    x[:length],
-                    y_vals,
-                    color="#2ca02c" if modality == "s1" else "#17becf",
-                    label="Post projection",
-                )
-                has_data = True
-
-            if pre is not None and pre.size:
-                length = min(k, pre.size)
-                y_vals = pre[:length] - offset
-                ax.fill_between(
-                    x[:length],
-                    np.full(length, -offset),
-                    y_vals,
-                    color="#98df8a" if modality == "s1" else "#9edae5",
-                    alpha=0.35,
-                )
-                ax.plot(
-                    x[:length],
-                    y_vals,
-                    color="#98df8a" if modality == "s1" else "#9edae5",
-                    linestyle="--",
-                    label="Pre projection",
-                )
-                has_data = True
-
-            ax.set_ylim(global_min - offset * 1.5, global_max + offset * 1.5)
-            ax.grid(True, alpha=0.2)
-            if has_data:
-                handles, labels = ax.get_legend_handles_labels()
-                if handles:
-                    ax.legend(handles, labels, fontsize="small")
-            else:
-                _mark_axis_no_data(
-                    ax, f"{modality.upper()} spectrum", "No spectrum available"
-                )
-
-        axes[-1].set_xlabel("Component index")
-        fig.tight_layout(rect=[0, 0, 1, 0.95])
-
-        buffer = io.BytesIO()
-        fig.savefig(buffer, format="png", dpi=150)
-        plt.close(fig)
-        buffer.seek(0)
-        frames.append(imageio.imread(buffer))
-
-    if not frames:
-        return None
-
-    animations_dir = output_dir / "animations"
-    animations_dir.mkdir(parents=True, exist_ok=True)
-    filename = f"svd_ridgeline_{'corr' if use_correlation else 'svd'}.gif"
-    output_path = animations_dir / filename
-    imageio.mimsave(output_path, frames, duration=frame_duration)
-
-    return output_path
-
-
-def plot_svd_heatmap(
-    metrics: Sequence[EpochMetrics],
-    output_dir: Path,
-    *,
-    modality: str = "s1",
-    use_correlation: bool = False,
-    top_k: Optional[int] = None,
-    normalize: str = "trace",
-) -> Optional[Path]:
-    """Render a heatmap of per-epoch spectra."""
-
-    attr = (
-        f"{modality}_correlation_spectrum"
-        if use_correlation
-        else f"{modality}_singular_values"
-    )
-    specs, labels = _collect_spectra(metrics, attr)
-    if not specs:
-        return None
-
-    max_len = max(map(len, specs))
-    if max_len == 0:
-        return None
-
-    if top_k is None or top_k <= 0:
-        k = max_len
-    else:
-        k = min(top_k, max_len)
-
-    rows: List[np.ndarray] = []
-    for spec in specs:
-        y = spec[:k].astype(np.float64)
-        if normalize == "trace":
-            y = y / (np.sum(y) + 1e-12)
-        elif normalize == "max":
-            y = y / (y[0] + 1e-12)
-        if y.size < k:
-            y = np.pad(y, (0, k - y.size), constant_values=np.nan)
-        rows.append(np.log(np.maximum(y, 1e-20)))
-
-    matrix = np.vstack(rows)
-    fig, ax = plt.subplots(figsize=(10, 0.5 + 0.4 * len(labels)))
-    im = ax.imshow(matrix, aspect="auto", interpolation="nearest", origin="lower")
-    ax.set_xlabel("Component index")
-    ax.set_ylabel("Epoch")
-    ax.set_yticks(range(len(labels)))
-    ax.set_yticklabels(labels)
-    title_core = "Correlation spectrum" if use_correlation else "Singular values"
-    norm_tag = "" if normalize == "none" else f" · norm={normalize}"
-    ax.set_title(f"{title_core} heatmap — {modality.upper()}{norm_tag}")
-    cbar = fig.colorbar(im, ax=ax)
-    cbar.set_label("log(value)")
-    fig.tight_layout()
-    filename = f"{modality}_{'corr' if use_correlation else 'svd'}_heatmap.png"
-    output_path = output_dir / filename
-    fig.savefig(output_path, dpi=200)
-    plt.close(fig)
-    return output_path
-
-
 def plot_svd_epoch_grid(
     metrics: Sequence[EpochMetrics],
     output_dir: Path,
@@ -2556,19 +2055,22 @@ def plot_svd_epoch_grid(
     modality: str = "s1",
     use_correlation: bool = False,
     top_k: Optional[int] = None,
+    normalized: bool = False,
 ) -> Optional[Path]:
     """Plot per-epoch spectra with shared axes to compare shapes."""
 
-    attr_post = (
-        f"{modality}_correlation_spectrum"
-        if use_correlation
-        else f"{modality}_singular_values"
-    )
-    attr_pre = (
-        f"{modality}_pre_correlation_spectrum"
-        if use_correlation
-        else f"{modality}_pre_singular_values"
-    )
+    if normalized and use_correlation:
+        raise ValueError("Correlation spectra are already normalized; set only one option.")
+
+    if use_correlation:
+        attr_post = f"{modality}_correlation_spectrum"
+        attr_pre: Optional[str] = f"{modality}_pre_correlation_spectrum"
+    elif normalized:
+        attr_post = f"{modality}_normalized_singular_values"
+        attr_pre = None
+    else:
+        attr_post = f"{modality}_singular_values"
+        attr_pre = f"{modality}_pre_singular_values"
 
     entries: List[Tuple[str, Optional[np.ndarray], Optional[np.ndarray]]] = []
     max_len = 0
@@ -2577,7 +2079,7 @@ def plot_svd_epoch_grid(
 
     for metric in metrics:
         post = _prepare_spectrum(getattr(metric, attr_post, None))
-        pre = _prepare_spectrum(getattr(metric, attr_pre, None))
+        pre = _prepare_spectrum(getattr(metric, attr_pre, None)) if attr_pre else None
         entries.append((metric.label, post, pre))
         for arr in (post, pre):
             if arr is None or arr.size == 0:
@@ -2655,13 +2157,21 @@ def plot_svd_epoch_grid(
         ax.set_xlim(1, k)
         ax.set_ylim(global_min, global_max)
 
-    title_core = "Correlation spectrum" if use_correlation else "Singular values"
+    if use_correlation:
+        title_core = "Correlation spectrum"
+    elif normalized:
+        title_core = "Normalized singular values"
+    else:
+        title_core = "Singular values"
     fig.supxlabel("Component index")
     fig.supylabel("log(value)")
     fig.suptitle(f"{title_core} per epoch — {modality.upper()}")
     fig.tight_layout(rect=[0, 0, 1, 0.97])
 
-    filename = f"{modality}_{'corr' if use_correlation else 'svd'}_epoch_grid.png"
+    filename_core = "corr" if use_correlation else "svd"
+    if normalized:
+        filename_core = f"normalized_{filename_core}"
+    filename = f"{modality}_{filename_core}_epoch_grid.png"
     output_path = output_dir / filename
     fig.savefig(output_path, dpi=200)
     plt.close(fig)
@@ -3472,10 +2982,6 @@ def main() -> None:
             output_dir / "s2_variance_summary.png",
         ]
     )
-    plot_spectrum(metrics, output_dir, modality="s1", top_k=args.spectrum_top_k)
-    summary_plot_paths.append(output_dir / "s1_spectrum.png")
-    plot_spectrum(metrics, output_dir, modality="s2", top_k=args.spectrum_top_k)
-    summary_plot_paths.append(output_dir / "s2_spectrum.png")
     plot_vc_timeseries(
         metrics,
         output_dir,
@@ -3487,12 +2993,6 @@ def main() -> None:
             output_dir / "vc_metrics_timeseries_s2.png",
         ]
     )
-    plot_singular_value_timeseries(
-        metrics,
-        output_dir,
-        top_k=args.spectrum_top_k,
-    )
-    summary_plot_paths.append(output_dir / "singular_values_timeseries.png")
     plot_epoch_dashboards(
         metrics,
         output_dir,
@@ -3505,64 +3005,25 @@ def main() -> None:
         top_k=args.spectrum_top_k,
     )
 
-    grid_path = plot_svd_epoch_grid(
-        metrics,
-        output_dir,
-        modality="s1",
-        top_k=args.spectrum_top_k,
-    )
-    if grid_path is not None:
-        summary_plot_paths.append(grid_path)
-    grid_path = plot_svd_epoch_grid(
-        metrics,
-        output_dir,
-        modality="s2",
-        top_k=args.spectrum_top_k,
-    )
-    if grid_path is not None:
-        summary_plot_paths.append(grid_path)
-
-    ridge = plot_svd_ridgeline_animation(
-        metrics,
-        output_dir,
-        use_correlation=False,
-        top_k=args.spectrum_top_k,
-        normalize="trace",
-    )
-    if ridge is not None:
-        summary_plot_paths.append(ridge)
-
-    ridge_corr = plot_svd_ridgeline_animation(
-        metrics,
-        output_dir,
-        use_correlation=True,
-        top_k=args.spectrum_top_k,
-        normalize="trace",
-    )
-    if ridge_corr is not None:
-        summary_plot_paths.append(ridge_corr)
-
     for modality in ("s1", "s2"):
-        heatmap = plot_svd_heatmap(
+        grid_path = plot_svd_epoch_grid(
             metrics,
             output_dir,
             modality=modality,
-            use_correlation=False,
             top_k=args.spectrum_top_k,
-            normalize="trace",
+            normalized=False,
         )
-        if heatmap is not None:
-            summary_plot_paths.append(heatmap)
-        heatmap_corr = plot_svd_heatmap(
+        if grid_path is not None:
+            summary_plot_paths.append(grid_path)
+        grid_path_norm = plot_svd_epoch_grid(
             metrics,
             output_dir,
             modality=modality,
-            use_correlation=True,
             top_k=args.spectrum_top_k,
-            normalize="trace",
+            normalized=True,
         )
-        if heatmap_corr is not None:
-            summary_plot_paths.append(heatmap_corr)
+        if grid_path_norm is not None:
+            summary_plot_paths.append(grid_path_norm)
 
 
     if args.linear_probe_csv:
