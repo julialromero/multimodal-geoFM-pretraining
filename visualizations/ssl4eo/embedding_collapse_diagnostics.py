@@ -128,8 +128,6 @@ class EpochMetrics:
     s2_pre_singular_values: Optional[np.ndarray] = None
     s1_normalized_singular_values: Optional[np.ndarray] = None
     s2_normalized_singular_values: Optional[np.ndarray] = None
-    s1_pre_normalized_singular_values: Optional[np.ndarray] = None
-    s2_pre_normalized_singular_values: Optional[np.ndarray] = None
     s1_pre_spectrum: Optional[np.ndarray] = None
     s2_pre_spectrum: Optional[np.ndarray] = None
     s1_condition_number: Optional[float] = None
@@ -1220,15 +1218,9 @@ def compute_epoch_metrics(
         metrics.s1_singular_values = compute_singular_values(s1_tensor, covariance=cov_s1)
         metrics.s2_singular_values = compute_singular_values(s2_tensor, covariance=cov_s2)
         if epoch.s1_normalized is not None:
-            s1_norm_tensor = epoch.s1_normalized.to(dtype=torch.float32)
-            metrics.s1_normalized_singular_values = compute_singular_values(
-                s1_norm_tensor, covariance=compute_covariance(s1_norm_tensor)
-            )
+            metrics.s1_normalized_singular_values = compute_singular_values(epoch.s1_normalized)
         if epoch.s2_normalized is not None:
-            s2_norm_tensor = epoch.s2_normalized.to(dtype=torch.float32)
-            metrics.s2_normalized_singular_values = compute_singular_values(
-                s2_norm_tensor, covariance=compute_covariance(s2_norm_tensor)
-            )
+            metrics.s2_normalized_singular_values = compute_singular_values(epoch.s2_normalized)
 
         (
             s1_std_min,
@@ -1296,10 +1288,6 @@ def compute_epoch_metrics(
             metrics.s1_pre_singular_values = compute_singular_values(
                 s1_pre_tensor, covariance=cov_s1_pre
             )
-            s1_pre_normalized = F.normalize(s1_pre_tensor, dim=1)
-            metrics.s1_pre_normalized_singular_values = compute_singular_values(
-                s1_pre_normalized, covariance=compute_covariance(s1_pre_normalized)
-            )
             (
                 s1_pre_std_min,
                 s1_pre_cov_fro,
@@ -1343,10 +1331,6 @@ def compute_epoch_metrics(
             cov_s2_pre = compute_covariance(s2_pre_tensor)
             metrics.s2_pre_singular_values = compute_singular_values(
                 s2_pre_tensor, covariance=cov_s2_pre
-            )
-            s2_pre_normalized = F.normalize(s2_pre_tensor, dim=1)
-            metrics.s2_pre_normalized_singular_values = compute_singular_values(
-                s2_pre_normalized, covariance=compute_covariance(s2_pre_normalized)
             )
             (
                 s2_pre_std_min,
@@ -2083,7 +2067,7 @@ def plot_svd_epoch_grid(
         attr_pre: Optional[str] = f"{modality}_pre_correlation_spectrum"
     elif normalized:
         attr_post = f"{modality}_normalized_singular_values"
-        attr_pre = f"{modality}_pre_normalized_singular_values"
+        attr_pre = None
     else:
         attr_post = f"{modality}_singular_values"
         attr_pre = f"{modality}_pre_singular_values"
