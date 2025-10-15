@@ -4,14 +4,10 @@ import math
 import os
 import time
 import sys
-import gc
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-
-
-import torch.distributed as dist
 
 from torch.nn.parallel.distributed import DistributedDataParallel
 from torch.autograd.profiler import record_function
@@ -24,14 +20,13 @@ except ImportError:
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 sys.path.insert(0, parent_dir)
 from open_clip import get_input_dtype
-from open_clip_train.distributed import get_oom_sync_group, is_master
+from open_clip_train.distributed import is_master
 from open_clip_train.zero_shot import zero_shot_eval
 from open_clip_train.precision import get_autocast
 
 import random
 from torch.utils.data import Dataset, DataLoader
 from contextlib import nullcontext
-from open_clip_train.distributed import is_master
 
 class Subset(Dataset):
 
@@ -67,78 +62,6 @@ class AverageMeter(object):
         self.avg = self.sum / self.count
 
 
-def _is_cuda_out_of_memory_error(err: RuntimeError) -> bool:
-    """Return True if ``err`` corresponds to a CUDA out of memory condition."""
-    if isinstance(err, torch.cuda.OutOfMemoryError):
-        return True
-    err_str = str(err)
-    return "CUDA out of memory" in err_str or ("out of memory" in err_str and "CUDA" in err_str)
-
-
-def _handle_cuda_oom(err: RuntimeError, epoch: int, batch_idx: int, optimizer) -> None:
-    """Log and clean up after a CUDA OOM so training can continue."""
-    logging.warning(
-        "Encountered CUDA OOM at epoch %s batch %s: %s", epoch, batch_idx, err
-    )
-    if optimizer is not None:
-        optimizer.zero_grad(set_to_none=True)
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
-
-def _sync_cuda_oom_flag(
-    cuda_oom: bool,
-    *,
-    device: torch.device,
-    epoch: int,
-    batch_idx: int,
-    optimizer,
-    world_size: int,
-) -> bool:
-    """Share CUDA OOM state across ranks and ensure all optimizers are cleared.
-
-    When any rank encounters an out-of-memory error, the distributed run must
-    skip the offending batch on *all* ranks to keep gradients aligned. This
-    helper performs an ``all_reduce`` over a dedicated process group so that a
-    single ``True`` value propagates to every worker. If a different rank raised
-    the OOM, the local optimizer is also reset to avoid stepping with stale
-    gradients.
-    """
-
-    if world_size <= 1 or not dist.is_available() or not dist.is_initialized():
-        return cuda_oom
-
-    oom_tensor = torch.tensor([1 if cuda_oom else 0], device=device)
-    oom_group = get_oom_sync_group()
-
-    try:
-        if oom_group is not None:
-            dist.all_reduce(oom_tensor, op=dist.ReduceOp.SUM, group=oom_group)
-        else:
-            dist.all_reduce(oom_tensor, op=dist.ReduceOp.SUM)
-    except RuntimeError as dist_err:
-        logging.warning(
-            "Encountered distributed error while synchronizing CUDA OOM state at epoch %s batch %s: %s",
-            epoch,
-            batch_idx,
-            dist_err,
-        )
-        return True
-
-    aggregated_oom = oom_tensor.item() > 0
-    if aggregated_oom and not cuda_oom:
-        logging.warning(
-            "Skipping batch %s in epoch %s due to CUDA OOM reported on another rank.",
-            batch_idx,
-            epoch,
-        )
-        if optimizer is not None:
-            optimizer.zero_grad(set_to_none=True)
-
-    return aggregated_oom
-
-
 def postprocess_clip_output(model_out):
     return {
         # TODO: make sure the same keys are used in all models
@@ -146,14 +69,6 @@ def postprocess_clip_output(model_out):
         "s2_features": model_out[1],
         "logit_scale": model_out[2]
     }
-
-
-def compute_normalized_logits(s1_features: torch.Tensor, s2_features: torch.Tensor, logit_scale: torch.Tensor) -> torch.Tensor:
-    """Compute logit_scale * cosine_similarity(s1, s2) without storing normalized copies."""
-    s1_norms = s1_features.norm(dim=-1, keepdim=True).clamp_min(1e-12)
-    s2_norms = s2_features.norm(dim=-1, keepdim=True).clamp_min(1e-12)
-    cosine_sim = (s1_features @ s2_features.t()) / (s1_norms * s2_norms.t())
-    return logit_scale * cosine_sim
 
 
 def unwrap_model(model):
@@ -288,19 +203,15 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
 
 
 
-            
+            # save the model weights after the warm up phase -> random weights with appropriate batch norm stats
+            torch.save(
+            model.state_dict(),
+                os.path.join(args.io.checkpoint_path, f"epoch_init.pt"),
+            )
+            logging.info(f'Saved initial model weights to {args.io.checkpoint_path}.')
 
             # delete  dataloader
             del loader
-    
-        if epoch == 0: # save the model weights after the warm up phase -> random weights with appropriate batch norm stats
-            if is_master(args, local=getattr(args, "log_local", False)):
-                from run_train_val_distributed import atomic_torch_save  # or duplicate the helper
-                atomic_torch_save(
-                    model.state_dict(),
-                    os.path.join(args.io.checkpoint_path, "epoch_0.pt"),
-                )
-                logging.info(f"Saved initial model weights to {args.io.checkpoint_path}.")
 
             
     model.train()
@@ -320,123 +231,89 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
         s2 = s2.to(device=device, dtype=input_dtype, non_blocking=True)
 
         data_time_m.update(time.time() - end)
-        optimizer.zero_grad(set_to_none=True)
+        optimizer.zero_grad()
 
-        losses = {}
-        logit_scale = None
-        local_cuda_oom = False
-        ready_for_optimizer_step = True
+        if args.train.accum_freq == 1:
+            with autocast():
+                model_out = model(s1, s2)
 
-        try:
-            if args.train.accum_freq == 1:
+                logit_scale = model_out["logit_scale"]
+                if args.distill:
+                    with torch.no_grad():
+                        dist_model_out = dist_model(s1, s2)
+                    model_out.update({f'dist_{k}': v for k, v in dist_model_out.items()})
+                losses = loss(**model_out, output_dict=True)
+
+                total_loss = sum(losses.values())
+                losses["loss"] = total_loss
+
+            backward(total_loss, scaler)
+        else:
+            # First, cache the features without any gradient tracking.
+            with torch.no_grad():
                 with autocast():
                     model_out = model(s1, s2)
 
-                    logit_scale = model_out["logit_scale"]
-                    if args.distill:
-                        with torch.no_grad():
-                            dist_model_out = dist_model(s1, s2)
-                        model_out.update({f'dist_{k}': v for k, v in dist_model_out.items()})
-                    losses = loss(**model_out, output_dict=True)
+                    for f in ("logit_scale", "logit_bias"):
+                        model_out.pop(f, None)
 
-                    total_loss = sum(losses.values())
-                    losses["loss"] = total_loss
+                    for key, val in model_out.items():
+                        if key in accum_features:
+                            accum_features[key].append(val)
+                        else:
+                            accum_features[key] = [val]
 
-                backward(total_loss, scaler)
-            else:
-                ready_for_optimizer_step = ((i + 1) % args.train.accum_freq) == 0
+                accum_s1.append(s1)
+                accum_s2.append(s2)
 
-                # First, cache the features without any gradient tracking.
-                with torch.no_grad():
+            # If (i + 1) % accum_freq is not zero, move on to the next batch.
+            if ((i + 1) % args.train.accum_freq) > 0:
+                # FIXME this makes data time logging unreliable when accumulating
+                continue
+
+            # Now, ready to take gradients for the last accum_freq batches.
+            # Re-do the forward pass for those batches, and use the cached features from the other batches as negatives.
+            # Call backwards each time, but only step optimizer at the end.
+            optimizer.zero_grad()
+            accum_features_current_loop = {key: list(val) for key, val in accum_features.items()} # Ensure a copy
+
+            for j in range(args.train.accum_freq):
+                s1 = accum_s1[j]
+                s2 = accum_s2[j]
+
+                is_last_backward_pass = (j == args.train.accum_freq - 1)
+                sync_context = model.no_sync() if not is_last_backward_pass else nullcontext()
+                with sync_context:
                     with autocast():
+                        
                         model_out = model(s1, s2)
 
-                        for f in ("logit_scale", "logit_bias"):
-                            model_out.pop(f, None)
+                        inputs_no_accum = {}
+                        inputs_no_accum["logit_scale"] = logit_scale = model_out.pop("logit_scale")
+                        if "logit_bias" in model_out:
+                            inputs_no_accum["logit_bias"] = model_out.pop("logit_bias")
 
-                        for key, val in model_out.items():
-                            if key in accum_features:
-                                accum_features[key].append(val)
-                            else:
-                                accum_features[key] = [val]
+                        # inputs = {}
+                        # for key, val in accum_features.items():
+                        #     accumulated = accum_features[key]
+                        #     inputs[key] = torch.cat(accumulated[:j] + [model_out[key]] + accumulated[j + 1:])
+                        inputs = {}
+                        for key in accum_features_current_loop.keys(): # Iterate over keys
+                            # Use the copied list for concatenation, and replace the j-th element
+                            temp_accumulated = list(accum_features_current_loop[key]) # Create a copy for modification
+                            temp_accumulated[j] = model_out[key] # Replace with the current grad-tracked feature
+                            inputs[key] = torch.cat(temp_accumulated)
 
-                    accum_s1.append(s1)
-                    accum_s2.append(s2)
+                        losses = loss(**inputs, **inputs_no_accum, output_dict=True)
+                        # logging.info(f"Losses for batch {i_accum}, inner pass {j + 1}/{args.train.accum_freq}: {losses}")
+                        
+                        total_loss = sum(losses.values()) / args.train.accum_freq
+                        losses["loss"] = total_loss
 
-                if ready_for_optimizer_step:
-                    # Now, ready to take gradients for the last accum_freq batches.
-                    # Re-do the forward pass for those batches, and use the cached features from the other batches as negatives.
-                    # Call backwards each time, but only step optimizer at the end.
-                    optimizer.zero_grad(set_to_none=True)
-                    accum_features_current_loop = {key: list(val) for key, val in accum_features.items()}  # Ensure a copy
+                    backward(total_loss, scaler)
 
-                    for j in range(args.train.accum_freq):
-                        s1 = accum_s1[j]
-                        s2 = accum_s2[j]
-
-                        is_last_backward_pass = (j == args.train.accum_freq - 1)
-                        sync_context = model.no_sync() if not is_last_backward_pass else nullcontext()
-                        with sync_context:
-                            with autocast():
-
-                                model_out = model(s1, s2)
-
-                                inputs_no_accum = {}
-                                inputs_no_accum["logit_scale"] = logit_scale = model_out.pop("logit_scale")
-                                if "logit_bias" in model_out:
-                                    inputs_no_accum["logit_bias"] = model_out.pop("logit_bias")
-
-                                inputs = {}
-                                for key in accum_features_current_loop.keys():  # Iterate over keys
-                                    # Use the copied list for concatenation, and replace the j-th element
-                                    temp_accumulated = list(accum_features_current_loop[key])  # Create a copy for modification
-                                    temp_accumulated[j] = model_out[key]  # Replace with the current grad-tracked feature
-                                    inputs[key] = torch.cat(temp_accumulated)
-
-                                losses = loss(**inputs, **inputs_no_accum, output_dict=True)
-
-                                total_loss = sum(losses.values()) / args.train.accum_freq
-                                losses["loss"] = total_loss
-
-                            backward(total_loss, scaler)
-
-                        del inputs
-                        del inputs_no_accum
-
-                    del accum_features_current_loop
-        except RuntimeError as err:
-            if _is_cuda_out_of_memory_error(err):
-                local_cuda_oom = True
-                _handle_cuda_oom(err, epoch, i, optimizer)
-            else:
-                raise
-        except torch.cuda.OutOfMemoryError as err:
-            local_cuda_oom = True
-            _handle_cuda_oom(err, epoch, i, optimizer)
-
-        if args.datamodule.world_size > 1:
-            local_cuda_oom = _sync_cuda_oom_flag(
-                local_cuda_oom,
-                device=device,
-                epoch=epoch,
-                batch_idx=i,
-                optimizer=optimizer,
-                world_size=args.datamodule.world_size,
-            )
-
-        if local_cuda_oom:
-            if args.datamodule.world_size > 1 and dist.is_available() and dist.is_initialized():
-                dist.barrier()
-            if args.train.accum_freq > 1:
-                accum_s1, accum_s2, accum_features = [], [], {}
-            end = time.time()
-            if is_master(args):
-                logging.warning("Skipping batch %s in epoch %s due to CUDA OOM.", i, epoch)
-            continue
-
-        if not ready_for_optimizer_step:
-            end = time.time()
-            continue
+                del inputs
+                del inputs_no_accum
 
         # log gradients
         # logit_scale_param = unwrap_model(model).logit_scale
@@ -490,9 +367,11 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 losses_m[key].update(val.item(), batch_size)
 
             logit_scale_scalar = logit_scale.item()
-            metrics_log = " ".join(
-                f"{loss_name.capitalize()}: {loss_m.val:#.5g} ({loss_m.avg:#.5g})"
-                for loss_name, loss_m in losses_m.items()
+            loss_log = " ".join(
+                [
+                    f"{loss_name.capitalize()}: {loss_m.val:#.5g} ({loss_m.avg:#.5g})" 
+                    for loss_name, loss_m in losses_m.items()
+                ]
             )
             samples_per_second = args.train.accum_freq * args.datamodule.batch_size * args.datamodule.world_size / batch_time_m.val
             samples_per_second_per_gpu = args.train.accum_freq * args.datamodule.batch_size / batch_time_m.val
@@ -501,7 +380,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 f"Data (t): {data_time_m.avg:.3f} "
                 f"Batch (t): {batch_time_m.avg:.3f}, {samples_per_second:#g}/s, {samples_per_second_per_gpu:#g}/s/gpu "
                 f"LR: {optimizer.param_groups[0]['lr']:5f} "
-                f"Logit Scale: {logit_scale_scalar:.3f} " + metrics_log
+                f"Logit Scale: {logit_scale_scalar:.3f} " + loss_log
             )
 
             # Save train loss / etc. Using non avg meter values as loggers have their own smoothing
@@ -513,7 +392,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 "scale": logit_scale_scalar,
                 "lr": optimizer.param_groups[0]["lr"]
             }            
-            log_data.update({name: val.val for name, val in losses_m.items()})
+            log_data.update({name:val.val for name,val in losses_m.items()})
 
             log_data = {"train/" + name: val for name, val in log_data.items()}
 
@@ -571,7 +450,7 @@ def evaluate(model, data, epoch, args, tb_writer=None, tokenizer=None):
                     all_s1_features.append(s1_features.cpu())
                     all_s2_features.append(s2_features.cpu())
                     logit_scale = logit_scale.mean()
-                    logits_per_s1 = compute_normalized_logits(s1_features, s2_features, logit_scale)
+                    logits_per_s1 = logit_scale * s1_features @ s2_features.t()
                     logits_per_s2 = logits_per_s1.t()
 
                     batch_size = s1.shape[0]
@@ -646,7 +525,7 @@ def evaluate(model, data, epoch, args, tb_writer=None, tokenizer=None):
 
 def get_clip_metrics(s1_features, s2_features, logit_scale):
     metrics = {}
-    logits_per_s1 = compute_normalized_logits(s1_features, s2_features, logit_scale).detach().cpu()
+    logits_per_s1 = (logit_scale * s1_features @ s2_features.t()).detach().cpu()
     logits_per_s2 = logits_per_s1.t().detach().cpu()
 
     logits = {"s1_to_s2": logits_per_s1, "s2_to_s1": logits_per_s2}

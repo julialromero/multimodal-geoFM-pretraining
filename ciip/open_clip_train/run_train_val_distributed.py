@@ -43,14 +43,7 @@ from torchvision.transforms import v2
 
 # from open_clip import create_model_and_transforms #, trace_model, get_tokenizer, create_loss
 from open_clip_train.data import get_data
-import torch.distributed as dist
-
-from open_clip_train.distributed import (
-    is_master,
-    init_distributed_device,
-    broadcast_object,
-    world_info_from_env,
-)
+from open_clip_train.distributed import is_master, init_distributed_device, broadcast_object, world_info_from_env
 from open_clip_train.logger import setup_logging
 from open_clip_train.params import parse_args
 from open_clip_train.scheduler import cosine_lr, const_lr, const_lr_cooldown
@@ -104,7 +97,7 @@ def allocate_gpu_memory_for_fragmentation(device: torch.device, current_rank: in
     return allocated_tensor # Return the tensor so it stays in scope in the main function
 
 
-torch.cuda.current_device()  #
+torch.cuda.current_device()  # <-- or torch.empty(1, device='cuda')
 torch.cuda.synchronize()
 
 
@@ -139,63 +132,6 @@ def setup_slurm_logging():
 
 
 LATEST_CHECKPOINT_NAME = "epoch_latest.pt"
-LATEST_CHECKPOINT_TRACKER = "latest_checkpoint.txt"
-
-
-def get_latest_tracker_path(args: DictConfig) -> str:
-    return os.path.join(args.io.logs, LATEST_CHECKPOINT_TRACKER)
-
-
-def atomic_torch_save(state_dict, target_path: str):
-    directory = os.path.dirname(target_path) or "."
-    os.makedirs(directory, exist_ok=True)
-    tmp_path = f"{target_path}.tmp"
-    torch.save(state_dict, tmp_path)
-    os.replace(tmp_path, target_path)
-
-
-def update_resume_metadata(args: DictConfig, checkpoint_path: str):
-    if not checkpoint_path:
-        return
-
-    args.io.resume = checkpoint_path
-    tracker_path = get_latest_tracker_path(args)
-    os.makedirs(os.path.dirname(tracker_path), exist_ok=True)
-    with open(tracker_path, "w") as tracker_file:
-        tracker_file.write(checkpoint_path)
-
-    if args.io.save_logs and args.io.checkpoint_path:
-        if is_master(args, local=getattr(args, "log_local", False)):
-            config_file = os.path.join(args.io.logs, "prod_default.yaml")
-            with open(config_file, "w") as f:
-                OmegaConf.save(args, f)
-
-
-def build_checkpoint_dict(args: DictConfig, original_model, optimizer, scaler, epoch: int):
-    checkpoint = {
-        "epoch": epoch,
-        "name": args.train.name,
-        "state_dict": original_model.state_dict(),
-    }
-    if optimizer is not None:
-        checkpoint["optimizer"] = optimizer.state_dict()
-    if scaler is not None:
-        checkpoint["scaler"] = scaler.state_dict()
-    return checkpoint
-
-
-def persist_latest_checkpoint(args: DictConfig, checkpoint_dict, epoch: int, save_epoch_file: bool):
-    if not getattr(args.io, "checkpoint_path", None):
-        return
-    latest_save_path = os.path.join(args.io.checkpoint_path, LATEST_CHECKPOINT_NAME)
-    atomic_torch_save(checkpoint_dict, latest_save_path)
-    update_resume_metadata(args, latest_save_path)
-
-    if save_epoch_file:
-        epoch_path = os.path.join(args.io.checkpoint_path, f"epoch_{epoch}.pt")
-        atomic_torch_save(checkpoint_dict, epoch_path)
-
-
 CONF = "prod_default"
 
 def random_seed(seed=42, rank=0):
@@ -237,16 +173,6 @@ def main(args: DictConfig, start_epoch=0):
 
     # args = parse_args(args)
     args.io.logs = os.environ.get('MY_LOG_BASE_DIR')
-    resume_override = os.environ.get("RESUME_FROM_CHECKPOINT")
-    if resume_override:
-        args.io.resume = resume_override
-    elif not args.io.resume:
-        tracker_path = get_latest_tracker_path(args)
-        if os.path.exists(tracker_path):
-            with open(tracker_path, "r") as tracker_file:
-                tracked_checkpoint = tracker_file.read().strip()
-            if tracked_checkpoint:
-                args.io.resume = tracked_checkpoint
     device = init_distributed_device(args.datamodule)
     local_rank, global_rank, world_size = world_info_from_env()
 
@@ -273,15 +199,7 @@ def main(args: DictConfig, start_epoch=0):
     with open(temp_path, 'w') as f:
         f.write(f"Allocated {os.environ.get('SLURM_PROCID', '-1')} {os.environ.get('CUDA_VISIBLE_DEVICES', '-1')}")
     
-    skip_data_wait = os.environ.get("SKIP_DATA_EXTRACTION", "0") == "1"
-    extracting_data = not skip_data_wait
-    if skip_data_wait:
-        if os.path.exists(check_path):
-            logging.info('Skip data extraction wait requested and marker found. Continuing immediately.')
-        else:
-            logging.warning('Skip data extraction wait requested but marker missing. Waiting for extraction to complete.')
-            extracting_data = True
-
+    extracting_data = True
     while extracting_data:
         time.sleep(30)
         now =datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -300,8 +218,7 @@ def main(args: DictConfig, start_epoch=0):
         print('####### DELETING 80GB ALLOCATED TENSOR #######')
         logging.info('####### DELETING 80GB ALLOCATED TENSOR #######')
     del _reserved_memory_tensor
-    torch.cuda.empty_cache()
-    torch.cuda.reset_peak_memory_stats()
+    # torch.cuda.empty_cache()
 
     
 
@@ -620,13 +537,9 @@ def main(args: DictConfig, start_epoch=0):
         #     exit(1)
 
     # determine if this worker should save logs and checkpoints. only do so if it is rank == 0
-    should_save_logs = (
-        bool(getattr(args.io, "checkpoint_path", None))
-        and getattr(args.io, "save_logs", False)
-        and is_master(args, local=getattr(args, "log_local", False))
-    )
+    args.save_logs = args.io.save_logs and is_master(args)
     writer = None
-    if should_save_logs and args.tensorboard:
+    if args.save_logs and args.tensorboard:
         assert tensorboard is not None, "Please install tensorboard."
         writer = tensorboard.SummaryWriter(args.tensorboard_path)
 
@@ -670,7 +583,7 @@ def main(args: DictConfig, start_epoch=0):
         # evaluate(model, data, start_epoch, args, tb_writer=writer, tokenizer=tokenizer)
         # return
 
-    loss = create_loss(args)
+    loss = create_loss(args.datamodule)
 
     
     date_str = datetime.now().strftime("%Y_%m_%d-%H_%M")
@@ -693,17 +606,10 @@ def main(args: DictConfig, start_epoch=0):
         # print(torch.cuda.memory_summary())
         train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist_model, args, tb_writer=writer)
         # print time, rank
-        print(
-            f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} | '
-            f'Rank {args.datamodule.rank} finished epoch {epoch} |  '
-            f'Allocated: {torch.cuda.memory_allocated()/1024**2:.1f} MB | '
-            f'Reserved: {torch.cuda.memory_reserved()/1024**2:.1f} MB | '
-            f'Memory summary: {torch.cuda.memory_summary(device=device, abbreviated=True)}',
-            flush=True,
-        )
-
-
-        # if epoch < 10:
+        print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} | Rank {args.datamodule.rank} finished epoch {epoch} |  Allocated: {torch.cuda.memory_allocated()/1024**2:.1f} MB | Reserved: {torch.cuda.memory_reserved()/1024**2:.1f} MB | Memory summary: {torch.cuda.memory_summary(device=0, abbreviated=True)}', flush=True)
+       
+   
+        # if epoch < 10: 
         #     try:
         #         save_dir = os.path.join(args.io.mem_snapshots, date_str)
         #         os.makedirs(save_dir, exist_ok=True)
@@ -722,47 +628,45 @@ def main(args: DictConfig, start_epoch=0):
         #     evaluate(model, data, completed_epoch, args, tb_writer=writer, tokenizer=tokenizer)
 
         # Saving checkpoints.
-        checkpoint_dict = None
-        if should_save_logs:
-            checkpoint_dict = build_checkpoint_dict(
-                args,
-                original_model,
-                optimizer,
-                scaler,
-                completed_epoch,
-            )
-            save_epoch_file = (
-                completed_epoch == args.train.epochs
-                or (
-                    args.io.save_frequency > 0
-                    and (completed_epoch % args.io.save_frequency) == 0
+        if args.io.save_logs:
+            checkpoint_dict = {
+                "epoch": completed_epoch,
+                "name": args.train.name,
+                "state_dict": original_model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+            }
+            if scaler is not None:
+                checkpoint_dict["scaler"] = scaler.state_dict()
+
+            if completed_epoch == args.train.epochs \
+                    or (args.io.save_frequency > 0 and (completed_epoch % args.io.save_frequency) == 0) \
+                        or completed_epoch == 1:
+                # save checkpoints within outputs file
+                torch.save(
+                    checkpoint_dict,
+                    os.path.join(args.io.checkpoint_path, f"epoch_{completed_epoch}.pt"),
                 )
-                or completed_epoch == 1
-            )
 
-            persist_latest_checkpoint(
-                args,
-                checkpoint_dict,
-                completed_epoch,
-                save_epoch_file=save_epoch_file,
-            )
-
-            if (
-                save_epoch_file
-                and is_master(args, local=args.log_local)
-                and args.io.comet_ml
-            ):
-                experiment.log_parameters(checkpoint_dict)
-                log_model(experiment, model=original_model, model_name="CIIP!")
+                # log out via comet
+                # TBD if we want the whole checkpoint dict or just some specific hyper-params . . .
+                if is_master(args, local=args.log_local):
+                    if(args.io.comet_ml):
+                        experiment.log_parameters(checkpoint_dict)
+                        log_model(experiment, model=original_model, model_name="CIIP!")
 
         if args.train.delete_previous_checkpoint:
             previous_checkpoint = os.path.join(args.io.checkpoint_path, f"epoch_{completed_epoch - 1}.pt")
             if os.path.exists(previous_checkpoint):
                 os.remove(previous_checkpoint)
 
-        if args.train.save_most_recent and should_save_logs and checkpoint_dict is not None:
+        if args.train.save_most_recent:
+            # try not to corrupt the latest checkpoint if save fails
+            tmp_save_path = os.path.join(args.io.checkpoint_path, "tmp.pt")
             latest_save_path = os.path.join(args.io.checkpoint_path, LATEST_CHECKPOINT_NAME)
-            atomic_torch_save(checkpoint_dict, latest_save_path)
+            torch.save(checkpoint_dict, tmp_save_path)
+            os.replace(tmp_save_path, latest_save_path)
+
+
     if args.wandb and is_master(args):
         wandb.finish()
 

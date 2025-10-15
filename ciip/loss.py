@@ -15,90 +15,53 @@ try:
 except ImportError:
     hvd = None
 
-def _dist_ready() -> bool:
-    return dist.is_available() and dist.is_initialized()
 
 def gather_features(
-    s1_features: torch.Tensor,
-    s2_features: torch.Tensor,
-    local_loss: bool = False,
-    gather_with_grad: bool = False,
-    rank: int = 0,
-    world_size: int = 1,
-    use_horovod: bool = False,
+        s1_features,
+        s2_features,
+        local_loss=False,
+        gather_with_grad=False,
+        rank=0,
+        world_size=1,
+        use_horovod=False
 ):
-    """
-    Gather features across ranks for contrastive loss.
-
-    Safety + OOM behavior:
-      • If local_loss=True (recommended for robust OOM skip), no collectives are performed.
-      • Autograd-enabled gathers are disallowed; all gathers are under torch.no_grad().
-      • When gathering (global negatives), we reinsert the local tensors so gradients
-        still flow for the local slice.
-
-    Returns:
-        (all_s1_features, all_s2_features) with batch dimension concatenated across ranks,
-        or the original (s1_features, s2_features) if no gather is performed.
-    """
-
-    # Fast paths: avoid any collective (safest when skipping batches on OOM)
-    if local_loss or world_size <= 1 or (not use_horovod and not _dist_ready()):
-        return s1_features, s2_features
-
-    if gather_with_grad:
-        raise RuntimeError("gather_with_grad=True is not supported (autograd collectives).")
-
-
-    # Resolve rank/world_size if not provided
+    assert has_distributed, 'torch.distributed did not import correctly, please use a PyTorch version with support.'
     if use_horovod:
-        if hvd is None:
-            raise RuntimeError("Horovod requested but not available.")
-        if world_size <= 1:
-            world_size = hvd.size()
-        if rank < 0 or rank >= world_size:
-            rank = hvd.rank()
+        assert hvd is not None, 'Please install horovod'
+        if gather_with_grad:
+            all_s1_features = hvd.allgather(s1_features)
+            all_s2_features = hvd.allgather(s2_features)
+        else:
+            with torch.no_grad():
+                all_s1_features = hvd.allgather(s1_features)
+                all_s2_features = hvd.allgather(s2_features)
+            if not local_loss:
+                # ensure grads for local rank when all_* features don't have a gradient
+                gathered_s1_features = list(all_s1_features.chunk(world_size, dim=0))
+                gathered_s2_features = list(all_s2_features.chunk(world_size, dim=0))
+                gathered_s1_features[rank] = s1_features
+                gathered_s2_features[rank] = s2_features
+                all_s1_features = torch.cat(gathered_s1_features, dim=0)
+                all_s2_features = torch.cat(gathered_s2_features, dim=0)
+    else:
+        # We gather tensors from all gpus
+        if gather_with_grad:
+            all_s1_features = torch.cat(torch.distributed.nn.all_gather(s1_features), dim=0)
+            all_s2_features = torch.cat(torch.distributed.nn.all_gather(s2_features), dim=0)
+        else:
+            gathered_s1_features = [torch.zeros_like(s1_features) for _ in range(world_size)]
+            gathered_s2_features = [torch.zeros_like(s2_features) for _ in range(world_size)]
+            dist.all_gather(gathered_s1_features, s1_features)
+            dist.all_gather(gathered_s2_features, s2_features)
+            if not local_loss:
+                # ensure grads for local rank when all_* features don't have a gradient
+                gathered_s1_features[rank] = s1_features
+                gathered_s2_features[rank] = s2_features
+            all_s1_features = torch.cat(gathered_s1_features, dim=0)
+            all_s2_features = torch.cat(gathered_s2_features, dim=0)
 
-        with torch.no_grad():
-            all_s1 = hvd.allgather(s1_features)
-            all_s2 = hvd.allgather(s2_features)
+    return all_s1_features, all_s2_features
 
-        if not local_loss:
-            # Keep gradients for the local slice by replacing that chunk
-            chunks1 = list(all_s1.chunk(world_size, dim=0))
-            chunks2 = list(all_s2.chunk(world_size, dim=0))
-            chunks1[rank] = s1_features
-            chunks2[rank] = s2_features
-            all_s1 = torch.cat(chunks1, dim=0)
-            all_s2 = torch.cat(chunks2, dim=0)
-
-        return all_s1, all_s2
-
-    # torch.distributed path (no-grad all_gather)
-    if world_size <= 1:
-        try:
-            world_size = dist.get_world_size()
-        except Exception:
-            world_size = 1
-    if rank < 0 or rank >= world_size:
-        try:
-            rank = dist.get_rank()
-        except Exception:
-            rank = 0
-
-    with torch.no_grad():
-        gather_s1 = [torch.empty_like(s1_features) for _ in range(world_size)]
-        gather_s2 = [torch.empty_like(s2_features) for _ in range(world_size)]
-        dist.all_gather(gather_s1, s1_features)
-        dist.all_gather(gather_s2, s2_features)
-
-    if not local_loss:
-        # Preserve grad for local portion
-        gather_s1[rank] = s1_features
-        gather_s2[rank] = s2_features
-
-    all_s1 = torch.cat(gather_s1, dim=0)
-    all_s2 = torch.cat(gather_s2, dim=0)
-    return all_s1, all_s2
 
 class CiipLoss(nn.Module):
 
@@ -110,10 +73,6 @@ class CiipLoss(nn.Module):
             rank=0,
             world_size=1,
             use_horovod=False,
-            vc_reg_enabled=False,
-            vc_weight=0.0,
-            vc_gamma=1.0,
-            vc_covariance_weights=None,
     ):
         super().__init__()
         self.local_loss = local_loss
@@ -123,48 +82,16 @@ class CiipLoss(nn.Module):
         self.world_size = world_size
         self.use_horovod = use_horovod
 
-        self.vc_reg_enabled = vc_reg_enabled
-        self.vc_weight = vc_weight
-        self.vc_gamma = vc_gamma
-
-        if vc_covariance_weights is None:
-            self.vc_covariance_weights = (1.0, 1.0)
-        else:
-            if isinstance(vc_covariance_weights, torch.Tensor):
-                vc_covariance_weights = vc_covariance_weights.tolist()
-            if not isinstance(vc_covariance_weights, (list, tuple)):
-                vc_covariance_weights = [float(vc_covariance_weights)]
-            if len(vc_covariance_weights) == 1:
-                vc_covariance_weights = [vc_covariance_weights[0], vc_covariance_weights[0]]
-            elif len(vc_covariance_weights) >= 2:
-                vc_covariance_weights = vc_covariance_weights[:2]
-            self.vc_covariance_weights = tuple(float(w) for w in vc_covariance_weights)
-
         # cache state
         self.prev_num_logits = 0
         self.labels = {}
-
-    def _variance_regularizer(self, features: torch.Tensor) -> torch.Tensor:
-        if features.ndim != 2 or features.shape[0] <= 1:
-            return torch.zeros((), device=features.device, dtype=features.dtype)
-        variances = torch.var(features, dim=0, unbiased=False)
-        std = torch.sqrt(variances + 1e-4)
-        return torch.mean(F.relu(self.vc_gamma - std))
-
-    def _covariance_regularizer(self, features: torch.Tensor) -> torch.Tensor:
-        if features.ndim != 2 or features.shape[0] <= 1:
-            return torch.zeros((), device=features.device, dtype=features.dtype)
-        features = features - features.mean(dim=0)
-        cov = features.T @ features / (features.shape[0] - 1)
-        cov = cov - torch.diag(torch.diagonal(cov))
-        return cov.pow(2).sum() / cov.shape[0]
 
     def get_ground_truth(self, device, num_logits) -> torch.Tensor:
         # calculated ground-truth and cache if enabled
         if self.prev_num_logits != num_logits or device not in self.labels:
             labels = torch.arange(num_logits, device=device, dtype=torch.long)
-            # if self.world_size > 1 and self.local_loss:
-            #     labels = labels + num_logits * self.rank
+            if self.world_size > 1 and self.local_loss:
+                labels = labels + num_logits * self.rank
             if self.cache_labels:
                 self.labels[device] = labels
                 self.prev_num_logits = num_logits
@@ -172,124 +99,40 @@ class CiipLoss(nn.Module):
             labels = self.labels[device]
         return labels
 
-    def _cosine_logits(self, left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
-        left_norms = left.norm(dim=-1, keepdim=True).clamp_min(1e-12)
-        right_norms = right.norm(dim=-1, keepdim=True).clamp_min(1e-12)
-        return (left @ right.T) / (left_norms * right_norms.T)
-
-    def get_logits(
-            self,
-            s1_features,
-            s2_features,
-            logit_scale,
-            logit_bias=None,
-            return_gathered=False,
-    ):
+    def get_logits(self, s1_features, s2_features, logit_scale, logit_bias=None):
         if self.world_size > 1:
             all_s1_features, all_s2_features = gather_features(
                 s1_features, s2_features,
                 self.local_loss, self.gather_with_grad, self.rank, self.world_size, self.use_horovod)
 
             if self.local_loss:
-                logits_per_s1 = logit_scale * self._cosine_logits(s1_features, all_s2_features)
-                logits_per_s2 = logit_scale * self._cosine_logits(s2_features, all_s1_features)
+                logits_per_s1 = logit_scale * s1_features @ all_s2_features.T
+                logits_per_s2 = logit_scale * s2_features @ all_s1_features.T
             else:
-                cosine_logits = self._cosine_logits(all_s1_features, all_s2_features)
-                logits_per_s1 = logit_scale * cosine_logits
+                logits_per_s1 = logit_scale * all_s1_features @ all_s2_features.T
                 logits_per_s2 = logits_per_s1.T
         else:
-            cosine_logits = self._cosine_logits(s1_features, s2_features)
-            logits_per_s1 = logit_scale * cosine_logits
-            logits_per_s2 = logit_scale * cosine_logits.T
-            all_s1_features = s1_features
-            all_s2_features = s2_features
+            logits_per_s1 = logit_scale * s1_features @ s2_features.T
+            logits_per_s2 = logit_scale * s2_features @ s1_features.T
 
         if logit_bias is not None:
-            logits_per_s1 += logit_bias
-            logits_per_s2 += logit_bias
-
-        if return_gathered:
-            return logits_per_s1, logits_per_s2, all_s1_features, all_s2_features
-
+            logits_per_image += logit_bias
+            logits_per_text += logit_bias
+        
         return logits_per_s1, logits_per_s2
 
-    def forward(
-            self,
-            s1_features,
-            s2_features,
-            logit_scale,
-            logit_bias=None,
-            output_dict=False,
-            s1_features_vc=None,
-            s2_features_vc=None,
-            **kwargs,
-    ):
+    def forward(self, s1_features, s2_features, logit_scale, logit_bias=None, output_dict=False):
         device = s1_features.device
-        need_vc = self.vc_reg_enabled and self.vc_weight != 0
-        gather_for_vc = need_vc and self.world_size > 1
-        logits_outputs = self.get_logits(
-            s1_features,
-            s2_features,
-            logit_scale,
-            logit_bias=logit_bias,
-            return_gathered=gather_for_vc,
-        )
-        if gather_for_vc:
-            logits_per_s1, logits_per_s2, gathered_s1_features, gathered_s2_features = logits_outputs
-        else:
-            logits_per_s1, logits_per_s2 = logits_outputs
-            gathered_s1_features = None
-            gathered_s2_features = None
+        logits_per_s1, logits_per_s2 = self.get_logits(s1_features, s2_features, logit_scale, logit_bias=logit_bias,)
 
         labels = self.get_ground_truth(device, logits_per_s1.shape[0])
 
-        contrastive_loss = (
+        total_loss = (
             F.cross_entropy(logits_per_s1, labels) +
             F.cross_entropy(logits_per_s2, labels)
         ) / 2
 
-        losses = {"contrastive_loss": contrastive_loss}
-
-        if need_vc:
-            s1_vc_local = s1_features_vc if s1_features_vc is not None else s1_features
-            s2_vc_local = s2_features_vc if s2_features_vc is not None else s2_features
-
-            if self.world_size > 1:
-                reuse_info_nce_gather = (
-                    self.gather_with_grad and
-                    s1_features_vc is None and
-                    s2_features_vc is None and
-                    gathered_s1_features is not None and
-                    gathered_s2_features is not None
-                )
-                if reuse_info_nce_gather:
-                    s1_vc = gathered_s1_features
-                    s2_vc = gathered_s2_features
-                else:
-                    s1_vc, s2_vc = gather_features(
-                        s1_vc_local,
-                        s2_vc_local,
-                        self.local_loss,
-                        True,
-                        self.rank,
-                        self.world_size,
-                        self.use_horovod,
-                    )
-            else:
-                s1_vc = s1_vc_local
-                s2_vc = s2_vc_local
-
-            variance_loss = self._variance_regularizer(s1_vc) + self._variance_regularizer(s2_vc)
-            cov_w_s1, cov_w_s2 = self.vc_covariance_weights
-            covariance_loss = (
-                cov_w_s1 * self._covariance_regularizer(s1_vc) +
-                cov_w_s2 * self._covariance_regularizer(s2_vc)
-            )
-            vc_loss = self.vc_weight * (variance_loss + covariance_loss)
-            losses["vc_loss"] = vc_loss
-
-        total_loss = sum(losses.values())
-        return losses if output_dict else total_loss
+        return {"contrastive_loss": total_loss} if output_dict else total_loss
 
 
 # class CoCaLoss(ClipLoss):
