@@ -48,9 +48,9 @@ loss:
   local_loss: True
   gather_with_grad: True
   cache_labels: True
-  contrastive_weight: 1.0
-  vc_enabled: True
-  vc_weight: 0.4
+  contrastive_weight: 1
+  vc_enabled: False
+  vc_weight: 0
   vc_gamma: 1.0
   vc_covariance_weights: [1.0, 1.0]
 
@@ -86,13 +86,11 @@ train:
   use_val: False
   val_frac: 0.0
   epochs: 200
-  lr: 0.0005
+  lr: 0.001
   wd: 0.02
-  # lr: 0.0001
-  # wd: 0.2
-  warmup: 3000
+  warmup: 5000
   beta1: 0.9
-  beta2: 0.999
+  beta2: 0.98
   eps: 1.0e-8
   val_frequency: 1
   accum_freq: 40

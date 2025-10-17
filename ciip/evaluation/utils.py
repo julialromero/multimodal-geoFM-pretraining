@@ -99,6 +99,7 @@ def plot_primary_over_epochs(
     # --- collect primary runs (name, epoch) ---
     primary = []
     for name in results:
+        print(results)
         m = rx.search(name)
         if m:
             try:
@@ -352,15 +353,7 @@ def create_ciip_model(embed_dim):
     return model
     
 def load_ciip_model_checkpoint(checkpoint_path):
-    print(f'PLZ FIX THIS')
-    if '2025-08-03_12-52-38-test-compute' in checkpoint_path:
-        embed_dim=512
-    elif '2025_08_06-MoCoIn' in checkpoint_path:
-        embed_dim=1024
-    elif '2025_09_05' in checkpoint_path:
-        embed_dim=1024
-    else:
-        embed_dim=1024
+    embed_dim=1024
         
     print(f'Using embed {embed_dim}')
 
@@ -384,5 +377,10 @@ def load_ciip_model_checkpoint(checkpoint_path):
 
 
     print("Checkpoint loaded successfully, loaded S1 and S2 weights.")
+
+    # num_params = sum(p.numel() for p in model.parameters())
+    # print(f"Total parameters: {num_params:,}")
+    # quit()
+
 
     return model

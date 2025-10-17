@@ -36,6 +36,7 @@ from comet_ml import Experiment
 from comet_ml.integration.pytorch import log_model
 from utils import create_loss, create_model
 from torchvision.transforms import v2
+from transforms import *
 ###
 
 # from open_clip import create_model_and_transforms #, trace_model, get_tokenizer, create_loss
@@ -379,12 +380,15 @@ def main(args: DictConfig, start_epoch=0):
 
 
     if args.dataset.use_transforms:
-      transforms = v2.Compose([
-          v2.RandomResizedCrop(size=(args.model.s1_resolution, args.model.s2_resolution), antialias=True),
-          v2.RandomHorizontalFlip(p=0.5),
-          v2.RandomVerticalFlip(p=0.5),
-          v2.GaussianBlur(3),
-      ])
+    #   transforms = v2.Compose([
+    #       v2.RandomResizedCrop(size=(args.model.s1_resolution, args.model.s2_resolution), antialias=True),
+    #       v2.RandomHorizontalFlip(p=0.5),
+    #       v2.RandomVerticalFlip(p=0.5),
+    #       v2.GaussianBlur(3),
+    #   ])
+        assert args.model.s1_resolution != args.model.s2_resolution, 'S1 target resolution is not the same as S2 target resolution'
+        # transforms = PairGeom(out_size=args.model.s1_resolution)
+        transforms = PairAugmented(pair_geom=PairGeom(out_size=args.model.s1_resolution))
     else:
         transforms = None
 

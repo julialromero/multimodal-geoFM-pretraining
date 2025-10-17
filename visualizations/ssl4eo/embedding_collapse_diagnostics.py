@@ -2067,7 +2067,7 @@ def plot_svd_epoch_grid(
         attr_pre: Optional[str] = f"{modality}_pre_correlation_spectrum"
     elif normalized:
         attr_post = f"{modality}_normalized_singular_values"
-        attr_pre = None
+        attr_pre = f"{modality}_pre_normalized_singular_values"
     else:
         attr_post = f"{modality}_singular_values"
         attr_pre = f"{modality}_pre_singular_values"
