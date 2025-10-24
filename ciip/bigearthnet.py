@@ -55,6 +55,7 @@ def load_ciip_model_checkpoint(checkpoint_path):
     s2_bands = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     model = CIIP(
         embed_dim=512,
+        pre_projection_dim=1024,
         s1_resolution=264,
         s1_layers= (3, 4, 6, 3),
         s1_width=32,

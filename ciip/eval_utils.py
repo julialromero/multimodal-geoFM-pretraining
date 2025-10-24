@@ -15,12 +15,13 @@ class CustomTransform:
 
 
 
-def create_ciip_model():
+def create_ciip_model(embed_dim=512, pre_projection_dim=1024):
     s1_bands = [1, 2]
     s2_bands = list(range(1, 14))  # Bands 1 through 13
     model = CIIP(
         framework="resnet50",
-        embed_dim=512,
+        embed_dim=embed_dim,
+        pre_projection_dim=pre_projection_dim,
         s1_resolution=224,
         s1_layers=(3, 4, 6, 3),
         s1_width=32,

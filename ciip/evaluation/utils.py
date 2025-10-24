@@ -333,12 +333,13 @@ def drop_last_linear_layer(model):
         print("Warning: No final linear layer found to drop!")
     return model
 
-def create_ciip_model(embed_dim):
+def create_ciip_model(embed_dim, pre_projection_dim=1024):
     s1_bands = [1, 2]
     s2_bands = list(range(1, 14))  # Bands 1 through 13
     model = CIIP(
         framework="resnet50",
         embed_dim=embed_dim,
+        pre_projection_dim=pre_projection_dim,
         s1_resolution=224,
         s1_layers=(3, 4, 6, 3),
         s1_width=32,
@@ -351,13 +352,14 @@ def create_ciip_model(embed_dim):
         s2_bands=len(s2_bands),
     )
     return model
-    
-def load_ciip_model_checkpoint(checkpoint_path):
-    embed_dim=1024
-        
-    print(f'Using embed {embed_dim}')
 
-    model = create_ciip_model(embed_dim)
+def load_ciip_model_checkpoint(checkpoint_path):
+    embed_dim = 512
+    pre_projection_dim = 1024
+
+    print(f'Using embed {embed_dim} with pre-projection dim {pre_projection_dim}')
+
+    model = create_ciip_model(embed_dim, pre_projection_dim=pre_projection_dim)
     checkpoint = torch.load(checkpoint_path, weights_only=False, map_location='cpu') # , map_location='cuda'
 
     state_dict = checkpoint["state_dict"]

@@ -20,6 +20,7 @@ from model_ciip import CIIP
 
 ciip_model = CIIP(
     embed_dim=512,
+    pre_projection_dim=1024,
     s1_resolution=264,
     s1_layers=(3, 4, 6, 3), #Resnet-34
     s1_width=32,
