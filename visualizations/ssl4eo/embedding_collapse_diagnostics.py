@@ -507,7 +507,7 @@ def _register_pre_projection_hooks(
 
     encoder_s1 = getattr(model, "encoder_s1", None)
     if encoder_s1 is not None:
-        for attr in ("fc", "proj", "projection_head"):
+        for attr in ("proj", "projection_head", "fc"):
             module = getattr(encoder_s1, attr, None)
             if isinstance(module, torch.nn.Module):
                 _maybe_register(module, "s1")
@@ -515,7 +515,7 @@ def _register_pre_projection_hooks(
 
     encoder_s2 = getattr(model, "encoder_s2", None)
     if encoder_s2 is not None:
-        for attr in ("fc", "proj", "projection_head"):
+        for attr in ("proj", "projection_head", "fc"):
             module = getattr(encoder_s2, attr, None)
             if isinstance(module, torch.nn.Module):
                 _maybe_register(module, "s2")

@@ -52,7 +52,10 @@ def main(args: DictConfig, start_epoch=0):
 
   loss = create_loss(args)
 
+  pre_projection_dim = getattr(args.model, "pre_projection_dim", args.model.embed_dim)
+
   model = CIIP(embed_dim=args.model.embed_dim,
+    pre_projection_dim=pre_projection_dim,
     s1_resolution=args.model.s1_resolution,
     s1_layers=OmegaConf.to_object(args.model.s1_layers),
     s1_width=args.model.width,
