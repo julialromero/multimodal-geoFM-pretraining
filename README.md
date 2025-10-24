@@ -24,38 +24,40 @@ $ pip install git+https://github.com/openai/CLIP.git
 
 Replace `cudatoolkit=11.0` above with the appropriate CUDA version on your machine or `cpuonly` when installing on a machine without a GPU.
 
-### Variance–covariance regularization for CIIP training
+### AlphaEarth batch-uniformity regularization
 
-The CIIP training entrypoints now expose an optional variance–covariance (VC) regularizer. When enabled, the loss augments the contrastive objective with penalties that encourage per-dimension variance above a threshold `γ` and suppress cross-feature correlations for each modality. You can tune these behaviours from both the CLI and the Hydra configuration files:
+We adopt the AlphaEarth batch-uniformity loss to encourage better use of the embedding space. The loss measures the absolute dot product between each feature vector and a cyclically shifted copy of the batch, penalising non-orthogonal pairs. It is added to the InfoNCE objective with a small weight (default `0.05`).
 
-* **CLI flags**: `train.py` accepts `--vc-regularization` (enables the regularizer), `--contrastive-weight` (scales or disables the InfoNCE term), `--vc-weight` (overall VC weight), `--vc-gamma` (variance target γ) and `--vc-covariance-weights` (one or two floats weighting the Sentinel-1/Sentinel-2 covariance terms). Example:
+You can adjust or disable the term via both the CLI and the Hydra configuration files:
+
+* **CLI flags**: pass `--batch-uniformity-weight` to scale the additional term (set to `0` to disable its contribution) and combine it with `--batch-uniformity` / `--no-batch-uniformity` to force-enable or disable the regulariser. The existing VC regularisation controls are still present via `--vc-regularization`, `--no-vc-regularization`, and the associated `--vc-*` knobs.
 
   ```bash
   python -m ciip.open_clip_train.main \
+      --contrastive-weight 1.0 \
+      --batch-uniformity \
+      --batch-uniformity-weight 0.05 \
       --vc-regularization \
-      --contrastive-weight 0.0 \
-      --vc-weight 0.1 \
-      --vc-gamma 1.0 \
-      --vc-covariance-weights 1.0 0.5
+      --vc-weight 0.05
   ```
 
-* **Hydra configs**: when using `run_train_val.py` or the distributed runner, the new options live under the `loss` section in the YAML config. For instance, `ciip/open_clip_train/configs/local_default.yaml` now contains:
+* **Hydra config**: when using `run_train_val.py` or the distributed runner, the options live under the `loss` section. For example, `ciip/open_clip_train/configs/local_default.yaml` includes:
 
   ```yaml
   loss:
     local_loss: False
     gather_with_grad: False
     cache_labels: True
-    contrastive_weight: 1.0   # set to 0 to disable the contrastive term
-    vc_enabled: False      # set to True to activate the VC regularizer
-    vc_weight: 0.0         # overall VC weight
-    vc_gamma: 1.0          # variance floor γ
+    contrastive_weight: 1.0
+    batch_uniformity_enabled: True   # flip to False to skip the AlphaEarth term entirely
+    batch_uniformity_weight: 0.05
+    vc_enabled: False                # enable to activate the VC regulariser
+    vc_weight: 0.0
+    vc_gamma: 1.0
     vc_covariance_weights: [1.0, 1.0]
   ```
 
-  Override these keys in your experiment-specific config to customise the regulariser while keeping the rest of the defaults untouched.
-
-  To run an experiment that optimises **only** the VC loss, set `contrastive_weight: 0.0`, ensure `vc_enabled: True`, and choose a positive `vc_weight` for your run.
+  Override these keys in your experiment-specific config to tune or disable each auxiliary objective. When `vc_enabled` is `False`, the training loop skips all VC computations, avoiding the extra gather and statistics passes.
 
 ```python
 import torch

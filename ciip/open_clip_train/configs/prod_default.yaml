@@ -50,8 +50,10 @@ loss:
   gather_with_grad: True
   cache_labels: True
   contrastive_weight: 1
+  batch_uniformity_enabled: True
+  batch_uniformity_weight: 0.05
   vc_enabled: False
-  vc_weight: 0
+  vc_weight: 0.0
   vc_gamma: 1.0
   vc_covariance_weights: [1.0, 1.0]
 
