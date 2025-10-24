@@ -78,6 +78,8 @@ class CiipLoss(nn.Module):
             vc_weight=0.0,
             vc_gamma=1.0,
             vc_covariance_weights=None,
+            batch_uniformity_enabled=True,
+            batch_uniformity_weight=0.05,
     ):
         super().__init__()
         self.local_loss = local_loss
@@ -89,9 +91,9 @@ class CiipLoss(nn.Module):
 
         self.contrastive_weight = float(contrastive_weight)
 
-        self.vc_reg_enabled = vc_reg_enabled
-        self.vc_weight = vc_weight
-        self.vc_gamma = vc_gamma
+        self.vc_reg_enabled = bool(vc_reg_enabled)
+        self.vc_weight = float(vc_weight)
+        self.vc_gamma = float(vc_gamma)
 
         if vc_covariance_weights is None:
             self.vc_covariance_weights = (1.0, 1.0)
@@ -105,6 +107,9 @@ class CiipLoss(nn.Module):
             elif len(vc_covariance_weights) >= 2:
                 vc_covariance_weights = vc_covariance_weights[:2]
             self.vc_covariance_weights = tuple(float(w) for w in vc_covariance_weights)
+
+        self.batch_uniformity_enabled = bool(batch_uniformity_enabled)
+        self.batch_uniformity_weight = float(batch_uniformity_weight)
 
         # cache state
         self.prev_num_logits = 0
@@ -124,6 +129,13 @@ class CiipLoss(nn.Module):
         cov = features.T @ features / (features.shape[0] - 1)
         cov = cov - torch.diag(torch.diagonal(cov))
         return cov.pow(2).sum() / cov.shape[0]
+
+    def _batch_uniformity_loss(self, features: torch.Tensor) -> torch.Tensor:
+        if features.ndim != 2 or features.shape[0] <= 1:
+            return torch.zeros((), device=features.device, dtype=features.dtype)
+        rotated = torch.roll(features, shifts=1, dims=0)
+        dot_products = (features * rotated).sum(dim=1).abs()
+        return dot_products.sum()
 
     def get_ground_truth(self, device, num_logits) -> torch.Tensor:
         # calculated ground-truth and cache if enabled
@@ -185,6 +197,7 @@ class CiipLoss(nn.Module):
     ):
         device = s1_features.device
         need_vc = self.vc_reg_enabled and self.vc_weight != 0
+        need_batch_uniformity = self.batch_uniformity_enabled and self.batch_uniformity_weight != 0
         gather_for_vc = need_vc and self.world_size > 1
         logits_outputs = self.get_logits(
             s1_features,
@@ -219,11 +232,7 @@ class CiipLoss(nn.Module):
 
             if self.world_size > 1:
                 reuse_info_nce_gather = (
-                    self.gather_with_grad and
-                    s1_features_vc is None and
-                    s2_features_vc is None and
-                    gathered_s1_features is not None and
-                    gathered_s2_features is not None
+                    gathered_s1_features is not None and gathered_s2_features is not None
                 )
                 if reuse_info_nce_gather:
                     s1_vc = gathered_s1_features
@@ -250,6 +259,14 @@ class CiipLoss(nn.Module):
             )
             vc_loss = self.vc_weight * (variance_loss + covariance_loss)
             losses["vc_loss"] = vc_loss
+
+        if need_batch_uniformity:
+            bu_loss = (
+                self._batch_uniformity_loss(s1_features)
+                + self._batch_uniformity_loss(s2_features)
+            )
+            bu_loss = self.batch_uniformity_weight * bu_loss
+            losses["batch_uniformity_loss"] = bu_loss
 
         total_loss = sum(losses.values())
         return losses if output_dict else total_loss

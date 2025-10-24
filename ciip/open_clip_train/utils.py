@@ -149,6 +149,10 @@ def create_loss(args):
         vc_weight=_resolve_value("vc_weight", loss_cfg, args, default=0.0),
         vc_gamma=_resolve_value("vc_gamma", loss_cfg, args, default=1.0),
         vc_covariance_weights=vc_covariance_weights,
+        batch_uniformity_enabled=_resolve_value("batch_uniformity_enabled", loss_cfg, args, default=True),
+        batch_uniformity_weight=_resolve_value(
+            "batch_uniformity_weight", loss_cfg, args, default=0.05
+        ),
     )
 
 

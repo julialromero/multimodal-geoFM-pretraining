@@ -461,10 +461,16 @@ def parse_args(args):
     parser.add_argument(
         "--vc-regularization",
         dest="vc_enabled",
-        default=False,
         action="store_true",
         help="Enable the variance-covariance (VC) regularizer during contrastive training.",
     )
+    parser.add_argument(
+        "--no-vc-regularization",
+        dest="vc_enabled",
+        action="store_false",
+        help="Disable the variance-covariance (VC) regularizer during contrastive training.",
+    )
+    parser.set_defaults(vc_enabled=None)
     parser.add_argument(
         "--vc-weight",
         type=float,
@@ -484,6 +490,25 @@ def parse_args(args):
         default=None,
         help="Per-modality covariance weights for the VC regularizer. Provide one or two floats.",
     )
+    parser.add_argument(
+        "--batch-uniformity-weight",
+        type=float,
+        default=0.05,
+        help="Weight applied to the AlphaEarth batch-uniformity loss term.",
+    )
+    parser.add_argument(
+        "--batch-uniformity",
+        dest="batch_uniformity_enabled",
+        action="store_true",
+        help="Enable the AlphaEarth batch-uniformity loss term.",
+    )
+    parser.add_argument(
+        "--no-batch-uniformity",
+        dest="batch_uniformity_enabled",
+        action="store_false",
+        help="Disable the AlphaEarth batch-uniformity loss term.",
+    )
+    parser.set_defaults(batch_uniformity_enabled=None)
 
     args = parser.parse_args(args)
 

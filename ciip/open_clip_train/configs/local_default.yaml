@@ -38,6 +38,8 @@ loss:
   gather_with_grad: False
   cache_labels: True
   contrastive_weight: 1.0
+  batch_uniformity_enabled: True
+  batch_uniformity_weight: 0.05
   vc_enabled: False
   vc_weight: 0.0
   vc_gamma: 1.0

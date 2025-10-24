@@ -9,7 +9,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from typing import Dict, Tuple
+from typing import Dict
 
 from torch.nn.parallel.distributed import DistributedDataParallel
 from torch.autograd.profiler import record_function
@@ -25,7 +25,6 @@ from open_clip import get_input_dtype
 from open_clip_train.distributed import is_master
 from open_clip_train.zero_shot import zero_shot_eval
 from open_clip_train.precision import get_autocast
-from loss import gather_features
 
 import random
 from torch.utils.data import Dataset, DataLoader
@@ -65,34 +64,16 @@ class AverageMeter(object):
         self.avg = self.sum / self.count
 
 
-def _compute_vc_geometry(
-        features: torch.Tensor,
-        gamma: float,
-        eps: float = 1e-12,
-) -> Tuple[float, float, float, float]:
-    """Compute diagnostic statistics for the variance-covariance regularizer."""
-    if features.ndim != 2 or features.shape[0] < 2:
-        nan = float("nan")
-        return nan, nan, nan, nan
+def _compute_vc_geometry(features: torch.Tensor, vc_gamma: float, eps: float = 1e-6):
+    std = torch.std(features, dim=0)
+    std_min = std.min()
+    std_diff = (vc_gamma - std).relu().mean()
 
-
-    autocast_off = (
-        torch.cuda.amp.autocast(enabled=False)
-        if features.is_cuda and torch.cuda.is_available()
-        else nullcontext()
-    )
-
-    with autocast_off:
-
-        feats = features.float()
-        variances = torch.var(feats, dim=0, unbiased=False)
-        std = torch.sqrt(variances + 1e-4)
-        std_min = torch.min(std)
-        gamma_tensor = torch.as_tensor(gamma, dtype=std.dtype, device=std.device)
-        std_diff = std_min - gamma_tensor
-
-        centered = feats - feats.mean(dim=0, keepdim=True)
-        cov = centered.t().matmul(centered) / (centered.shape[0] - 1)
+    cov_fro = torch.tensor(0.0, device=features.device)
+    participation = torch.tensor(0.0, device=features.device)
+    if features.shape[0] > 1:
+        centered = features - features.mean(dim=0)
+        cov = centered.T @ centered / (centered.shape[0] - 1)
         off_diag = cov - torch.diag(torch.diagonal(cov))
         cov_fro = torch.linalg.norm(off_diag, ord="fro")
 
@@ -340,8 +321,8 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 )
                 logging.info(f"Saved initial model weights to {args.io.checkpoint_path}.")
 
-            
-            
+
+
     model.train()
     losses_m = {}
     vc_metrics_m: Dict[str, AverageMeter] = {}
@@ -377,7 +358,6 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 losses["loss"] = total_loss
 
             _accumulate_vc_metrics(loss, model_out, vc_metrics_m, s1.shape[0])
-
             backward(total_loss, scaler)
         else:
             # First, cache the features without any gradient tracking.
@@ -523,7 +503,6 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
             log_data.update({name:val.val for name,val in losses_m.items()})
             if vc_metrics_m:
                 log_data.update({name: meter.val for name, meter in vc_metrics_m.items()})
-
             log_data = {"train/" + name: val for name, val in log_data.items()}
 
             if tb_writer is not None:
