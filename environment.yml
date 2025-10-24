@@ -153,4 +153,5 @@ dependencies:
       - snuggs==1.4.7
       - timm==1.0.8
       - tqdm==4.66.4
+      - zarr==2.16.1
 prefix: /home/juro4948/miniconda3/envs/ciip
