@@ -72,6 +72,7 @@ class CIIP(nn.Module):
                  s2_patch_size: int,
                  s2_bands: int,
                  framework: None,
+                 pre_projection_dim: Optional[int] = None,
                 #  # text
                 #  context_length: int,
                 #  vocab_size: int,
@@ -89,6 +90,9 @@ class CIIP(nn.Module):
             raise ValueError("Framework must be specified. Options: 'modified_resnet', 'transformer', 'resnet18', 'resnet50'.")
 
         # self.context_length = context_length
+
+        self.embed_dim = embed_dim
+        self.pre_projection_dim = pre_projection_dim or embed_dim
 
 
         # Create s1 encoder model
@@ -116,7 +120,7 @@ class CIIP(nn.Module):
         elif framework == "resnet18":
             self.encoder_s1 = resnet18(
                     in_chans=s1_bands,
-                    num_classes = embed_dim
+                    num_classes=self.pre_projection_dim
                     )
             if pretrain:
                 print("Warning: Pretrained weights are not supported for ResNet18 (S1). Ignoring pretrain flag for S1.")
@@ -124,20 +128,20 @@ class CIIP(nn.Module):
             if not pretrain:
                 self.encoder_s1 = resnet50(
                     in_chans=s1_bands,
-                    num_classes=embed_dim
+                    num_classes=self.pre_projection_dim
                 )
                 logging.info("Using ResNet50 for S1 without pretrained weights.")
             else:
                 if s1_weights == "MOCO":
                     self.encoder_s1 = resnet50(
                         in_chans=s1_bands,
-                        num_classes=embed_dim,
+                        num_classes=self.pre_projection_dim,
                         weights=ResNet50_Weights.SENTINEL1_ALL_MOCO
                     )
                 elif s1_weights == "DINO":
                     self.encoder_s1 = resnet50(
                         in_chans=s1_bands,
-                        num_classes=embed_dim,
+                        num_classes=self.pre_projection_dim,
                         weights=ResNet50_Weights.SENTINEL1_ALL_DINO
                     )
                 else:
@@ -176,7 +180,7 @@ class CIIP(nn.Module):
         elif framework == "resnet18":
             self.encoder_s2 = resnet18(
                 in_chans=s2_bands,
-                num_classes=embed_dim
+                num_classes=self.pre_projection_dim
             )
             if pretrain:
                 print("Warning: Pretrained weights are not supported for ResNet18 (S1). Ignoring pretrain flag for S1.")
@@ -184,20 +188,20 @@ class CIIP(nn.Module):
             if not pretrain:
                 self.encoder_s2 = resnet50(
                     in_chans=s2_bands,
-                    num_classes=embed_dim
+                    num_classes=self.pre_projection_dim
                 )
                 logging.info("Using ResNet50 for S2 without pretrained weights.")
             else:
                 if s2_weights == "MOCO":
                     self.encoder_s2 = resnet50(
                         in_chans=s2_bands,
-                        num_classes=embed_dim,
+                        num_classes=self.pre_projection_dim,
                         weights=ResNet50_Weights.SENTINEL2_ALL_MOCO
                     )
                 elif s2_weights == "DINO":
                     self.encoder_s2 = resnet50(
                         in_chans=s2_bands,
-                        num_classes=embed_dim,
+                        num_classes=self.pre_projection_dim,
                         weights=ResNet50_Weights.SENTINEL2_ALL_DINO
                     )
                 else:
@@ -209,6 +213,10 @@ class CIIP(nn.Module):
             # )
         else:
             print("Framework not supported for S1")
+
+        if framework in {"resnet18", "resnet50"} and self.pre_projection_dim != embed_dim:
+            self.encoder_s1.add_module("proj", nn.Linear(self.pre_projection_dim, embed_dim))
+            self.encoder_s2.add_module("proj", nn.Linear(self.pre_projection_dim, embed_dim))
 
         # # Load pretrained weights
         # if pretrain:
@@ -296,6 +304,13 @@ class CIIP(nn.Module):
                     if name.endswith("bn3.weight"):
                         nn.init.zeros_(param)
 
+        for encoder in (self.encoder_s1, self.encoder_s2):
+            proj_layer = getattr(encoder, "proj", None)
+            if isinstance(proj_layer, nn.Linear):
+                nn.init.normal_(proj_layer.weight, std=proj_layer.in_features ** -0.5)
+                if proj_layer.bias is not None:
+                    nn.init.zeros_(proj_layer.bias)
+
         # proj_std = (self.transformer.width ** -0.5) * ((2 * self.transformer.layers) ** -0.5)
         # attn_std = self.transformer.width ** -0.5
         # fc_std = (2 * self.transformer.width) ** -0.5
@@ -326,11 +341,17 @@ class CIIP(nn.Module):
 
   
     def encode_s1(self, s1, normalize):
-        features =  self.encoder_s1(s1.type(self.dtype_s1))
+        features = self.encoder_s1(s1.type(self.dtype_s1))
+        proj_layer = getattr(self.encoder_s1, "proj", None)
+        if isinstance(proj_layer, nn.Module):
+            features = proj_layer(features)
         return F.normalize(features, dim=-1) if normalize else features
-    
+
     def encode_s2(self, s2, normalize):
         features = self.encoder_s2(s2.type(self.dtype_s2))
+        proj_layer = getattr(self.encoder_s2, "proj", None)
+        if isinstance(proj_layer, nn.Module):
+            features = proj_layer(features)
         return F.normalize(features, dim=-1) if normalize else features
     
     # def encode_text(self, text):
@@ -487,7 +508,11 @@ def convert_weights(model: nn.Module):
         for name in ["text_projection", "proj"]:
             if hasattr(l, name):
                 attr = getattr(l, name)
-                if attr is not None:
+                if attr is None:
+                    continue
+                if isinstance(attr, nn.Module):
+                    attr.half()
+                elif torch.is_tensor(attr):
                     attr.data = attr.data.half()
 
     model.apply(_convert_weights_to_fp16)

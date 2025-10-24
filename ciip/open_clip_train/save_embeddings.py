@@ -69,20 +69,22 @@ def extract_embeddings(model, data, args, embedding_output_path):
 
 
 def main(args, start_epoch=0):
-    
 
-  
-    model = CIIP(embed_dim=args.embed_dim,
-    s1_resolution=args.s1_resolution,
-    s1_layers=args.s1_layers,
-    s1_width=args.width,
-    s1_patch_size=args.s1_patch_size, # used by transformer 
-    s1_bands=len(args.s1_bands),
-    s2_resolution=args.s2_resolution,
-    s2_layers=args.s2_layers, #Resnet-34
-    s2_width=args.width,
-    s2_patch_size=args.s2_patch_size, # used by transformer
-    s2_bands=len(args.s2_bands),
+
+
+    model = CIIP(
+        embed_dim=args.embed_dim,
+        pre_projection_dim=args.pre_projection_dim,
+        s1_resolution=args.s1_resolution,
+        s1_layers=args.s1_layers,
+        s1_width=args.width,
+        s1_patch_size=args.s1_patch_size,  # used by transformer
+        s1_bands=len(args.s1_bands),
+        s2_resolution=args.s2_resolution,
+        s2_layers=args.s2_layers,  # Resnet-34
+        s2_width=args.width,
+        s2_patch_size=args.s2_patch_size,  # used by transformer
+        s2_bands=len(args.s2_bands),
     )
 
     # load checkpoint
@@ -137,6 +139,7 @@ def main(args, start_epoch=0):
 def parse_config(config):
     config_dict = {
         'embed_dim': config.getint('model', 'embed_dim'),
+        'pre_projection_dim': config.getint('model', 'pre_projection_dim'),
         's1_resolution': config.getint('model', 's1_resolution'),
         's1_layers': eval(config.get('model', 's1_layers')),
         'width': config.getint('model', 'width'),
