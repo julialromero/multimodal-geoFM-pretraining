@@ -116,8 +116,8 @@ class CiipLoss(nn.Module):
             logits_per_s2 = logit_scale * s2_features @ s1_features.T
 
         if logit_bias is not None:
-            logits_per_image += logit_bias
-            logits_per_text += logit_bias
+            logits_per_s1 += logit_bias
+            logits_per_s2 += logit_bias
         
         return logits_per_s1, logits_per_s2
 

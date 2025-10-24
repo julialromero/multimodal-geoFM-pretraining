@@ -133,21 +133,21 @@ def create_loss(args):
             rank=_resolve_value("rank", args, datamodule_cfg, default=0),
             world_size=_resolve_value("world_size", args, datamodule_cfg, default=1),
         )
-    vc_covariance_weights = _resolve_value("vc_covariance_weights", loss_cfg, args, default=None)
-    if isinstance(vc_covariance_weights, (DictConfig, ListConfig)):
-        vc_covariance_weights = OmegaConf.to_object(vc_covariance_weights)
+    # vc_covariance_weights = _resolve_value("vc_covariance_weights", loss_cfg, args, default=None)
+    # if isinstance(vc_covariance_weights, (DictConfig, ListConfig)):
+    #     vc_covariance_weights = OmegaConf.to_object(vc_covariance_weights)
 
     return CiipLoss(
         local_loss=_resolve_value("local_loss", loss_cfg, args, default=False),
         gather_with_grad=_resolve_value("gather_with_grad", loss_cfg, args, default=False),
-        cache_labels=_resolve_value("cache_labels", loss_cfg, args, default=True),
+        # cache_labels=_resolve_value("cache_labels", loss_cfg, args, default=True),
         rank=_resolve_value("rank", loss_cfg, args, datamodule_cfg, default=0),
         world_size=_resolve_value("world_size", loss_cfg, args, datamodule_cfg, default=1),
         use_horovod=_resolve_value("horovod", loss_cfg, args, datamodule_cfg, default=False),
-        vc_reg_enabled=_resolve_value("vc_enabled", loss_cfg, args, default=False),
-        vc_weight=_resolve_value("vc_weight", loss_cfg, args, default=0.0),
-        vc_gamma=_resolve_value("vc_gamma", loss_cfg, args, default=1.0),
-        vc_covariance_weights=vc_covariance_weights,
+        # vc_reg_enabled=_resolve_value("vc_enabled", loss_cfg, args, default=False),
+        # vc_weight=_resolve_value("vc_weight", loss_cfg, args, default=0.0),
+        # vc_gamma=_resolve_value("vc_gamma", loss_cfg, args, default=1.0),
+        # vc_covariance_weights=vc_covariance_weights,
     )
 
 
