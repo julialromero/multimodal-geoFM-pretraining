@@ -130,12 +130,23 @@ class CiipLoss(nn.Module):
         cov = cov - torch.diag(torch.diagonal(cov))
         return cov.pow(2).sum() / cov.shape[0]
 
-    def _batch_uniformity_loss(self, features: torch.Tensor) -> torch.Tensor:
+    def _batch_uniformity_loss(
+        self,
+        features: torch.Tensor,
+        alpha: float = 2.0,
+        eps: float = 1e-12,
+    ) -> torch.Tensor:
         if features.ndim != 2 or features.shape[0] <= 1:
             return torch.zeros((), device=features.device, dtype=features.dtype)
-        rotated = torch.roll(features, shifts=1, dims=0)
-        dot_products = (features * rotated).sum(dim=1).abs()
-        return dot_products.sum()
+
+        z = F.normalize(features, dim=1)
+        sim = torch.matmul(z, z.t())
+        sq_dist = 2.0 * (1.0 - sim)
+
+        mask = ~torch.eye(z.size(0), dtype=torch.bool, device=z.device)
+        vals = torch.exp(-alpha * sq_dist[mask])
+        loss = torch.log(vals.mean() + eps)
+        return loss
 
     def get_ground_truth(self, device, num_logits) -> torch.Tensor:
         # calculated ground-truth and cache if enabled
