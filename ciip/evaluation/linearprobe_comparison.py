@@ -17,7 +17,8 @@ from tqdm import tqdm
 
 from torchgeo.datasets import EuroSAT
 from torchgeo.models import resnet50, ResNet50_Weights
-
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Tuple
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 
@@ -696,6 +697,68 @@ def generate_ciip_model_configs(model_root: str, base_name: str, epochs: list = 
             "drop_last_layer": drop_last_layer,
         }
     return configs
+
+
+def discover_checkpoints(
+    checkpoint_root: Path,
+    *,
+    pattern: Optional[str],
+    include_init: bool,
+    max_checkpoints: Optional[int],
+) -> List[Path]:
+    """Return checkpoint files sorted using natural ordering."""
+
+    checkpoint_root = Path(checkpoint_root)
+    if not checkpoint_root.exists():
+        raise FileNotFoundError(f"Checkpoint root '{checkpoint_root}' does not exist")
+
+    regex = re.compile(pattern) if pattern else None
+    candidates: List[Path] = []
+    for extension in ("*.pt", "*.pth"):
+        candidates.extend(checkpoint_root.glob(extension))
+
+    if regex is not None:
+        candidates = [path for path in candidates if regex.search(path.name)]
+    if not include_init:
+        candidates = [path for path in candidates if "epoch_init" not in path.name]
+
+
+    epochs = [int(p.stem.split('_')[1]) for p in candidates]
+    epochs = sorted(set(epochs))
+
+    # if min epoch is > 5
+    subtract = False
+    if min(epochs) > 5:
+        subtract = True
+        minimum = min(epochs)
+        # subtract min from all
+        epochs = [e - minimum for e in epochs]
+
+    keep = set()
+
+    # Always keep these if present
+    keep.update(e for e in epochs if e in {1, 2, 3, 5, 10, 15, 20})
+
+    if epochs:
+        max_ep = max(epochs)
+
+        # If max epoch < 50, keep it (even if not in the above list)
+        if max_ep < 50:
+            keep.add(max_ep)
+
+        # If max epoch is between 20 and 100 (inclusive),
+        # keep only every 10th epoch AFTER 20 (i.e., 30, 40, 50, ... up to max_ep)
+        if 20 < max_ep <= 100:
+            keep.update(e for e in epochs if e > 20 and e % 10 == 0 and e <= max_ep)
+
+        if 100 < max_ep:
+            keep.update(e for e in epochs if e > 20 and e % 10 == 0 and e <= 50)
+            keep.update(e for e in epochs if e > 50 and e % 20 == 0)
+
+
+    epochs = sorted(keep)
+
+    return epochs
 
 
 def parse_results_from_csv(csv_file, metric="accuracy"):
