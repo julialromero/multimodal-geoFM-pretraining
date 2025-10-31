@@ -107,6 +107,8 @@ class EpochEmbeddings:
     s2_normalized: Optional[torch.Tensor] = None
     s1_pre_projection: Optional[torch.Tensor] = None
     s2_pre_projection: Optional[torch.Tensor] = None
+    s1_layer_activations: Optional[Dict[str, torch.Tensor]] = None
+    s2_layer_activations: Optional[Dict[str, torch.Tensor]] = None
 
 
 @dataclass
@@ -193,6 +195,13 @@ class EpochMetrics:
     s2_pre_post_cca: Optional[np.ndarray] = None
     s1_pre_post_cca_topk_mean: Optional[float] = None
     s2_pre_post_cca_topk_mean: Optional[float] = None
+    s1_within_cka: Optional[np.ndarray] = None
+    s2_within_cka: Optional[np.ndarray] = None
+    cross_cka: Optional[np.ndarray] = None
+    s1_cka_layer_names: Optional[List[str]] = None
+    s2_cka_layer_names: Optional[List[str]] = None
+    cross_cka_s1_layers: Optional[List[str]] = None
+    cross_cka_s2_layers: Optional[List[str]] = None
 
     def to_summary_dict(self) -> Dict[str, object]:
         """Return a JSON-friendly summary of the metrics."""
@@ -215,6 +224,22 @@ class EpochMetrics:
                 return []
             top = array[: min(count, array.size)]
             return [float(v) for v in top]
+
+        def _matrix_stats(matrix: Optional[np.ndarray]) -> Dict[str, float]:
+            if matrix is None:
+                return {}
+            array = np.asarray(matrix, dtype=np.float64)
+            if array.size == 0:
+                return {}
+            mask = np.isfinite(array)
+            if not np.any(mask):
+                return {}
+            values = array[mask]
+            return {
+                "mean": float(np.mean(values)),
+                "min": float(np.min(values)),
+                "max": float(np.max(values)),
+            }
 
         vc_metrics = {
             "s1": {
@@ -333,6 +358,15 @@ class EpochMetrics:
             "cca": {
                 "rho_max": self.cca_rho_max,
                 "rho_topk_mean": self.cca_rho_topk_mean,
+            },
+            "cka": {
+                "s1_layers": self.s1_cka_layer_names,
+                "s2_layers": self.s2_cka_layer_names,
+                "cross_s1_layers": self.cross_cka_s1_layers,
+                "cross_s2_layers": self.cross_cka_s2_layers,
+                "s1_stats": _matrix_stats(self.s1_within_cka),
+                "s2_stats": _matrix_stats(self.s2_within_cka),
+                "cross_stats": _matrix_stats(self.cross_cka),
             },
             "head_metrics": head_metrics,
         }
@@ -477,10 +511,15 @@ def _unwrap_subset(dataset: torch.utils.data.Dataset) -> Tuple[torch.utils.data.
 
 def _register_pre_projection_hooks(
     model: torch.nn.Module,
-) -> Tuple[Dict[str, List[torch.Tensor]], List[torch.utils.hooks.RemovableHandle]]:
-    """Register hooks that capture inputs to the projection heads when available."""
+) -> Tuple[
+    Dict[str, List[torch.Tensor]],
+    Dict[str, Dict[str, List[torch.Tensor]]],
+    List[torch.utils.hooks.RemovableHandle],
+]:
+    """Register hooks that capture inputs to heads and intermediate activations."""
 
     caches: Dict[str, List[torch.Tensor]] = {"s1": [], "s2": []}
+    layer_caches: Dict[str, Dict[str, List[torch.Tensor]]] = {"s1": {}, "s2": {}}
     handles: List[torch.utils.hooks.RemovableHandle] = []
 
     def _make_hook(key: str):
@@ -496,6 +535,26 @@ def _register_pre_projection_hooks(
 
         return hook
 
+    def _make_layer_hook(key: str, layer_name: str):
+        cache = layer_caches[key].setdefault(layer_name, [])
+
+        def hook(module: torch.nn.Module, inputs: Tuple[torch.Tensor, ...], output):  # type: ignore[override]
+            if isinstance(output, (tuple, list)):
+                if not output:
+                    return
+                tensor = output[0]
+            else:
+                tensor = output
+            if not isinstance(tensor, torch.Tensor):
+                return
+            tensor = tensor.detach()
+            if tensor.dim() > 2:
+                tensor = F.adaptive_avg_pool2d(tensor, output_size=(1, 1))
+            tensor = tensor.flatten(start_dim=1).to(dtype=torch.float32, device="cpu")
+            cache.append(tensor)
+
+        return hook
+
     def _maybe_register(module: Optional[torch.nn.Module], key: str) -> None:
         if module is None:
             return
@@ -505,6 +564,20 @@ def _register_pre_projection_hooks(
             return
         handles.append(handle)
 
+    def _register_layers(encoder: Optional[torch.nn.Module], key: str) -> None:
+        if encoder is None:
+            return
+        layer_names = ["conv1", "layer1", "layer2", "layer3", "layer4", "avgpool", "fc"]
+        for name in layer_names:
+            module = getattr(encoder, name, None)
+            if not isinstance(module, torch.nn.Module):
+                continue
+            try:
+                handle = module.register_forward_hook(_make_layer_hook(key, name))
+            except Exception:
+                continue
+            handles.append(handle)
+
     encoder_s1 = getattr(model, "encoder_s1", None)
     if encoder_s1 is not None:
         for attr in ("proj", "projection_head", "fc"):
@@ -512,6 +585,7 @@ def _register_pre_projection_hooks(
             if isinstance(module, torch.nn.Module):
                 _maybe_register(module, "s1")
                 break
+        _register_layers(encoder_s1, "s1")
 
     encoder_s2 = getattr(model, "encoder_s2", None)
     if encoder_s2 is not None:
@@ -520,8 +594,9 @@ def _register_pre_projection_hooks(
             if isinstance(module, torch.nn.Module):
                 _maybe_register(module, "s2")
                 break
+        _register_layers(encoder_s2, "s2")
 
-    return caches, handles
+    return caches, layer_caches, handles
 
 
 def extract_embeddings_for_dataset(
@@ -538,6 +613,8 @@ def extract_embeddings_for_dataset(
     torch.Tensor,
     Optional[torch.Tensor],
     Optional[torch.Tensor],
+    Optional[Dict[str, torch.Tensor]],
+    Optional[Dict[str, torch.Tensor]],
     List[str],
 ]:
     """Run the encoders over ``dataset`` and return raw & normalized embeddings."""
@@ -547,7 +624,7 @@ def extract_embeddings_for_dataset(
     s2_vectors: List[torch.Tensor] = []
     s1_normalized_vectors: List[torch.Tensor] = []
     s2_normalized_vectors: List[torch.Tensor] = []
-    pre_projection_cache, handles = _register_pre_projection_hooks(model)
+    pre_projection_cache, layer_cache, handles = _register_pre_projection_hooks(model)
     uids: List[str] = []
 
     try:
@@ -640,13 +717,47 @@ def extract_embeddings_for_dataset(
         except Exception:
             return None
 
+    def _stack_layer_features(key: str, expected: int) -> Optional[Dict[str, torch.Tensor]]:
+        layer_caches = layer_cache.get(key, {})
+        if expected <= 0 or not layer_caches:
+            return None
+        stacked_layers: Dict[str, torch.Tensor] = {}
+        for name, tensors in layer_caches.items():
+            if not tensors:
+                continue
+            selected = tensors[-expected:]
+            processed: List[torch.Tensor] = []
+            for tensor in selected:
+                if tensor.dim() > 1 and tensor.shape[0] == 1:
+                    processed.append(tensor.squeeze(0))
+                else:
+                    processed.append(tensor.clone())
+            try:
+                stacked = torch.stack(processed, dim=0)
+            except Exception:
+                continue
+            stacked_layers[name] = stacked.to(dtype=torch.float32)
+        return stacked_layers or None
+
     s1_stack = torch.stack(s1_vectors, dim=0)
     s2_stack = torch.stack(s2_vectors, dim=0)
     s1_norm_stack = torch.stack(s1_normalized_vectors, dim=0)
     s2_norm_stack = torch.stack(s2_normalized_vectors, dim=0)
     s1_pre_stack = _stack_pre_features("s1", len(s1_vectors))
     s2_pre_stack = _stack_pre_features("s2", len(s2_vectors))
-    return s1_stack, s2_stack, s1_norm_stack, s2_norm_stack, s1_pre_stack, s2_pre_stack, uids
+    s1_layer_stack = _stack_layer_features("s1", len(s1_vectors))
+    s2_layer_stack = _stack_layer_features("s2", len(s2_vectors))
+    return (
+        s1_stack,
+        s2_stack,
+        s1_norm_stack,
+        s2_norm_stack,
+        s1_pre_stack,
+        s2_pre_stack,
+        s1_layer_stack,
+        s2_layer_stack,
+        uids,
+    )
 
 
 def discover_checkpoints(
@@ -795,6 +906,8 @@ def collect_epoch_embeddings(
                 s2_normalized,
                 s1_pre,
                 s2_pre,
+                s1_layers,
+                s2_layers,
                 uids,
             ) = extract_embeddings_for_dataset(
                 model,
@@ -819,6 +932,8 @@ def collect_epoch_embeddings(
                 s2_normalized,
                 s1_pre,
                 s2_pre,
+                s1_layers,
+                s2_layers,
             )
         )
 
@@ -1096,6 +1211,99 @@ def compute_cca_spectrum(
 
     singular_values = torch.clamp(singular_values, min=0.0, max=1.0)
     return singular_values.cpu().numpy()
+
+
+def _prepare_cka_tensor(tensor: torch.Tensor, take: Optional[int] = None) -> Optional[torch.Tensor]:
+    if tensor.dim() != 2:
+        return None
+    count = tensor.shape[0]
+    if count < 2:
+        return None
+    if take is not None and take > 0:
+        count = min(count, take)
+        tensor = tensor[:count]
+    return tensor.to(dtype=torch.float64)
+
+
+def compute_linear_cka(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    eps: float = 1e-12,
+) -> Optional[float]:
+    count = min(x.shape[0], y.shape[0])
+    if count < 2:
+        return None
+    x_c = x[:count] - x[:count].mean(dim=0, keepdim=True)
+    y_c = y[:count] - y[:count].mean(dim=0, keepdim=True)
+    cov_xy = x_c.t().matmul(y_c)
+    cov_xx = x_c.t().matmul(x_c)
+    cov_yy = y_c.t().matmul(y_c)
+    numerator = torch.linalg.norm(cov_xy, ord="fro") ** 2
+    denom = torch.linalg.norm(cov_xx, ord="fro") * torch.linalg.norm(cov_yy, ord="fro")
+    denom_value = float(denom.item()) if isinstance(denom, torch.Tensor) else float(denom)
+    if denom_value <= eps:
+        return None
+    value = float((numerator / (denom + eps)).item())
+    return value
+
+
+def compute_within_encoder_cka(
+    layer_features: Dict[str, torch.Tensor],
+) -> Tuple[List[str], Optional[np.ndarray]]:
+    names = sorted(layer_features.keys())
+    prepared: Dict[str, torch.Tensor] = {}
+    for name in names:
+        tensor = _prepare_cka_tensor(layer_features[name])
+        if tensor is not None:
+            prepared[name] = tensor
+    valid_names = [name for name in names if name in prepared]
+    size = len(valid_names)
+    if size == 0:
+        return [], None
+    matrix = np.full((size, size), np.nan, dtype=np.float32)
+    for i, name_i in enumerate(valid_names):
+        x = prepared[name_i]
+        matrix[i, i] = 1.0
+        for j in range(i + 1, size):
+            y = prepared[valid_names[j]]
+            value = compute_linear_cka(x, y)
+            if value is None:
+                continue
+            matrix[i, j] = matrix[j, i] = np.clip(value, 0.0, 1.0)
+    return valid_names, matrix
+
+
+def compute_cross_encoder_cka(
+    s1_layers: Dict[str, torch.Tensor],
+    s2_layers: Dict[str, torch.Tensor],
+) -> Tuple[List[str], List[str], Optional[np.ndarray]]:
+    names_s1 = sorted(s1_layers.keys())
+    names_s2 = sorted(s2_layers.keys())
+    prepared_s1: Dict[str, torch.Tensor] = {}
+    prepared_s2: Dict[str, torch.Tensor] = {}
+    for name in names_s1:
+        tensor = _prepare_cka_tensor(s1_layers[name])
+        if tensor is not None:
+            prepared_s1[name] = tensor
+    for name in names_s2:
+        tensor = _prepare_cka_tensor(s2_layers[name])
+        if tensor is not None:
+            prepared_s2[name] = tensor
+    valid_s1 = [name for name in names_s1 if name in prepared_s1]
+    valid_s2 = [name for name in names_s2 if name in prepared_s2]
+    if not valid_s1 or not valid_s2:
+        return valid_s1, valid_s2, None
+    matrix = np.full((len(valid_s1), len(valid_s2)), np.nan, dtype=np.float32)
+    for i, name_i in enumerate(valid_s1):
+        x = prepared_s1[name_i]
+        for j, name_j in enumerate(valid_s2):
+            y = prepared_s2[name_j]
+            value = compute_linear_cka(x, y)
+            if value is None:
+                continue
+            matrix[i, j] = np.clip(value, 0.0, 1.0)
+    return valid_s1, valid_s2, matrix
+
 
 def compute_condition_number(spectrum: np.ndarray, eps: float = 1e-12) -> float:
     if spectrum.size == 0:
@@ -1383,6 +1591,26 @@ def compute_epoch_metrics(
             metrics.s2_singular_values, metrics.s2_pre_singular_values
         )
 
+        if epoch.s1_layer_activations is not None:
+            s1_layer_names, s1_cka = compute_within_encoder_cka(epoch.s1_layer_activations)
+            if s1_layer_names:
+                metrics.s1_cka_layer_names = s1_layer_names
+            metrics.s1_within_cka = s1_cka
+        if epoch.s2_layer_activations is not None:
+            s2_layer_names, s2_cka = compute_within_encoder_cka(epoch.s2_layer_activations)
+            if s2_layer_names:
+                metrics.s2_cka_layer_names = s2_layer_names
+            metrics.s2_within_cka = s2_cka
+        if epoch.s1_layer_activations is not None and epoch.s2_layer_activations is not None:
+            cross_s1, cross_s2, cross_cka = compute_cross_encoder_cka(
+                epoch.s1_layer_activations, epoch.s2_layer_activations
+            )
+            if cross_s1:
+                metrics.cross_cka_s1_layers = cross_s1
+            if cross_s2:
+                metrics.cross_cka_s2_layers = cross_s2
+            metrics.cross_cka = cross_cka
+
         cca_spectrum = compute_cca_spectrum(epoch.s1, epoch.s2)
         metrics.cca_spectrum = cca_spectrum
         if cca_spectrum is not None and cca_spectrum.size:
@@ -1425,6 +1653,110 @@ def _mark_axis_no_data(ax, title: str, message: str = "No data available") -> No
     ax.text(0.5, 0.5, message, ha="center", va="center", transform=ax.transAxes, color="gray")
     ax.set_xticks([])
     ax.set_yticks([])
+
+
+def _plot_cka_heatmap(
+    ax,
+    matrix: Optional[np.ndarray],
+    x_labels: Sequence[str],
+    y_labels: Sequence[str],
+    *,
+    title: str,
+    xlabel: str,
+    ylabel: str,
+):
+    if matrix is None or getattr(matrix, "size", 0) == 0:
+        _mark_axis_no_data(ax, title, "CKA unavailable")
+        return None
+    data = np.asarray(matrix, dtype=np.float32)
+    if data.size == 0 or np.all(np.isnan(data)):
+        _mark_axis_no_data(ax, title, "CKA unavailable")
+        return None
+    im = ax.imshow(data, vmin=0.0, vmax=1.0, aspect="auto", cmap="viridis")
+    ax.set_title(title)
+    if x_labels:
+        ax.set_xticks(range(len(x_labels)))
+        ax.set_xticklabels(x_labels, rotation=45, ha="right")
+    else:
+        ax.set_xticks([])
+    if y_labels:
+        ax.set_yticks(range(len(y_labels)))
+        ax.set_yticklabels(y_labels)
+    else:
+        ax.set_yticks([])
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.grid(False)
+    return im
+
+
+def plot_layerwise_cka(metrics: Sequence[EpochMetrics], output_dir: Path) -> None:
+    cka_dir = output_dir / "cka"
+    cka_dir.mkdir(parents=True, exist_ok=True)
+
+    for metric in metrics:
+        has_s1 = metric.s1_within_cka is not None and getattr(metric.s1_within_cka, "size", 0)
+        has_s2 = metric.s2_within_cka is not None and getattr(metric.s2_within_cka, "size", 0)
+        has_cross = metric.cross_cka is not None and getattr(metric.cross_cka, "size", 0)
+        if not (has_s1 or has_s2 or has_cross):
+            continue
+
+        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+        im_handles: List = []
+
+        im = _plot_cka_heatmap(
+            axes[0, 0],
+            metric.s1_within_cka,
+            metric.s1_cka_layer_names or [],
+            metric.s1_cka_layer_names or [],
+            title="S1 within-encoder",
+            xlabel="Layer",
+            ylabel="Layer",
+        )
+        if im is not None:
+            im_handles.append(im)
+
+        im = _plot_cka_heatmap(
+            axes[0, 1],
+            metric.s2_within_cka,
+            metric.s2_cka_layer_names or [],
+            metric.s2_cka_layer_names or [],
+            title="S2 within-encoder",
+            xlabel="Layer",
+            ylabel="Layer",
+        )
+        if im is not None:
+            im_handles.append(im)
+
+        im = _plot_cka_heatmap(
+            axes[1, 0],
+            metric.cross_cka,
+            metric.cross_cka_s2_layers or [],
+            metric.cross_cka_s1_layers or [],
+            title="Cross-encoder",
+            xlabel="S2 layer",
+            ylabel="S1 layer",
+        )
+        if im is not None:
+            im_handles.append(im)
+
+        axes[1, 1].axis("off")
+        axes[1, 1].text(0.5, 0.5, metric.label, ha="center", va="center", transform=axes[1, 1].transAxes)
+
+        if im_handles:
+            fig.colorbar(
+                im_handles[0],
+                ax=[axes[0, 0], axes[0, 1], axes[1, 0]],
+                shrink=0.8,
+                label="Linear CKA",
+            )
+
+        fig.suptitle(f"Layerwise CKA — {metric.label}")
+        fig.tight_layout(rect=[0, 0, 1, 0.95])
+        safe_label = _sanitize_label(metric.label)
+        output_path = cka_dir / f"epoch_{metric.epoch_index:04d}_{safe_label}_cka.png"
+        fig.savefig(output_path, dpi=200)
+        plt.close(fig)
 
 
 def plot_cosine_summary(metrics: Sequence[EpochMetrics], output_dir: Path) -> None:
@@ -1985,56 +2317,38 @@ def plot_epoch_dashboards(
 
 
 
-def _plot_epoch_svd_panel(
+def _plot_single_singular_series(
     ax,
+    values: Optional[np.ndarray],
     *,
-    post: Optional[np.ndarray],
-    pre: Optional[np.ndarray],
     top_k: int,
     title: str,
-    post_color: str,
-    pre_color: str,
+    color: str,
+    marker: str = "o",
 ) -> None:
-    if post is None and pre is None:
+    """Plot a single spectrum of singular values on ``ax``."""
+
+    if values is None or getattr(values, "size", 0) == 0:
         _mark_axis_no_data(ax, title)
         return
 
-    lengths = [len(arr) for arr in (post, pre) if arr is not None]
-    if not lengths:
-        _mark_axis_no_data(ax, title)
-        return
-
-    max_len = max(lengths)
-    take = max_len if top_k <= 0 else min(top_k, max_len)
+    length = int(values.size)
+    take = length if top_k <= 0 else min(top_k, length)
     dims = np.arange(1, take + 1)
 
-    if post is not None and post.size:
-        ax.plot(
-            dims,
-            post[:take],
-            marker="o",
-            linestyle="-",
-            color=post_color,
-            label="Post projection",
-        )
-    if pre is not None and pre.size:
-        ax.plot(
-            dims,
-            pre[:take],
-            marker="s",
-            linestyle="--",
-            color=pre_color,
-            label="Pre projection",
-        )
+    ax.plot(
+        dims,
+        values[:take],
+        marker=marker,
+        linestyle="-",
+        color=color,
+    )
 
     ax.set_title(title)
     ax.set_xlabel("Component")
     ax.set_ylabel("Singular value")
     ax.set_yscale("log")
     ax.grid(True, which="both", alpha=0.3)
-    handles, labels = ax.get_legend_handles_labels()
-    if handles:
-        ax.legend(handles, labels)
 
 
 def _prepare_spectrum(values: Optional[np.ndarray]) -> Optional[np.ndarray]:
@@ -2184,33 +2498,56 @@ def plot_epoch_singular_values(
     *,
     top_k: int,
 ) -> None:
-    '''Write per-epoch singular value comparisons for pre/post features.'''
+    """Write per-epoch singular value comparisons for pre/post features."""
 
     singular_dir = output_dir / "singular_values"
     singular_dir.mkdir(parents=True, exist_ok=True)
 
     for metric in metrics:
-        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        fig, axes = plt.subplots(2, 2, figsize=(16, 10))
         fig.suptitle(f"Singular values — {metric.label}")
 
-        _plot_epoch_svd_panel(
-            axes[0],
-            post=metric.s1_singular_values,
-            pre=metric.s1_pre_singular_values,
+        ax_s1_pre = axes[0, 0]
+        ax_s1_post_norm = axes[0, 1]
+        ax_s2_pre = axes[1, 0]
+        ax_s2_post_norm = axes[1, 1]
+
+        _plot_single_singular_series(
+            ax_s1_pre,
+            metric.s1_pre_singular_values,
             top_k=top_k,
-            title="S1 singular values",
-            post_color="#2ca02c",
-            pre_color="#98df8a",
+            title="S1 pre-head (unnormalized)",
+            color="#98df8a",
+            marker="s",
         )
 
-        _plot_epoch_svd_panel(
-            axes[1],
-            post=metric.s2_singular_values,
-            pre=metric.s2_pre_singular_values,
+        _plot_single_singular_series(
+            ax_s1_post_norm,
+            metric.s1_normalized_singular_values
+            if metric.s1_normalized_singular_values is not None
+            else metric.s1_singular_values,
             top_k=top_k,
-            title="S2 singular values",
-            post_color="#17becf",
-            pre_color="#9edae5",
+            title="S1 post-head (normalized)",
+            color="#2ca02c",
+        )
+
+        _plot_single_singular_series(
+            ax_s2_pre,
+            metric.s2_pre_singular_values,
+            top_k=top_k,
+            title="S2 pre-head (unnormalized)",
+            color="#9edae5",
+            marker="s",
+        )
+
+        _plot_single_singular_series(
+            ax_s2_post_norm,
+            metric.s2_normalized_singular_values
+            if metric.s2_normalized_singular_values is not None
+            else metric.s2_singular_values,
+            top_k=top_k,
+            title="S2 post-head (normalized)",
+            color="#17becf",
         )
 
         fig.tight_layout(rect=[0, 0, 1, 0.94])
@@ -3004,6 +3341,7 @@ def main() -> None:
         output_dir,
         top_k=args.spectrum_top_k,
     )
+    plot_layerwise_cka(metrics, output_dir)
 
     for modality in ("s1", "s2"):
         grid_path = plot_svd_epoch_grid(
