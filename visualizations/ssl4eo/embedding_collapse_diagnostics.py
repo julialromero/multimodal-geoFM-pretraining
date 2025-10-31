@@ -1230,6 +1230,13 @@ def compute_linear_cka(
     y: torch.Tensor,
     eps: float = 1e-12,
 ) -> Optional[float]:
+    """Return the linear CKA from Kornblith et al. (2019).
+
+    The implementation mirrors Equation (3) of *Similarity of Neural Network
+    Representations Revisited* (https://arxiv.org/abs/1905.00414) by centering
+    the sample matrices and computing ``||XᵀY||_F² / (||XᵀX||_F · ||YᵀY||_F)``.
+    A small ``eps`` is added to the denominator for numerical stability.
+    """
     count = min(x.shape[0], y.shape[0])
     if count < 2:
         return None
