@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -80,6 +81,11 @@ class CiipLoss(nn.Module):
             vc_covariance_weights=None,
             batch_uniformity_enabled=True,
             batch_uniformity_weight=0.05,
+            hyperbolic=True,
+            hyperbolic_normalize=True,
+            hyperbolic_margin_weight=1.0,
+            hyperbolic_curvature_init=1.0,
+            hyperbolic_eps=1e-5,
     ):
         super().__init__()
         self.local_loss = local_loss
@@ -110,6 +116,15 @@ class CiipLoss(nn.Module):
 
         self.batch_uniformity_enabled = bool(batch_uniformity_enabled)
         self.batch_uniformity_weight = float(batch_uniformity_weight)
+
+        self.use_hyperbolic = bool(hyperbolic)
+        self.hyperbolic_normalize = bool(hyperbolic_normalize)
+        self.hyperbolic_margin_weight = float(hyperbolic_margin_weight)
+        self.hyperbolic_eps = float(hyperbolic_eps)
+
+        curvature_init = max(float(hyperbolic_curvature_init), self.hyperbolic_eps)
+        curvature_alpha = math.log(math.expm1(curvature_init))
+        self.curvature_alpha = nn.Parameter(torch.tensor(curvature_alpha))
 
         # cache state
         self.prev_num_logits = 0
@@ -169,6 +184,16 @@ class CiipLoss(nn.Module):
             logit_bias=None,
             return_gathered=False,
     ):
+        if self.use_hyperbolic:
+            logits_outputs = self._get_hyperbolic_logits(
+                s1_features,
+                s2_features,
+                logit_scale,
+                logit_bias=logit_bias,
+                return_gathered=return_gathered,
+            )
+            return logits_outputs
+
         if self.world_size > 1:
             all_s1_features, all_s2_features = gather_features(
                 s1_features, s2_features,
@@ -187,8 +212,8 @@ class CiipLoss(nn.Module):
             all_s2_features = s2_features
 
         if logit_bias is not None:
-            logits_per_image += logit_bias
-            logits_per_text += logit_bias
+            logits_per_s1 = logits_per_s1 + logit_bias
+            logits_per_s2 = logits_per_s2 + logit_bias
 
         if return_gathered:
             return logits_per_s1, logits_per_s2, all_s1_features, all_s2_features
@@ -217,12 +242,26 @@ class CiipLoss(nn.Module):
             logit_bias=logit_bias,
             return_gathered=gather_for_vc,
         )
-        if gather_for_vc:
-            logits_per_s1, logits_per_s2, gathered_s1_features, gathered_s2_features = logits_outputs
+        if self.use_hyperbolic:
+            if gather_for_vc:
+                (
+                    logits_per_s1,
+                    logits_per_s2,
+                    hyperbolic_context,
+                    gathered_s1_features,
+                    gathered_s2_features,
+                ) = logits_outputs
+            else:
+                logits_per_s1, logits_per_s2, hyperbolic_context = logits_outputs
+                gathered_s1_features = None
+                gathered_s2_features = None
         else:
-            logits_per_s1, logits_per_s2 = logits_outputs
-            gathered_s1_features = None
-            gathered_s2_features = None
+            if gather_for_vc:
+                logits_per_s1, logits_per_s2, gathered_s1_features, gathered_s2_features = logits_outputs
+            else:
+                logits_per_s1, logits_per_s2 = logits_outputs
+                gathered_s1_features = None
+                gathered_s2_features = None
 
         labels = self.get_ground_truth(device, logits_per_s1.shape[0])
 
@@ -236,6 +275,12 @@ class CiipLoss(nn.Module):
         losses = {}
         if output_dict or self.contrastive_weight != 0:
             losses["contrastive_loss"] = weighted_contrastive_loss
+
+        if self.use_hyperbolic and self.hyperbolic_margin_weight != 0:
+            hinge_s1 = F.relu(hyperbolic_context["positive_angles"] - hyperbolic_context["aperture_s1"])
+            hinge_s2 = F.relu(hyperbolic_context["positive_angles"] - hyperbolic_context["aperture_s2"])
+            hyperbolic_margin = 0.5 * (hinge_s1.mean() + hinge_s2.mean())
+            losses["hyperbolic_margin_loss"] = self.hyperbolic_margin_weight * hyperbolic_margin
 
         if need_vc:
             s1_vc_local = s1_features_vc if s1_features_vc is not None else s1_features
@@ -281,6 +326,153 @@ class CiipLoss(nn.Module):
 
         total_loss = sum(losses.values())
         return losses if output_dict else total_loss
+
+    def _get_curvature(self, dtype=None, device=None):
+        curvature = F.softplus(self.curvature_alpha) + self.hyperbolic_eps
+        if dtype is not None or device is not None:
+            curvature = curvature.to(dtype=dtype or curvature.dtype, device=device or curvature.device)
+        return curvature
+
+    def _maybe_normalize(self, features: torch.Tensor) -> torch.Tensor:
+        if not self.hyperbolic_normalize:
+            return features
+        return F.normalize(features, dim=-1)
+
+    def _lift_to_hyperboloid(self, features: torch.Tensor, curvature: torch.Tensor) -> torch.Tensor:
+        features = self._maybe_normalize(features)
+        space = features.to(torch.float32)
+        curvature = curvature.to(space.dtype)
+        norm_sq = torch.sum(space * space, dim=-1, keepdim=True)
+        time = torch.sqrt(torch.clamp(1.0 / curvature + norm_sq, min=self.hyperbolic_eps))
+        time = time.to(space.dtype)
+        return torch.cat([time, space], dim=-1)
+
+    def _lorentz_inner(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        return -x[..., 0] * y[..., 0] + torch.sum(x[..., 1:] * y[..., 1:], dim=-1)
+
+    def _hyperbolic_directions(
+        self,
+        points: torch.Tensor,
+        curvature: torch.Tensor,
+    ):
+        sqrt_c = torch.sqrt(curvature)
+        scaled_points = points * sqrt_c
+        origin = torch.zeros_like(points)
+        origin[..., 0] = 1.0
+
+        lorentz_inner = self._lorentz_inner(scaled_points, origin)
+        inner_pos = torch.clamp(-lorentz_inner, min=1.0 + self.hyperbolic_eps)
+
+        sqrt_term = torch.sqrt(torch.clamp(inner_pos * inner_pos - 1.0, min=self.hyperbolic_eps))
+        coef = torch.acosh(inner_pos) / sqrt_term
+
+        tangent = coef.unsqueeze(-1) * (scaled_points + lorentz_inner.unsqueeze(-1) * origin)
+        spatial = tangent[..., 1:]
+        spatial_norm = spatial.norm(dim=-1, keepdim=True).clamp_min(self.hyperbolic_eps)
+        directions = spatial / spatial_norm
+        distances = torch.acosh(inner_pos) / sqrt_c
+        return directions, distances.squeeze(-1), inner_pos
+
+    def _angle_matrix_from_dirs(self, dirs_x: torch.Tensor, dirs_y: torch.Tensor) -> torch.Tensor:
+        cos = dirs_x @ dirs_y.transpose(-1, -2)
+        cos = torch.clamp(cos, min=-1.0 + self.hyperbolic_eps, max=1.0 - self.hyperbolic_eps)
+        return torch.acos(cos)
+
+    def _aperture_from_inner(self, inner_pos: torch.Tensor) -> torch.Tensor:
+        inv_cosh = torch.clamp(1.0 / inner_pos, min=-1.0 + self.hyperbolic_eps, max=1.0 - self.hyperbolic_eps)
+        return torch.asin(inv_cosh)
+
+    def _hyperbolic_logits_from_dirs(
+        self,
+        dirs_x: torch.Tensor,
+        dirs_y: torch.Tensor,
+        logit_scale: torch.Tensor,
+    ):
+        angles = self._angle_matrix_from_dirs(dirs_x, dirs_y)
+        logits = logit_scale * (math.pi - angles)
+        return logits, angles
+
+    def _get_hyperbolic_logits(
+        self,
+        s1_features: torch.Tensor,
+        s2_features: torch.Tensor,
+        logit_scale: torch.Tensor,
+        logit_bias=None,
+        return_gathered=False,
+    ):
+        curvature = self._get_curvature(dtype=s1_features.dtype, device=s1_features.device)
+        s1_points = self._lift_to_hyperboloid(s1_features, curvature)
+        s2_points = self._lift_to_hyperboloid(s2_features, curvature)
+
+        s1_dirs_local, _, s1_inner_local = self._hyperbolic_directions(s1_points, curvature)
+        s2_dirs_local, _, s2_inner_local = self._hyperbolic_directions(s2_points, curvature)
+
+        local_angles = self._angle_matrix_from_dirs(s1_dirs_local, s2_dirs_local)
+        positive_angles = torch.diagonal(local_angles)
+
+        aperture_s1 = self._aperture_from_inner(s1_inner_local)
+        aperture_s2 = self._aperture_from_inner(s2_inner_local)
+
+        hyperbolic_context = {
+            "positive_angles": positive_angles,
+            "aperture_s1": aperture_s1,
+            "aperture_s2": aperture_s2,
+        }
+
+        if self.world_size > 1:
+            all_s1_points, all_s2_points = gather_features(
+                s1_points,
+                s2_points,
+                self.local_loss,
+                self.gather_with_grad,
+                self.rank,
+                self.world_size,
+                self.use_horovod,
+            )
+        else:
+            all_s1_points = s1_points
+            all_s2_points = s2_points
+
+        if self.local_loss:
+            dirs_s2_all, _, _ = self._hyperbolic_directions(all_s2_points, curvature)
+            logits_per_s1, _ = self._hyperbolic_logits_from_dirs(s1_dirs_local, dirs_s2_all, logit_scale)
+
+            dirs_s1_all, _, _ = self._hyperbolic_directions(all_s1_points, curvature)
+            logits_per_s2, _ = self._hyperbolic_logits_from_dirs(s2_dirs_local, dirs_s1_all, logit_scale)
+        else:
+            dirs_s1_all, _, _ = self._hyperbolic_directions(all_s1_points, curvature)
+            dirs_s2_all, _, _ = self._hyperbolic_directions(all_s2_points, curvature)
+            logits_matrix, _ = self._hyperbolic_logits_from_dirs(dirs_s1_all, dirs_s2_all, logit_scale)
+            logits_per_s1 = logits_matrix
+            logits_per_s2 = logits_matrix.transpose(-1, -2)
+
+        if logit_bias is not None:
+            logits_per_s1 = logits_per_s1 + logit_bias
+            logits_per_s2 = logits_per_s2 + logit_bias
+
+        if return_gathered:
+            if self.world_size > 1:
+                gathered_s1_features, gathered_s2_features = gather_features(
+                    s1_features,
+                    s2_features,
+                    self.local_loss,
+                    True,
+                    self.rank,
+                    self.world_size,
+                    self.use_horovod,
+                )
+            else:
+                gathered_s1_features = s1_features
+                gathered_s2_features = s2_features
+            return (
+                logits_per_s1,
+                logits_per_s2,
+                hyperbolic_context,
+                gathered_s1_features,
+                gathered_s2_features,
+            )
+
+        return logits_per_s1, logits_per_s2, hyperbolic_context
 
 
 # class CoCaLoss(ClipLoss):
