@@ -56,6 +56,13 @@ loss:
   vc_weight: 0.0
   vc_gamma: 1.0
   vc_covariance_weights: [1.0, 1.0]
+  hyperbolic: True
+  hyperbolic_normalize: False
+  hyperbolic_margin_weight: 1.0
+  hyperbolic_curvature_init: 1.0e-2
+  hyperbolic_feature_scale_init: 0.05
+  hyperbolic_aperture_k_init: 0.9
+  hyperbolic_eps: 1.0e-5
 
 datamodule:
   batch_size: 128 # batch size per GPU

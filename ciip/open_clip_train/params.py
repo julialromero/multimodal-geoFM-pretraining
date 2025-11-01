@@ -459,6 +459,62 @@ def parse_args(args):
         help="Weight applied to the InfoNCE contrastive loss term.",
     )
     parser.add_argument(
+        "--hyperbolic-loss",
+        dest="hyperbolic",
+        action="store_true",
+        help="Enable the hyperbolic angle-based contrastive loss term.",
+    )
+    parser.add_argument(
+        "--no-hyperbolic-loss",
+        dest="hyperbolic",
+        action="store_false",
+        help="Disable the hyperbolic angle-based contrastive loss term.",
+    )
+    parser.set_defaults(hyperbolic=None)
+    parser.add_argument(
+        "--hyperbolic-normalize",
+        dest="hyperbolic_normalize",
+        action="store_true",
+        help="Normalize features before lifting them to the hyperboloid.",
+    )
+    parser.add_argument(
+        "--no-hyperbolic-normalize",
+        dest="hyperbolic_normalize",
+        action="store_false",
+        help="Skip feature normalization before hyperbolic lifting.",
+    )
+    parser.set_defaults(hyperbolic_normalize=None)
+    parser.add_argument(
+        "--hyperbolic-margin-weight",
+        type=float,
+        default=None,
+        help="Weight applied to the hyperbolic angular margin penalty.",
+    )
+    parser.add_argument(
+        "--hyperbolic-curvature-init",
+        type=float,
+        default=None,
+        help="Initial curvature value for the hyperbolic contrastive loss (must be positive).",
+    )
+    parser.add_argument(
+        "--hyperbolic-feature-scale-init",
+        type=float,
+        default=None,
+        help="Initial scale applied to Euclidean features before hyperbolic lifting (must be positive).",
+    )
+    parser.add_argument(
+        "--hyperbolic-aperture-k-init",
+        type=float,
+        default=None,
+        help="Initial aperture scaling factor K (0 < K < 1) for the hyperbolic angular margin.",
+    )
+    parser.add_argument(
+        "--hyperbolic-eps",
+        type=float,
+        default=None,
+        help="Numerical epsilon used for hyperbolic computations.",
+    )
+    parser.add_argument(
         "--vc-regularization",
         dest="vc_enabled",
         action="store_true",
