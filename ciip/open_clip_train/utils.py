@@ -154,15 +154,9 @@ def create_loss(args):
             "batch_uniformity_weight", loss_cfg, args, default=0.05
         ),
         hyperbolic=_resolve_value("hyperbolic", loss_cfg, args, default=True),
-        hyperbolic_normalize=_resolve_value("hyperbolic_normalize", loss_cfg, args, default=False),
+        hyperbolic_normalize=_resolve_value("hyperbolic_normalize", loss_cfg, args, default=True),
         hyperbolic_margin_weight=_resolve_value("hyperbolic_margin_weight", loss_cfg, args, default=1.0),
-        hyperbolic_curvature_init=_resolve_value("hyperbolic_curvature_init", loss_cfg, args, default=1e-2),
-        hyperbolic_feature_scale_init=_resolve_value(
-            "hyperbolic_feature_scale_init", loss_cfg, args, default=0.05
-        ),
-        hyperbolic_aperture_k_init=_resolve_value(
-            "hyperbolic_aperture_k_init", loss_cfg, args, default=0.9
-        ),
+        hyperbolic_curvature_init=_resolve_value("hyperbolic_curvature_init", loss_cfg, args, default=1.0),
         hyperbolic_eps=_resolve_value("hyperbolic_eps", loss_cfg, args, default=1e-5),
     )
 

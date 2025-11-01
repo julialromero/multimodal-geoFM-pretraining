@@ -82,11 +82,9 @@ class CiipLoss(nn.Module):
             batch_uniformity_enabled=True,
             batch_uniformity_weight=0.05,
             hyperbolic=True,
-            hyperbolic_normalize=False,
+            hyperbolic_normalize=True,
             hyperbolic_margin_weight=1.0,
-            hyperbolic_curvature_init=1e-2,
-            hyperbolic_feature_scale_init=0.05,
-            hyperbolic_aperture_k_init=0.9,
+            hyperbolic_curvature_init=1.0,
             hyperbolic_eps=1e-5,
     ):
         super().__init__()
@@ -127,14 +125,6 @@ class CiipLoss(nn.Module):
         curvature_init = max(float(hyperbolic_curvature_init), self.hyperbolic_eps)
         curvature_alpha = math.log(math.expm1(curvature_init))
         self.curvature_alpha = nn.Parameter(torch.tensor(curvature_alpha))
-
-        feature_scale_init = max(float(hyperbolic_feature_scale_init), self.hyperbolic_eps)
-        self.feature_scale_log = nn.Parameter(torch.log(torch.tensor(feature_scale_init)))
-
-        aperture_k_init = float(hyperbolic_aperture_k_init)
-        aperture_k_init = min(max(aperture_k_init, self.hyperbolic_eps), 1.0 - self.hyperbolic_eps)
-        aperture_logit = math.log(aperture_k_init / (1.0 - aperture_k_init))
-        self.aperture_logit = nn.Parameter(torch.tensor(aperture_logit))
 
         # cache state
         self.prev_num_logits = 0
@@ -348,23 +338,9 @@ class CiipLoss(nn.Module):
             return features
         return F.normalize(features, dim=-1)
 
-    def _get_feature_scale(self, dtype=None, device=None) -> torch.Tensor:
-        scale = torch.exp(self.feature_scale_log)
-        if dtype is not None or device is not None:
-            scale = scale.to(dtype=dtype or scale.dtype, device=device or scale.device)
-        return scale
-
-    def _get_aperture_k(self, dtype=None, device=None) -> torch.Tensor:
-        aperture_k = torch.sigmoid(self.aperture_logit)
-        aperture_k = torch.clamp(aperture_k, min=self.hyperbolic_eps, max=1.0 - self.hyperbolic_eps)
-        if dtype is not None or device is not None:
-            aperture_k = aperture_k.to(dtype=dtype or aperture_k.dtype, device=device or aperture_k.device)
-        return aperture_k
-
     def _lift_to_hyperboloid(self, features: torch.Tensor, curvature: torch.Tensor) -> torch.Tensor:
         features = self._maybe_normalize(features)
-        scale = self._get_feature_scale(dtype=features.dtype, device=features.device)
-        space = (features * scale).to(torch.float32)
+        space = features.to(torch.float32)
         curvature = curvature.to(space.dtype)
         norm_sq = torch.sum(space * space, dim=-1, keepdim=True)
         time = torch.sqrt(torch.clamp(1.0 / curvature + norm_sq, min=self.hyperbolic_eps))
@@ -403,10 +379,8 @@ class CiipLoss(nn.Module):
         return torch.acos(cos)
 
     def _aperture_from_inner(self, inner_pos: torch.Tensor) -> torch.Tensor:
-        inv_cosh = torch.clamp(1.0 / inner_pos, min=0.0, max=1.0 - self.hyperbolic_eps)
-        aperture_k = self._get_aperture_k(dtype=inner_pos.dtype, device=inner_pos.device)
-        scaled = torch.clamp(aperture_k * inv_cosh, min=0.0, max=1.0 - self.hyperbolic_eps)
-        return torch.asin(scaled)
+        inv_cosh = torch.clamp(1.0 / inner_pos, min=-1.0 + self.hyperbolic_eps, max=1.0 - self.hyperbolic_eps)
+        return torch.asin(inv_cosh)
 
     def _hyperbolic_logits_from_dirs(
         self,

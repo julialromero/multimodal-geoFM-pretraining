@@ -497,18 +497,6 @@ def parse_args(args):
         help="Initial curvature value for the hyperbolic contrastive loss (must be positive).",
     )
     parser.add_argument(
-        "--hyperbolic-feature-scale-init",
-        type=float,
-        default=None,
-        help="Initial scale applied to Euclidean features before hyperbolic lifting (must be positive).",
-    )
-    parser.add_argument(
-        "--hyperbolic-aperture-k-init",
-        type=float,
-        default=None,
-        help="Initial aperture scaling factor K (0 < K < 1) for the hyperbolic angular margin.",
-    )
-    parser.add_argument(
         "--hyperbolic-eps",
         type=float,
         default=None,
