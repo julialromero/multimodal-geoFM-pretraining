@@ -471,6 +471,14 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 losses_m[key].update(val.item(), batch_size)
 
             logit_scale_scalar = logit_scale.item()
+            loss_param_state = {}
+            if hasattr(loss, "get_loggable_state"):
+                try:
+                    loss_param_state = loss.get_loggable_state()
+                except Exception:
+                    logging.exception("Failed to read CiipLoss loggable state")
+                    loss_param_state = {}
+
             metrics_log_parts = [
                 f"{loss_name.capitalize()}: {loss_m.val:#.5g} ({loss_m.avg:#.5g})"
                 for loss_name, loss_m in losses_m.items()
@@ -479,6 +487,10 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 metrics_log_parts.extend(
                     f"{name}: {meter.val:#.5g} ({meter.avg:#.5g})"
                     for name, meter in vc_metrics_m.items()
+                )
+            if loss_param_state:
+                metrics_log_parts.extend(
+                    f"{name}: {value:#.5g}" for name, value in loss_param_state.items()
                 )
             metrics_log = " ".join(metrics_log_parts)
             samples_per_second = args.train.accum_freq * args.datamodule.batch_size * args.datamodule.world_size / batch_time_m.val
@@ -503,6 +515,8 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
             log_data.update({name:val.val for name,val in losses_m.items()})
             if vc_metrics_m:
                 log_data.update({name: meter.val for name, meter in vc_metrics_m.items()})
+            if loss_param_state:
+                log_data.update({f"loss/{name}": value for name, value in loss_param_state.items()})
             log_data = {"train/" + name: val for name, val in log_data.items()}
 
             if tb_writer is not None:

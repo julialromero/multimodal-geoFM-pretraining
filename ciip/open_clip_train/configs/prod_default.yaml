@@ -62,9 +62,11 @@ loss:
   
   hyperbolic: True
   hyperbolic_normalize: False
-  hyperbolic_margin_weight: 1.0
   hyperbolic_curvature_init: 1.0
   hyperbolic_eps: 1.0e-5
+  centroid_lambda: 0.0
+  centroid_p: 1.0
+  centroid_q: 0.5
 
 datamodule:
   batch_size: 128 # batch size per GPU
