@@ -1,4 +1,6 @@
 import math
+from typing import Dict
+
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -83,9 +85,11 @@ class CiipLoss(nn.Module):
             batch_uniformity_weight=0.05,
             hyperbolic=True,
             hyperbolic_normalize=False,
-            hyperbolic_margin_weight=1.0,
             hyperbolic_curvature_init=1e-2,
             hyperbolic_eps=1e-5,
+            centroid_lambda=0.0,
+            centroid_p=1.0,
+            centroid_q=0.5,
     ):
         super().__init__()
         self.local_loss = local_loss
@@ -119,8 +123,10 @@ class CiipLoss(nn.Module):
 
         self.use_hyperbolic = bool(hyperbolic)
         self.hyperbolic_normalize = bool(hyperbolic_normalize)
-        self.hyperbolic_margin_weight = float(hyperbolic_margin_weight)
         self.hyperbolic_eps = float(hyperbolic_eps)
+        self.centroid_lambda = float(centroid_lambda)
+        self.centroid_p = float(centroid_p)
+        self.centroid_q = float(centroid_q)
 
         curvature_init = max(float(hyperbolic_curvature_init), self.hyperbolic_eps)
 
@@ -133,6 +139,22 @@ class CiipLoss(nn.Module):
         # cache state
         self.prev_num_logits = 0
         self.labels = {}
+
+    def get_loggable_state(self) -> Dict[str, float]:
+        """Return scalar values for learnable parameters and their projections."""
+        state: Dict[str, float] = {}
+        for name, param in self.named_parameters():
+            state[f"{name}_raw"] = float(param.detach().item())
+
+        if self.use_hyperbolic:
+            hyp_scale = F.softplus(self.hyp_scale.detach())
+            curvature = F.softplus(self.curvature_alpha.detach()) + self.hyperbolic_eps
+            state.update({
+                "hyp_scale": float(hyp_scale.item()),
+                "curvature": float(curvature.item()),
+            })
+
+        return state
 
     def _variance_regularizer(self, features: torch.Tensor) -> torch.Tensor:
         if features.ndim != 2 or features.shape[0] <= 1:
@@ -284,7 +306,7 @@ class CiipLoss(nn.Module):
         if output_dict or self.contrastive_weight != 0:
             losses["contrastive_loss"] = weighted_contrastive_loss
 
-        if self.use_hyperbolic and hasattr(self, "centroid_lambda") and self.centroid_lambda > 0:
+        if self.use_hyperbolic and self.centroid_lambda > 0:
             curvature = hyperbolic_context["curvature"]
             XH_all = hyperbolic_context["XH_all"]
             YH_all = hyperbolic_context["YH_all"]
@@ -292,8 +314,8 @@ class CiipLoss(nn.Module):
             y_e = self._einstein_midpoint(YH_all, curvature)
             d_x = self._origin_distance(x_e, curvature)
             d_y = self._origin_distance(y_e, curvature)
-            q = getattr(self, "centroid_q", 0.5)
-            p = getattr(self, "centroid_p", 1.0)
+            q = self.centroid_q
+            p = self.centroid_p
             Lcent = F.relu(d_x - q) + F.relu(p - d_y)
             losses["centroid_reg"] = self.centroid_lambda * Lcent
 
@@ -356,14 +378,18 @@ class CiipLoss(nn.Module):
         # Always apply a small, learnable positive scale before the lift
         return x * F.softplus(self.hyp_scale)
 
-    def _lift_to_hyperboloid(self, features: torch.Tensor, curvature: torch.Tensor) -> torch.Tensor:
-        features = self._maybe_normalize(features)
-        space = features.to(torch.float32)
-        curvature = curvature.to(space.dtype)
-        norm_sq = torch.sum(space * space, dim=-1, keepdim=True)
-        time = torch.sqrt(torch.clamp(1.0 / curvature + norm_sq, min=self.hyperbolic_eps))
-        time = time.to(space.dtype)
-        return torch.cat([time, space], dim=-1)
+    def _exp_map_lorentz(self, features: torch.Tensor, curvature: torch.Tensor) -> torch.Tensor:
+        v = self._maybe_normalize(features).to(torch.float32)
+        c = curvature.to(v.dtype)
+        eps = v.new_tensor(self.hyperbolic_eps)
+        vnorm = v.norm(dim=-1, keepdim=True).clamp_min(eps)
+        sqrt_c = torch.sqrt(c)
+        argument = sqrt_c * vnorm
+        scale = torch.sinh(argument) / argument
+        x_space = scale * v
+        space_norm_sq = (x_space * x_space).sum(dim=-1, keepdim=True)
+        time = torch.sqrt((space_norm_sq + torch.reciprocal(c)).clamp_min(self.hyperbolic_eps))
+        return torch.cat([time, x_space], dim=-1)
 
     def _lorentz_inner(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         return -x[..., 0] * y[..., 0] + torch.sum(x[..., 1:] * y[..., 1:], dim=-1)
@@ -421,8 +447,8 @@ class CiipLoss(nn.Module):
         return_gathered=False,
     ):
         curvature = self._get_curvature(dtype=s1_features.dtype, device=s1_features.device)
-        XH = self._lift_to_hyperboloid(s1_features, curvature)
-        YH = self._lift_to_hyperboloid(s2_features, curvature)
+        XH = self._exp_map_lorentz(s1_features, curvature)
+        YH = self._exp_map_lorentz(s2_features, curvature)
 
         if self.world_size > 1:
             XH_all, YH_all = gather_features(

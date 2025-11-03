@@ -155,9 +155,11 @@ def create_loss(args):
         ),
         hyperbolic=_resolve_value("hyperbolic", loss_cfg, args, default=True),
         hyperbolic_normalize=_resolve_value("hyperbolic_normalize", loss_cfg, args, default=True),
-        hyperbolic_margin_weight=_resolve_value("hyperbolic_margin_weight", loss_cfg, args, default=1.0),
         hyperbolic_curvature_init=_resolve_value("hyperbolic_curvature_init", loss_cfg, args, default=1.0),
         hyperbolic_eps=_resolve_value("hyperbolic_eps", loss_cfg, args, default=1e-5),
+        centroid_lambda=_resolve_value("centroid_lambda", loss_cfg, args, default=0.0),
+        centroid_p=_resolve_value("centroid_p", loss_cfg, args, default=1.0),
+        centroid_q=_resolve_value("centroid_q", loss_cfg, args, default=0.5),
     )
 
 

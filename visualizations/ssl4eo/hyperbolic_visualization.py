@@ -126,7 +126,6 @@ def build_loss(args: argparse.Namespace, device: torch.device) -> CiipLoss:
     loss = CiipLoss(
         hyperbolic=args.hyperbolic,
         hyperbolic_normalize=not args.no_hyperbolic_normalize,
-        hyperbolic_margin_weight=args.hyperbolic_margin_weight,
         hyperbolic_curvature_init=args.curvature_init,
         hyperbolic_eps=args.hyperbolic_eps,
     )
@@ -347,7 +346,6 @@ def main() -> None:
     parser.add_argument("--hyperbolic", action="store_true", default=True)
     parser.add_argument("--no-hyperbolic", dest="hyperbolic", action="store_false")
     parser.add_argument("--no-hyperbolic-normalize", action="store_true")
-    parser.add_argument("--hyperbolic-margin-weight", type=float, default=1.0)
     parser.add_argument("--curvature-init", type=float, default=1.0)
     parser.add_argument("--hyperbolic-eps", type=float, default=1e-5)
     parser.add_argument("--cone-samples", type=int, default=100, help="Samples for the cone polar plot")
