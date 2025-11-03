@@ -36,7 +36,7 @@ import tempfile
 import types
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import matplotlib
 
@@ -45,6 +45,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import Normalize
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 # ---------------------------------------------------------------------------
 # Compatibility shims
@@ -87,6 +88,77 @@ class ModelSpec:
     pretrain: bool = False
     s1_weights: str = "MOCO"
     s2_weights: str = "MOCO"
+
+
+def _softplus(x: float) -> float:
+    """Scalar softplus helper that mirrors :func:`torch.nn.functional.softplus`."""
+
+    return math.log1p(math.exp(float(x)))
+
+
+def load_hyp_params(ckpt_path_or_dict, eps_default: float = 1e-5) -> Dict[str, Optional[float]]:
+    """Load hyperbolic loss parameters from a checkpoint.
+
+    Parameters
+    ----------
+    ckpt_path_or_dict:
+        Either a checkpoint dictionary or a path/``PathLike`` pointing to one.
+    eps_default:
+        Fallback epsilon if the checkpoint does not contain it.
+
+    Returns
+    -------
+    Dict[str, Optional[float]]
+        Dictionary with ``c`` (curvature), ``k_ap`` (aperture log-scale),
+        ``hyp_scale`` (pre-lift scale), and ``eps`` (epsilon used during
+        training).
+    """
+
+    if isinstance(ckpt_path_or_dict, (str, bytes, os.PathLike)):
+        ckpt = torch.load(ckpt_path_or_dict, map_location="cpu")
+    else:
+        ckpt = ckpt_path_or_dict
+
+    sd = ckpt.get("state_dict", ckpt)
+    if not isinstance(sd, dict):
+        raise ValueError("Checkpoint has no state_dict")
+
+    def find(*keys: str):
+        for key in keys:
+            if key in sd:
+                return sd[key]
+            module_key = f"module.{key}"
+            if module_key in sd:
+                return sd[module_key]
+        return None
+
+    curvature_alpha = find("loss.curvature_alpha")
+    eps = find("loss.hyperbolic_eps")
+    ap_logk = find("loss.aperture_logk")
+    hyp_scale = find("loss.hyp_scale")
+
+    if curvature_alpha is not None:
+        curvature = _softplus(curvature_alpha) + float(eps if eps is not None else eps_default)
+    else:
+        curvature_raw = find("loss.curvature", "loss.c")
+        if curvature_raw is not None:
+            curvature = float(curvature_raw)
+        else:
+            curvature = 1.0 + float(eps_default)
+
+    hyp_scale_value: Optional[float]
+    if hyp_scale is not None:
+        hyp_scale_value = float(F.softplus(hyp_scale))
+    else:
+        hyp_scale_value = None
+
+    params = {
+        "c": float(curvature),
+        "k_ap": float(ap_logk) if ap_logk is not None else None,
+        "hyp_scale": hyp_scale_value,
+        "eps": float(eps if eps is not None else eps_default),
+    }
+    return params
 
 
 def _parse_list(value: str) -> List:
@@ -355,7 +427,25 @@ def stack_features(model: CIIP, dataset: SSL4EODataset, indices: Sequence[int], 
     return torch.stack(s1_feats, dim=0), torch.stack(s2_feats, dim=0)
 
 
-def compute_hyperbolic_context(loss: CiipLoss, s1_feats: torch.Tensor, s2_feats: torch.Tensor) -> Dict[str, torch.Tensor]:
+def _aperture_from_inner_scaled(
+    inner_pos: torch.Tensor,
+    eps: float,
+    aperture_logk: Optional[float],
+) -> torch.Tensor:
+    inv_cosh = torch.clamp(1.0 / inner_pos, min=-1.0 + eps, max=1.0 - eps)
+    if aperture_logk is not None:
+        scale = math.exp(float(aperture_logk))
+        inv_cosh = torch.clamp(inv_cosh * scale, min=-1.0 + eps, max=1.0 - eps)
+    return torch.asin(inv_cosh)
+
+
+def compute_hyperbolic_context(
+    loss: CiipLoss,
+    s1_feats: torch.Tensor,
+    s2_feats: torch.Tensor,
+    *,
+    aperture_logk: Optional[float] = None,
+) -> Dict[str, torch.Tensor]:
     curvature = loss._get_curvature(dtype=s1_feats.dtype, device=s1_feats.device)
     s1_points = loss._lift_to_hyperboloid(s1_feats, curvature)
     s2_points = loss._lift_to_hyperboloid(s2_feats, curvature)
@@ -366,8 +456,9 @@ def compute_hyperbolic_context(loss: CiipLoss, s1_feats: torch.Tensor, s2_feats:
     local_angles = loss._angle_matrix_from_dirs(s1_dirs, s2_dirs)
     positive_angles = torch.diagonal(local_angles)
 
-    aperture_s1 = loss._aperture_from_inner(s1_inner)
-    aperture_s2 = loss._aperture_from_inner(s2_inner)
+    eps = float(loss.hyperbolic_eps)
+    aperture_s1 = _aperture_from_inner_scaled(s1_inner, eps, aperture_logk)
+    aperture_s2 = _aperture_from_inner_scaled(s2_inner, eps, aperture_logk)
 
     return {
         "positive_angles": positive_angles,
@@ -522,6 +613,7 @@ def main() -> None:
 
     model = build_model(model_spec, device)
     checkpoint = load_model_weights(model, args.checkpoint, device)
+    hyp_params = load_hyp_params(checkpoint, eps_default=args.hyperbolic_eps)
 
     loss = build_loss(args, device)
     if args.loss_checkpoint is not None:
@@ -529,12 +621,27 @@ def main() -> None:
         maybe_load_loss_state(loss, loss_checkpoint)
     else:
         maybe_load_loss_state(loss, checkpoint)
+
+    loss.hyperbolic_eps = float(hyp_params["eps"])
+    default_curvature = float(hyp_params["c"])
     if args.curvature is not None:
         override_curvature(loss, args.curvature)
+    else:
+        override_curvature(loss, default_curvature)
 
     s1_feats, s2_feats = stack_features(model, dataset, indices, device)
+    hyp_scale = hyp_params["hyp_scale"] if hyp_params["hyp_scale"] is not None else 0.7
+    aperture_logk = hyp_params["k_ap"] if hyp_params["k_ap"] is not None else math.log(0.5)
 
-    context = compute_hyperbolic_context(loss, s1_feats, s2_feats)
+    s1_scaled = s1_feats * float(hyp_scale)
+    s2_scaled = s2_feats * float(hyp_scale)
+
+    context = compute_hyperbolic_context(
+        loss,
+        s1_scaled,
+        s2_scaled,
+        aperture_logk=aperture_logk,
+    )
 
     positive_angles = context["positive_angles"].detach().cpu().numpy()
     aperture_s1 = context["aperture_s1"].detach().cpu().numpy()
@@ -544,8 +651,8 @@ def main() -> None:
     s1_distances = context["s1_distances"].detach().cpu().numpy()
     s2_distances = context["s2_distances"].detach().cpu().numpy()
 
-    s1_norms = s1_feats.norm(dim=-1).detach().cpu().numpy()
-    s2_norms = s2_feats.norm(dim=-1).detach().cpu().numpy()
+    s1_norms = s1_scaled.norm(dim=-1).detach().cpu().numpy()
+    s2_norms = s2_scaled.norm(dim=-1).detach().cpu().numpy()
 
     output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -574,8 +681,17 @@ def main() -> None:
     write_metadata_csv(records, output_dir / "hyperbolic_summary.csv")
 
     curvature = loss._get_curvature(dtype=s1_feats.dtype, device=device).item()
+    aperture_scale = math.exp(aperture_logk) if aperture_logk is not None else None
     print(f"Saved plots to {output_dir.resolve()}")
     print(f"Effective curvature used for visualisation: {curvature:.6f}")
+    print(
+        "Hyperbolic params — eps: {eps:.2e}, hyp_scale: {scale:.6f}, aperture_scale: {ap:.6f} (logK={logk:.3f})".format(
+            eps=loss.hyperbolic_eps,
+            scale=float(hyp_scale),
+            ap=aperture_scale if aperture_scale is not None else float("nan"),
+            logk=aperture_logk if aperture_logk is not None else float("nan"),
+        )
+    )
 
 
 if __name__ == "__main__":
