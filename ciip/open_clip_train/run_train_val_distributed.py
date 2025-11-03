@@ -487,6 +487,7 @@ def main(args: DictConfig, start_epoch=0):
                 "name": args.train.name,
                 "state_dict": original_model.state_dict(),
                 "optimizer": optimizer.state_dict(),
+                "loss_state_dict": loss.state_dict(),
             }
             if scaler is not None:
                 checkpoint_dict["scaler"] = scaler.state_dict()

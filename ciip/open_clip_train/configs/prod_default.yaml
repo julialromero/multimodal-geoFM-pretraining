@@ -11,6 +11,7 @@ io:
   wandb: False
   comet_ml: True
   resume: 
+  # /local/ms-data/SSL4EO/model/2025_10_24-08_47_11-model_resnet50-lr_0.001-b_128-j_6-p_amp/checkpoints/epoch_16.pt
 
 comet: #personal
   api_key: 
@@ -24,8 +25,8 @@ model:
     load: False
     s1_weights: "MOCO" # Only support for resnet50. S1: MOCO
     s2_weights: "MOCO" # Only support for resnet50. S2: MOCO, DINO
-  embed_dim: 512
-  pre_projection_dim: 1024
+  embed_dim: 1024
+  pre_projection_dim: 2048
   s1_layers: [3, 4, 6, 3]
   s2_layers: [3, 4, 6, 3]
   width: 32
@@ -50,14 +51,17 @@ loss:
   gather_with_grad: True
   cache_labels: True
   contrastive_weight: 1
-  batch_uniformity_enabled: True
-  batch_uniformity_weight: 0.05
+
+  batch_uniformity_enabled: False
+  batch_uniformity_weight: 0.01
+
   vc_enabled: False
   vc_weight: 0.0
   vc_gamma: 1.0
   vc_covariance_weights: [1.0, 1.0]
+  
   hyperbolic: True
-  hyperbolic_normalize: True
+  hyperbolic_normalize: False
   hyperbolic_margin_weight: 1.0
   hyperbolic_curvature_init: 1.0
   hyperbolic_eps: 1.0e-5

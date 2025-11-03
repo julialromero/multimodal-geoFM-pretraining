@@ -82,9 +82,9 @@ class CiipLoss(nn.Module):
             batch_uniformity_enabled=True,
             batch_uniformity_weight=0.05,
             hyperbolic=True,
-            hyperbolic_normalize=True,
+            hyperbolic_normalize=False,
             hyperbolic_margin_weight=1.0,
-            hyperbolic_curvature_init=1.0,
+            hyperbolic_curvature_init=1e-2,
             hyperbolic_eps=1e-5,
     ):
         super().__init__()
@@ -123,6 +123,14 @@ class CiipLoss(nn.Module):
         self.hyperbolic_eps = float(hyperbolic_eps)
 
         curvature_init = max(float(hyperbolic_curvature_init), self.hyperbolic_eps)
+
+        # Learnable positive scale on Euclidean features BEFORE Lorentz lift
+        # (stabilizes early training without destroying radial info)
+        self.hyp_scale = nn.Parameter(torch.tensor(0.5))
+        # Learnable cone width K (>0) for aperture = asin( K * sech(d) )
+        self.aperture_logk = nn.Parameter(torch.tensor(-0.7))  # softplus ≈ 0.5
+
+
         curvature_alpha = math.log(math.expm1(curvature_init))
         self.curvature_alpha = nn.Parameter(torch.tensor(curvature_alpha))
 
@@ -334,9 +342,12 @@ class CiipLoss(nn.Module):
         return curvature
 
     def _maybe_normalize(self, features: torch.Tensor) -> torch.Tensor:
-        if not self.hyperbolic_normalize:
-            return features
-        return F.normalize(features, dim=-1)
+        x = features
+        if self.hyperbolic_normalize:
+            # Optional: only enable if you truly want unit-length directions; default is False
+            x = F.normalize(x, dim=-1)
+        # Always apply a small, learnable positive scale before the lift
+        return x * F.softplus(self.hyp_scale)
 
     def _lift_to_hyperboloid(self, features: torch.Tensor, curvature: torch.Tensor) -> torch.Tensor:
         features = self._maybe_normalize(features)
@@ -379,8 +390,11 @@ class CiipLoss(nn.Module):
         return torch.acos(cos)
 
     def _aperture_from_inner(self, inner_pos: torch.Tensor) -> torch.Tensor:
-        inv_cosh = torch.clamp(1.0 / inner_pos, min=-1.0 + self.hyperbolic_eps, max=1.0 - self.hyperbolic_eps)
-        return torch.asin(inv_cosh)
+        # inner_pos = cosh(√c d) ≥ 1  ⇒  inv_cosh = sech(d) ∈ (0,1]
+        inv_cosh = torch.clamp(1.0 / inner_pos, 0.0, 1.0 - self.hyperbolic_eps)
+        K = F.softplus(self.aperture_logk)  # >0, learnable cone width
+        val = torch.clamp(K * inv_cosh, 0.0, 1.0 - self.hyperbolic_eps)
+        return torch.asin(val)
 
     def _hyperbolic_logits_from_dirs(
         self,

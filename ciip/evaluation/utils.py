@@ -354,22 +354,29 @@ def create_ciip_model(embed_dim, pre_projection_dim=1024):
     return model
 
 def load_ciip_model_checkpoint(checkpoint_path):
-    embed_dim = 512
-    pre_projection_dim = 1024
+    
 
-    print(f'Using embed {embed_dim} with pre-projection dim {pre_projection_dim}')
+    # print(f'Using embed {embed_dim} with pre-projection dim {pre_projection_dim}')
+    try:
+        embed_dim = 512
+        pre_projection_dim = 1024
+        model = create_ciip_model(embed_dim, pre_projection_dim=pre_projection_dim)
+        checkpoint = torch.load(checkpoint_path, weights_only=False, map_location='cpu') # , map_location='cuda'
+        state_dict = checkpoint["state_dict"]
+        new_state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+        new_state_dict = {k: v for k, v in new_state_dict.items() if "fc" not in k}
+        missing_keys, unexpected_keys = model.load_state_dict(new_state_dict, strict=False)
 
-    model = create_ciip_model(embed_dim, pre_projection_dim=pre_projection_dim)
-    checkpoint = torch.load(checkpoint_path, weights_only=False, map_location='cpu') # , map_location='cuda'
-
-    state_dict = checkpoint["state_dict"]
-    new_state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
-
-    # remove fcs
-    new_state_dict = {k: v for k, v in new_state_dict.items() if "fc" not in k}
-
-    # print the incompatible keys
-    missing_keys, unexpected_keys = model.load_state_dict(new_state_dict, strict=False)
+    except:
+        embed_dim = 1024
+        pre_projection_dim = 2048
+        model = create_ciip_model(embed_dim, pre_projection_dim=pre_projection_dim)
+        checkpoint = torch.load(checkpoint_path, weights_only=False, map_location='cpu') # , map_location='cuda'
+        state_dict = checkpoint["state_dict"]
+        new_state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+        new_state_dict = {k: v for k, v in new_state_dict.items() if "fc" not in k}
+        missing_keys, unexpected_keys = model.load_state_dict(new_state_dict, strict=False)
+    
     if missing_keys:
         print("Missing keys:", missing_keys)
     if unexpected_keys:

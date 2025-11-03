@@ -20,6 +20,13 @@ Example usage
         --config ciip/open_clip_train/config_train.ini \
         --output-dir outputs/hyperbolic_viz \
         --num-locations 64
+
+
+    python /home/juro4948/ciip/visualizations/ssl4eo/hyperbolic_visualization.py \
+        --checkpoint /local/ms-data/SSL4EO/model/2025_11_01-21_12_21-model_resnet50-lr_0.001-b_128-j_6-p_amp/checkpoints/epoch_16.pt \
+        --config /home/juro4948/ciip/ciip/open_clip_train/configs/prod_default.yaml \
+        --output-dir /home/juro4948/ciip/diagnostics/hyperbolic_viz \
+        --num-locations 64
 """
 
 from __future__ import annotations
@@ -49,17 +56,37 @@ import torch
 # ---------------------------------------------------------------------------
 # Compatibility shims
 # ---------------------------------------------------------------------------
-try:  # pragma: no cover - optional dependency
-    import hydra  # type: ignore
-except ModuleNotFoundError:  # pragma: no cover - optional dependency
-    hydra = types.ModuleType("hydra")
-    hydra.utils = types.SimpleNamespace(get_original_cwd=os.getcwd)
-    sys.modules["hydra"] = hydra
 
-from ciip.loss import CiipLoss
-from ciip.model_ciip import CIIP
-from ciip.open_clip_train.data import SSL4EODataset
+try:
+    from hydra.core.global_hydra import GlobalHydra
+    import hydra
+    if not GlobalHydra.instance().is_initialized():
+        # Lightweight init; we’re not composing any config here
+        hydra.initialize(config_path=None, job_name="hyperbolic_viz", version_base=None)
+except Exception:
+    pass
+try:
+    import hydra.utils as _hydra_utils
+    _old_get_cwd = _hydra_utils.get_original_cwd
+    def _safe_get_original_cwd():
+        try:
+            return _old_get_cwd()
+        except Exception:
+            # Not running under Hydra: fall back to current working dir
+            return os.getcwd()
+    _hydra_utils.get_original_cwd = _safe_get_original_cwd
+except Exception:
+    pass
 
+import sys
+sys.path.append('/home/juro4948/ciip')
+sys.path.append('/home/juro4948/ciip/ciip')
+from loss import CiipLoss
+from model_ciip import CIIP
+sys.path.append('/home/juro4948/ciip/ciip/open_clip_train')
+from data import SSL4EODataset
+from open_clip import get_input_dtype
+from visualizations.ssl4eo.embedding_collapse_diagnostics import *
 
 @dataclass
 class DatasetSpec:
@@ -93,103 +120,262 @@ def _parse_list(value: str) -> List:
     return list(ast.literal_eval(value)) if value else []
 
 
-def load_config(config_path: Path) -> Tuple[DatasetSpec, ModelSpec]:
-    parser = configparser.ConfigParser()
-    if not parser.read(config_path):
-        raise FileNotFoundError(f"Could not read configuration file: {config_path}")
+from types import SimpleNamespace
 
-    model_section = parser["model"]
-    dataset_section = parser["dataset"]
+def _to_ns(obj):
+    if isinstance(obj, dict):
+        return SimpleNamespace(**{k: _to_ns(v) for k, v in obj.items()})
+    if isinstance(obj, list):
+        return [_to_ns(v) for v in obj]
+    return obj
 
-    embed_dim = model_section.getint("embed_dim", fallback=512)
-    pre_projection_dim = model_section.getint("pre_projection_dim", fallback=embed_dim)
-    s1_layers = tuple(_parse_list(model_section.get("s1_layers", fallback="(3, 4, 6, 3)")))
-    s2_layers = tuple(_parse_list(model_section.get("s2_layers", fallback="(3, 4, 6, 3)")))
-    width = model_section.getint("width", fallback=32)
-    s1_patch = model_section.getint("s1_patch_size", fallback=16)
-    s2_patch = model_section.getint("s2_patch_size", fallback=16)
-    s1_resolution = model_section.getint("s1_resolution", fallback=224)
-    s2_resolution = model_section.getint("s2_resolution", fallback=224)
-    framework = model_section.get("framework", fallback="resnet50")
+def load_config(config_path):
+    """
+    Returns (dataset_spec, model_spec) as plain dicts.
+    Supports Hydra/OmegaConf YAML (.yaml/.yml) and INI (.ini).
+    """
+    p = Path(config_path)
+    ext = p.suffix.lower()
 
-    s1_bands = _parse_list(model_section.get("s1_bands", fallback="[1, 2]"))
-    s2_bands = _parse_list(model_section.get("s2_bands", fallback="['1', '2', '3', '4', '5', '6', '7', '8', '8A', '9', '10', '11', '12']"))
+    # --- YAML / Hydra ---
+    if ext in (".yaml", ".yml"):
+        try:
+            from omegaconf import OmegaConf
+            cfg = OmegaConf.load(p)
 
-    dataset_root = dataset_section.get("root")
-    if not dataset_root:
-        raise ValueError("Dataset root must be specified in the config file.")
-
-    dataset_spec = DatasetSpec(
-        root=dataset_root,
-        s2_tier=dataset_section.get("s2_tier", fallback="s2c"),
-        target_dim=model_section.getint("s1_resolution", fallback=224),
-        s2_bands=s2_bands,
-        s1_band_count=len(s1_bands),
-    )
-
-    model_spec = ModelSpec(
-        embed_dim=embed_dim,
-        pre_projection_dim=pre_projection_dim,
-        s1_layers=tuple(int(x) for x in s1_layers),
-        s2_layers=tuple(int(x) for x in s2_layers),
-        width=width,
-        s1_patch=s1_patch,
-        s2_patch=s2_patch,
-        s1_resolution=s1_resolution,
-        s2_resolution=s2_resolution,
-        framework=framework,
-        s1_band_count=len(s1_bands),
-        s2_band_count=len(s2_bands),
-        pretrain=model_section.getboolean("pretrain", fallback=False),
-        s1_weights=model_section.get("s1_weights", fallback="MOCO"),
-        s2_weights=model_section.get("s2_weights", fallback="MOCO"),
-    )
-
-    return dataset_spec, model_spec
+            # prefer common hydra-style keys; fallback to empty dicts
+            # tweak these selectors to match your repo’s schema
+            def pick(*paths, default=None):
+                for path in paths:
+                    try:
+                        val = OmegaConf.select(cfg, path)
+                        if val is not None:
+                            return OmegaConf.to_container(val, resolve=True)
+                    except Exception:
+                        pass
+                return default
 
 
-def build_model(spec: ModelSpec, device: torch.device) -> CIIP:
-    model = CIIP(
-        embed_dim=spec.embed_dim,
-        pre_projection_dim=spec.pre_projection_dim,
-        s1_resolution=spec.s1_resolution,
-        s1_layers=spec.s1_layers,
-        s1_width=spec.width,
-        s1_patch_size=spec.s1_patch,
-        s1_bands=spec.s1_band_count,
-        s2_resolution=spec.s2_resolution,
-        s2_layers=spec.s2_layers,
-        s2_width=spec.width,
-        s2_patch_size=spec.s2_patch,
-        s2_bands=spec.s2_band_count,
-        framework=spec.framework,
-        pretrain=spec.pretrain,
-        s1_weights=spec.s1_weights,
-        s2_weights=spec.s2_weights,
-    )
+            dataset_spec = pick("data", "dataset", default={})
+            model_spec   = pick("model", "ciip", "train.model", default={})
+            dataset_spec = _to_ns(dataset_spec)
+            model_spec   = _to_ns(model_spec)
+
+            return dataset_spec, model_spec
+
+        except Exception as e:
+            # fallback to plain PyYAML if OmegaConf isn't available
+            import yaml
+            with open(p, "r") as f:
+                cfg = yaml.safe_load(f) or {}
+            dataset_spec = cfg.get("data", cfg.get("dataset", {})) or {}
+            model_spec   = cfg.get("model", cfg.get("ciip", {})) or {}
+            dataset_spec = _to_ns(dataset_spec)
+            model_spec   = _to_ns(model_spec)
+            return dataset_spec, model_spec
+
+    # --- INI ---
+    elif ext in (".ini",):
+        import configparser
+        parser = configparser.ConfigParser()
+        ok = parser.read(config_path)
+        if not ok:
+            raise FileNotFoundError(config_path)
+        # map sections to your expected dicts
+        dataset_spec = dict(parser["dataset"]) if "dataset" in parser else {}
+        model_spec   = dict(parser["model"])   if "model" in parser else {}
+        return dataset_spec, model_spec
+
+    else:
+        raise ValueError(f"Unsupported config format: {ext} (use .yaml/.yml or .ini)")
+
+
+def load_model_from_checkpoint(
+    config: DictConfig,
+    checkpoint_path: Path,
+    *,
+    device: torch.device,
+    input_dtype: torch.dtype,
+    w_path: Optional[Path] = None,
+    skip_final_fc: bool = False,
+    use_orthogonal_mapping: bool = False,
+) -> torch.nn.Module:
+    """Instantiate a CIIP model and load weights from ``checkpoint_path``."""
+
+    model = create_model(config, device=device)
+
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    state_dict = checkpoint.get("state_dict", checkpoint)
+
+    def _check_and_replace_fc_layers(model, state_dict):
+        """Check fc layer dimensions and replace if incompatible."""
+        replacements_made = []
+        
+        for encoder_name in ['encoder_s1', 'encoder_s2']:
+            if not hasattr(model, encoder_name):
+                continue
+                
+            encoder = getattr(model, encoder_name)
+            if not hasattr(encoder, 'fc'):
+                continue
+                
+            fc_weight_key = f"{encoder_name}.fc.weight"
+            fc_bias_key = f"{encoder_name}.fc.bias"
+            
+            if fc_weight_key not in state_dict:
+                continue
+                
+            # Get dimensions from checkpoint and model
+            checkpoint_weight = state_dict[fc_weight_key]
+            model_fc = encoder.fc
+            
+            checkpoint_shape = checkpoint_weight.shape
+            model_shape = model_fc.weight.shape
+            
+            if checkpoint_shape != model_shape:
+                # _LOGGER.warning(
+                #     f"FC layer dimension mismatch in {encoder_name}: "
+                #     f"checkpoint {checkpoint_shape} vs model {model_shape}. "
+                #     f"Replacing with compatible layer."
+                # )
+                
+                # Create new fc layer with checkpoint dimensions
+                in_features = checkpoint_shape[1]
+                out_features = checkpoint_shape[0]
+                has_bias = fc_bias_key in state_dict
+                
+                new_fc = nn.Linear(in_features, out_features, bias=has_bias)
+                setattr(encoder, 'fc', new_fc)
+                replacements_made.append(f"{encoder_name}.fc")
+        
+        return replacements_made
+
+    try:
+        model.load_state_dict(state_dict, strict=True)
+    except Exception as e:
+        # _LOGGER.info(f"Initial load failed: {e}. Attempting fixes...")
+        
+        # Try removing module prefix
+        cleaned = {k.replace("module.", ""): v for k, v in state_dict.items()}
+        
+        try:
+            model.load_state_dict(cleaned, strict=True)
+        except Exception:
+            # Remove problematic keys
+            if "encoder_s1.W" in cleaned:
+                del cleaned["encoder_s1.W"]
+            
+            # Check and replace incompatible fc layers
+            replacements = _check_and_replace_fc_layers(model, cleaned)
+            # if replacements:
+            #     _LOGGER.info(f"Replaced incompatible layers: {replacements}")
+            
+            # Check for remaining compatibility issues
+            missing, unexpected = compare_state_keys(model, cleaned)
+            
+            # Filter out the layers we just replaced from missing keys
+            missing_filtered = set()
+            for key in missing:
+                is_replaced_layer = any(key.startswith(repl) for repl in replacements)
+                if not is_replaced_layer:
+                    missing_filtered.add(key)
+            
+            if missing_filtered or unexpected:
+                # _LOGGER.warning(f"Missing keys: {missing_filtered}")
+                # _LOGGER.warning(f"Unexpected keys: {unexpected}")
+                
+                # Only raise error if there are critical missing keys
+                critical_missing = {k for k in missing_filtered 
+                                  if not any(pattern in k for pattern in ['fc.weight', 'fc.bias', 'W'])}
+                if critical_missing:
+                    raise RuntimeError(
+                        f"Checkpoint {checkpoint_path} has critical incompatibilities: {critical_missing}"
+                    )
+            
+            # Load with non-strict mode to handle the replaced layers
+            model.load_state_dict(cleaned, strict=False)
+        else:
+            state_dict = cleaned
+
+    use_w_mapping = bool(use_orthogonal_mapping and w_path is not None and w_path.exists())
+    if use_w_mapping:
+        try:
+            orthogonal = torch.load(w_path, map_location=device)
+        except Exception as exc:  # pragma: no cover - defensive branch
+            # _LOGGER.warning("Failed to load orthogonal mapping from %s: %s", w_path, exc)
+            use_w_mapping = False
+        else:
+            if hasattr(model, "encoder_s1"):
+                model.encoder_s1.register_buffer("W", orthogonal)
+    if hasattr(model, "encoder_s1") and hasattr(model.encoder_s1, "apply_orthogonal_matrix"):
+        model.encoder_s1.apply_orthogonal_matrix = use_w_mapping
+
+    if input_dtype is not None:
+        model = model.to(device, dtype=input_dtype, non_blocking=True)
+    else:
+        model = model.to(device, non_blocking=True)
+
+    if skip_final_fc:
+        if hasattr(model, "encoder_s1") and hasattr(model.encoder_s1, "fc"):
+            model.encoder_s1.fc = nn.Identity()
+        if hasattr(model, "encoder_s2") and hasattr(model.encoder_s2, "fc"):
+            model.encoder_s2.fc = nn.Identity()
+
+    model.eval()
+    return model
+    
+def resolve_input_dtype(precision: str) -> torch.dtype:
+    """Resolve the tensor dtype used for model inputs."""
+
+    dtype: Optional[torch.dtype] = None
+    if get_input_dtype is not None:
+        dtype = get_input_dtype(precision)
+    if dtype is not None:
+        return dtype
+
+    precision = precision.lower()
+    if "bf16" in precision:
+        return torch.bfloat16
+    if "fp16" in precision or "amp" in precision:
+        return torch.float16
+    return torch.float32
+
+def build_model(spec, checkpoint_path, device):
+    input_dtype = resolve_input_dtype(spec.model.precision)
+    model = load_model_from_checkpoint(
+            spec,
+            checkpoint_path,
+            device=device,
+            input_dtype=input_dtype,
+            w_path=None,
+            skip_final_fc=False,
+            use_orthogonal_mapping=False,
+        )
+    
     return model.to(device)
 
 
-def load_model_weights(model: CIIP, checkpoint_path: Path, device: torch.device) -> Dict:
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    if "state_dict" in checkpoint:
-        state_dict = checkpoint["state_dict"]
-    else:
-        state_dict = checkpoint
 
-    cleaned = {}
-    for key, value in state_dict.items():
-        if key.startswith("module."):
-            cleaned[key[len("module."):]] = value
-        else:
-            cleaned[key] = value
+# def load_model_weights(model: CIIP, checkpoint_path: Path, device: torch.device) -> Dict:
+#     checkpoint = torch.load(checkpoint_path, map_location=device)
+#     if "state_dict" in checkpoint:
+#         state_dict = checkpoint["state_dict"]
+#     else:
+#         state_dict = checkpoint
 
-    missing, unexpected = model.load_state_dict(cleaned, strict=False)
-    if missing:
-        print(f"Warning: Missing model parameters: {missing}")
-    if unexpected:
-        print(f"Warning: Unexpected parameters in checkpoint: {unexpected}")
-    return checkpoint
+#     cleaned = {}
+#     for key, value in state_dict.items():
+#         if key.startswith("module."):
+#             cleaned[key[len("module."):]] = value
+#         else:
+#             cleaned[key] = value
+
+#     missing, unexpected = model.load_state_dict(cleaned, strict=False)
+#     if missing:
+#         print(f"Warning: Missing model parameters: {missing}")
+#     if unexpected:
+#         print(f"Warning: Unexpected parameters in checkpoint: {unexpected}")
+#     return checkpoint
 
 
 def build_loss(args: argparse.Namespace, device: torch.device) -> CiipLoss:
@@ -259,7 +445,7 @@ def _candidate_names(preferred: str, extras: Sequence[str]) -> List[str]:
     return ordered
 
 
-def prepare_dataset(spec: DatasetSpec) -> SSL4EODataset:
+def prepare_dataset(spec: DatasetSpec, model_spec: DatasetSpec) -> SSL4EODataset:
     base_root = _normalize_root_path(spec.root)
 
     s1_dir = _resolve_subdirectory(
@@ -280,9 +466,9 @@ def prepare_dataset(spec: DatasetSpec) -> SSL4EODataset:
         dataset = SSL4EODataset(
             root=str(root_path),
             s2_tier=spec.s2_tier,
-            s2_bands=spec.s2_bands,
+            s2_bands=model_spec.s2_bands,
             transforms=None,
-            target_image_dimension=(spec.target_dim, spec.target_dim),
+            target_image_dimension=(224, 224),
         )
         return dataset
 
@@ -515,13 +701,22 @@ def main() -> None:
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
 
-    dataset_spec, model_spec = load_config(args.config)
-    dataset = prepare_dataset(dataset_spec)
+    # dataset_spec, model_spec = load_config(args.config)
+    config = OmegaConf.load(args.config)
+    OmegaConf.set_struct(config, False)
+
+    # print(dataset_spec)
+    # print(model_spec)
+    dataset = prepare_dataset(config.dataset, config.model)
 
     indices, metadata = sample_indices(dataset, args.num_locations, args.seed)
 
-    model = build_model(model_spec, device)
-    checkpoint = load_model_weights(model, args.checkpoint, device)
+    model = build_model(config,  args.checkpoint, device)
+    checkpoint = torch.load(args.checkpoint, map_location=device)
+
+    # load state dict
+    state_dict = checkpoint.get("state_dict", checkpoint)
+    
 
     loss = build_loss(args, device)
     if args.loss_checkpoint is not None:
