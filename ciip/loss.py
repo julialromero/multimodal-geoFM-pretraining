@@ -284,11 +284,11 @@ class CiipLoss(nn.Module):
         if output_dict or self.contrastive_weight != 0:
             losses["contrastive_loss"] = weighted_contrastive_loss
 
-        if self.use_hyperbolic and self.hyperbolic_margin_weight != 0:
-            hinge_s1 = F.relu(hyperbolic_context["positive_angles"] - hyperbolic_context["aperture_s1"])
-            hinge_s2 = F.relu(hyperbolic_context["positive_angles"] - hyperbolic_context["aperture_s2"])
-            hyperbolic_margin = 0.5 * (hinge_s1.mean() + hinge_s2.mean())
-            losses["hyperbolic_margin_loss"] = self.hyperbolic_margin_weight * hyperbolic_margin
+        # if self.use_hyperbolic and self.hyperbolic_margin_weight != 0:
+        #     hinge_s1 = F.relu(hyperbolic_context["positive_angles"] - hyperbolic_context["aperture_s1"])
+        #     hinge_s2 = F.relu(hyperbolic_context["positive_angles"] - hyperbolic_context["aperture_s2"])
+        #     hyperbolic_margin = 0.5 * (hinge_s1.mean() + hinge_s2.mean())
+        #     losses["hyperbolic_margin_loss"] = self.hyperbolic_margin_weight * hyperbolic_margin
 
         if need_vc:
             s1_vc_local = s1_features_vc if s1_features_vc is not None else s1_features
@@ -424,13 +424,13 @@ class CiipLoss(nn.Module):
         local_angles = self._angle_matrix_from_dirs(s1_dirs_local, s2_dirs_local)
         positive_angles = torch.diagonal(local_angles)
 
-        aperture_s1 = self._aperture_from_inner(s1_inner_local)
-        aperture_s2 = self._aperture_from_inner(s2_inner_local)
+        # aperture_s1 = self._aperture_from_inner(s1_inner_local)
+        # aperture_s2 = self._aperture_from_inner(s2_inner_local)
 
         hyperbolic_context = {
             "positive_angles": positive_angles,
-            "aperture_s1": aperture_s1,
-            "aperture_s2": aperture_s2,
+            # "aperture_s1": aperture_s1,
+            # "aperture_s2": aperture_s2,
         }
 
         if self.world_size > 1:
@@ -487,6 +487,76 @@ class CiipLoss(nn.Module):
             )
 
         return logits_per_s1, logits_per_s2, hyperbolic_context
+
+    def _get_hyperbolic_logits_atmg(
+        self,
+        s1_features: torch.Tensor,  # treat S1 as "text"
+        s2_features: torch.Tensor,  # treat S2 as "image"
+        logit_scale: torch.Tensor,
+        return_gathered: bool,
+    ):
+        c = self._get_curvature(dtype=s1_features.dtype, device=s1_features.device)
+        XH = self._lift_to_hyperboloid(s1_features, c)  # (N, d+1)
+        YH = self._lift_to_hyperboloid(s2_features, c)  # (N, d+1)
+
+        if self.world_size > 1:
+            XH_all, YH_all = gather_features(
+                XH, YH, self.local_loss, self.gather_with_grad,
+                self.rank, self.world_size, self.use_horovod
+            )
+        else:
+            XH_all, YH_all = XH, YH
+
+        # Asymmetric T->I: rows = S1 items, columns = S2 items
+        alpha = self._angles_matrix(XH if self.local_loss else XH_all,
+                                    YH_all, c) if self.local_loss else self._angles_matrix(XH_all, YH_all, c)
+        beta  = math.pi - alpha
+
+        # κ = -α (minimize positive angle)  and  κ = β (maximize complementary angle)
+        logits_neg_alpha = (-alpha) * logit_scale
+        logits_beta      = (beta)   * logit_scale
+
+        # For symmetry with CLIP logs you may also return a transpose “image->text”,
+        # but ATMG specifically defines T->I twice; we’ll mirror for code compatibility:
+        return logits_neg_alpha, logits_beta
+
+    def _angles_matrix(self, XH: torch.Tensor, YH: torch.Tensor, curvature: torch.Tensor) -> torch.Tensor:
+        # Compute pairwise α for all (i,j). We vectorize via chunking to save memory if needed.
+        # Simple version (may be OK for your batch sizes):
+        N = XH.size(0)
+        # Expand to (N, N, d+1)
+        xH = XH.unsqueeze(1).expand(N, N, XH.size(-1))
+        yH = YH.unsqueeze(0).expand(N, N, YH.size(-1))
+        # Flatten, compute α, then reshape
+        alpha = self._ext_angle(xH.reshape(-1, XH.size(-1)), yH.reshape(-1, YH.size(-1)), curvature)
+        return alpha.view(N, N)
+
+
+    def _ext_angle(self, xH: torch.Tensor, yH: torch.Tensor, curvature: torch.Tensor) -> torch.Tensor:
+        """
+        xH, yH: (N, d+1) hyperboloid points, x[...,0] = time, x[...,1:] = space
+        Implements Eq.(9):
+        ext(x,y) = arccos( (y_time + x_time * c*<x,y>_H) / (||x_space|| * sqrt((c*<x,y>_H)^2 - 1)) )
+        Notes:
+        <·,·>_H is Lorentz inner product; we already have _lorentz_inner.
+        """
+        eps = self.hyperbolic_eps
+        c = curvature
+        # Lorentz inner product
+        Hxy = self._lorentz_inner(xH, yH)                      # shape (N,)
+        cx = c * Hxy                                           # (N,)
+
+        xt, yt = xH[..., 0], yH[..., 0]                        # time comps
+        xs = xH[..., 1:]                                       # space comps
+        xs_norm = xs.norm(dim=-1).clamp_min(eps)               # ||x_space||
+
+        num = (yt + xt * cx)                                   # numerator
+        denom_sq = (cx * cx - 1.0).clamp_min(eps)              # ensure positive
+        denom = (xs_norm * denom_sq.sqrt()).clamp_min(eps)
+
+        r = (num / denom).clamp(-1.0 + eps, 1.0 - eps)
+        return torch.acos(r)                                   # alpha in [0, pi]
+
 
 
 # class CoCaLoss(ClipLoss):
