@@ -316,6 +316,7 @@ def main(args: DictConfig, start_epoch=0):
     
         if args.distill:
             dist_model = torch.nn.parallel.DistributedDataParallel(dist_model, device_ids=[device], **ddp_args)
+    loss = create_loss(args)
 
     # create optimizer and scaler
     optimizer = None
@@ -330,20 +331,34 @@ def main(args: DictConfig, start_epoch=0):
         named_parameters = list(model.named_parameters())
         gain_or_bias_params = [p for n, p in named_parameters if exclude(n, p) and p.requires_grad]
         rest_params = [p for n, p in named_parameters if include(n, p) and p.requires_grad]
+        loss_params = [p for p in loss.parameters() if p.requires_grad]
 
-        optimizer= optim.AdamW(
-        [
+        param_groups = [
             {"params": gain_or_bias_params, "weight_decay": 0.},
             {"params": rest_params, "weight_decay": args.train.wd},
-        ],
-        lr=args.train.lr,
-        betas=(args.train.beta1, args.train.beta2),
-        eps=args.train.eps,
+        ]
+        if loss_params:
+            param_groups.append({"params": loss_params, "weight_decay": 0.})
+
+        optimizer = optim.AdamW(
+            param_groups,
+            lr=args.train.lr,
+            betas=(args.train.beta1, args.train.beta2),
+            eps=args.train.eps,
         )
 
         if args.datamodule.horovod:
-            optimizer = hvd.DistributedOptimizer(optimizer, named_parameters=model.named_parameters())
+            optimizer_named_parameters = list(model.named_parameters())
+            if loss_params:
+                optimizer_named_parameters.extend(
+                    (f"loss.{name}", param)
+                    for name, param in loss.named_parameters()
+                    if param.requires_grad
+                )
+            optimizer = hvd.DistributedOptimizer(optimizer, named_parameters=optimizer_named_parameters)
             hvd.broadcast_parameters(model.state_dict(), root_rank=0)
+            if loss_params:
+                hvd.broadcast_parameters(loss.state_dict(), root_rank=0)
             hvd.broadcast_optimizer_state(optimizer, root_rank=0)
 
         scaler = GradScaler() if args.model.precision == "amp" else None
@@ -362,6 +377,8 @@ def main(args: DictConfig, start_epoch=0):
             model.load_state_dict(sd)
             if optimizer is not None:
                 optimizer.load_state_dict(checkpoint["optimizer"])
+            if 'loss_state_dict' in checkpoint:
+                loss.load_state_dict(checkpoint['loss_state_dict'])
             if scaler is not None and 'scaler' in checkpoint:
                 scaler.load_state_dict(checkpoint['scaler'])
             logging.info(f"=> resuming checkpoint '{args.io.resume}' (epoch {start_epoch})")
@@ -461,8 +478,6 @@ def main(args: DictConfig, start_epoch=0):
         # # Evaluate.
         # evaluate(model, data, start_epoch, args, tb_writer=writer, tokenizer=tokenizer)
         # return
-
-    loss = create_loss(args)
 
     # MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT=100000
     # torch.cuda.memory._record_memory_history(
