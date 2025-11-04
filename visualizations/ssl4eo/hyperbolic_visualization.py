@@ -114,10 +114,14 @@ def load_hyperbolic_params(checkpoint: Dict[str, torch.Tensor], eps_default: flo
         curvature_raw = _lookup("curvature") or _lookup("c")
         curvature = float(curvature_raw.item()) if curvature_raw is not None else 1.0 + eps_default
 
+    hyp_scale_raw = float(hyp_scale.item()) if hyp_scale is not None else None
+    hyp_scale_pos = float(F.softplus(hyp_scale).item()) if hyp_scale is not None else None
+
     return {
         "c": curvature,
         "k_ap": float(aperture_logk.item()) if aperture_logk is not None else None,
-        "hyp_scale": float(F.softplus(hyp_scale).item()) if hyp_scale is not None else None,
+        "hyp_scale": hyp_scale_pos,
+        "hyp_scale_raw": hyp_scale_raw,
         "eps": float(eps.item() if eps is not None else eps_default),
     }
 
@@ -210,8 +214,8 @@ def compute_hyperbolic_context(
 ) -> Dict[str, torch.Tensor]:
     device = s1_feats.device
     curvature = loss._get_curvature(dtype=s1_feats.dtype, device=device)
-    s1_points = loss._lift_to_hyperboloid(s1_feats, curvature)
-    s2_points = loss._lift_to_hyperboloid(s2_feats, curvature)
+    s1_points = loss._exp_map_lorentz(s1_feats, curvature)
+    s2_points = loss._exp_map_lorentz(s2_feats, curvature)
     s1_dirs, s1_distances, s1_inner = loss._hyperbolic_directions(s1_points, curvature)
     s2_dirs, s2_distances, s2_inner = loss._hyperbolic_directions(s2_points, curvature)
     angles = loss._angle_matrix_from_dirs(s1_dirs, s2_dirs)
@@ -386,13 +390,22 @@ def main() -> None:
     curvature = args.curvature if args.curvature is not None else hyp_params["c"]
     override_curvature(loss, curvature, device)
 
-    s1_feats, s2_feats = stack_features(model, dataset, indices, device)
-    hyp_scale = hyp_params["hyp_scale"] or 0.7
-    aperture_logk = hyp_params["k_ap"] if hyp_params["k_ap"] is not None else math.log(0.5)
-    s1_scaled = s1_feats * hyp_scale
-    s2_scaled = s2_feats * hyp_scale
+    if hyp_params["hyp_scale_raw"] is not None:
+        with torch.no_grad():
+            loss.hyp_scale.copy_(loss.hyp_scale.new_tensor(hyp_params["hyp_scale_raw"]))
 
-    context = compute_hyperbolic_context(loss, s1_scaled.to(device), s2_scaled.to(device), aperture_logk=aperture_logk)
+    s1_feats, s2_feats = stack_features(model, dataset, indices, device)
+    s1_feats_device = s1_feats.to(device)
+    s2_feats_device = s2_feats.to(device)
+    aperture_logk = hyp_params["k_ap"] if hyp_params["k_ap"] is not None else math.log(0.5)
+
+    with torch.no_grad():
+        context = compute_hyperbolic_context(
+            loss,
+            s1_feats_device,
+            s2_feats_device,
+            aperture_logk=aperture_logk,
+        )
     positive_angles = context["positive_angles"].cpu().numpy()
     aperture_s1 = context["aperture_s1"].cpu().numpy()
     aperture_s2 = context["aperture_s2"].cpu().numpy()
@@ -400,8 +413,13 @@ def main() -> None:
     s2_dirs = context["s2_dirs"].cpu().numpy()
     s1_distances = context["s1_distances"].cpu().numpy()
     s2_distances = context["s2_distances"].cpu().numpy()
-    s1_norms = s1_scaled.norm(dim=-1).numpy()
-    s2_norms = s2_scaled.norm(dim=-1).numpy()
+
+    with torch.no_grad():
+        s1_prelift = loss._maybe_normalize(s1_feats_device)
+        s2_prelift = loss._maybe_normalize(s2_feats_device)
+
+    s1_norms = s1_prelift.norm(dim=-1).cpu().numpy()
+    s2_norms = s2_prelift.norm(dim=-1).cpu().numpy()
 
     output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -427,6 +445,7 @@ def main() -> None:
     write_metadata_csv(records, output_dir / "hyperbolic_summary.csv")
 
     used_curvature = loss._get_curvature(dtype=s1_feats.dtype, device=device).item()
+    hyp_scale = float(F.softplus(loss.hyp_scale.detach()).item())
     aperture_scale = math.exp(aperture_logk) if aperture_logk is not None else float("nan")
     print(f"Saved plots to {output_dir.resolve()}")
     print(f"Effective curvature: {used_curvature:.6f}")
