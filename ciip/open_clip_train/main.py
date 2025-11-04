@@ -301,6 +301,8 @@ def main(args):
         if args.distill:
             dist_model = torch.nn.parallel.DistributedDataParallel(dist_model, device_ids=[device], **ddp_args)
 
+    loss = create_loss(args)
+
     # create optimizer and scaler
     optimizer = None
     scaler = None
@@ -314,19 +316,31 @@ def main(args):
         named_parameters = list(model.named_parameters())
         gain_or_bias_params = [p for n, p in named_parameters if exclude(n, p) and p.requires_grad]
         rest_params = [p for n, p in named_parameters if include(n, p) and p.requires_grad]
+        loss_params = [p for p in loss.parameters() if p.requires_grad]
+
+        param_groups = [
+            {"params": gain_or_bias_params, "weight_decay": 0.},
+            {"params": rest_params, "weight_decay": args.wd},
+        ]
+        if loss_params:
+            param_groups.append({"params": loss_params, "weight_decay": 0.})
 
         optimizer = optim.AdamW(
-            [
-                {"params": gain_or_bias_params, "weight_decay": 0.},
-                {"params": rest_params, "weight_decay": args.wd},
-            ],
+            param_groups,
             lr=args.lr,
             betas=(args.beta1, args.beta2),
             eps=args.eps,
         )
         if args.horovod:
-            optimizer = hvd.DistributedOptimizer(optimizer, named_parameters=model.named_parameters())
+            optimizer_named_parameters = list(model.named_parameters())
+            if loss_params:
+                optimizer_named_parameters.extend(
+                    (f"loss.{name}", param) for name, param in loss.named_parameters() if param.requires_grad
+                )
+            optimizer = hvd.DistributedOptimizer(optimizer, named_parameters=optimizer_named_parameters)
             hvd.broadcast_parameters(model.state_dict(), root_rank=0)
+            if loss_params:
+                hvd.broadcast_parameters(loss.state_dict(), root_rank=0)
             hvd.broadcast_optimizer_state(optimizer, root_rank=0)
 
         scaler = GradScaler() if args.precision == "amp" else None
@@ -426,8 +440,6 @@ def main(args):
         # Evaluate.
         evaluate(model, data, start_epoch, args, tb_writer=writer, tokenizer=tokenizer)
         return
-
-    loss = create_loss(args)
 
     for epoch in range(start_epoch, args.epochs):
         if is_master(args):
