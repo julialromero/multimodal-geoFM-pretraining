@@ -1,4 +1,5 @@
 import math
+from contextlib import nullcontext
 from typing import Dict
 
 import torch
@@ -216,15 +217,14 @@ class CiipLoss(nn.Module):
         with torch.cuda.amp.autocast(enabled=False):
             if self.use_hyperbolic:
                 assert curv is not None, "curv must be provided for hyperbolic logits"
-                logits_outputs = self._get_hyperbolic_logits(
+                return self._get_hyperbolic_logits(
                     s1_features,
                     s2_features,
                     logit_scale,
-                    curv
-                    # logit_bias=logit_bias,
-                    # return_gathered=return_gathered,
+                    logit_bias=logit_bias,
+                    return_gathered=return_gathered,
+                    curv=curv,
                 )
-                return logits_outputs
 
         if self.world_size > 1:
             all_s1_features, all_s2_features = gather_features(
@@ -278,19 +278,22 @@ class CiipLoss(nn.Module):
         if self.use_hyperbolic:
             if gather_for_vc:
                 raise NotImplementedError("gather_for_vc not implemented for hyperbolic loss yet")
-            else:
-                s1,_logits s2_logits, targets, curv = logits_outputs
-                gathered_s1_features = None
-                gathered_s2_features = None
+
+            s1_logits, s2_logits, targets = logits_outputs
+            gathered_s1_features = None
+            gathered_s2_features = None
 
             # Clamp temperature such that logits are not scaled more than 100x.
-            # ln(100) = ~4.6052
-            self.logit_scale.data = torch.clamp(self.logit_scale.data, max=4.6052)
-            _scale = self.logit_scale.exp()
+            # ln(100) = ~4.6052 in the original ATMG implementation, which clamps
+            # the logarithmic parameter before exponentiating. Since we receive
+            # the exponentiated scale here, we clamp directly at 100 to achieve
+            # the same behaviour.
+            max_scale = math.exp(4.6052)
+            _scale = torch.clamp(logit_scale, max=max_scale)
 
-            contrastive_loss =  0.5*(
-                nn.functional.cross_entropy(_scale * image_logits, targets) + 
-                nn.functional.cross_entropy(_scale * text_logits, targets)
+            contrastive_loss = 0.5 * (
+                F.cross_entropy(_scale * s1_logits, targets)
+                + F.cross_entropy(_scale * s2_logits, targets)
             )
         else:
             if gather_for_vc:
@@ -374,7 +377,7 @@ class CiipLoss(nn.Module):
             logit_scale,
             logit_bias=logit_bias,
             return_gathered=return_gathered,
-            curv=curv
+            curv=curv,
         )
 
     def _get_hyperbolic_logits_atmg(
@@ -386,21 +389,53 @@ class CiipLoss(nn.Module):
         return_gathered=False,
         curv=None
     ):
-        ##### HELP ON WHETERH TO GRAB ALL FEATS HERE AND HOW TO HANDLE IN LOSS CLASS
-        all_s2_feats = dist.gather_across_processes(s2_features)
-        all_s1_feats = dist.gather_across_processes(s1_features)
+        if curv is None:
+            raise ValueError("curv must be provided for hyperbolic logits")
 
-        all_s2_feats = torch.cat(all_s2_feats, dim=0)
-        all_s1_feats = torch.cat(all_s1_feats, dim=0)
-        with torch.autocast(self.device.type, dtype=torch.float32):
-            # Compute logits for hyperbolic angle based contrastive loss.
-            s1_logits = -L.pairwise_oxy_angle(s1_features, all_s2_feats, _curv)
-            s2_logits = L.pairwise_oxy_angle(s2_features, all_s1_feats, _curv)
-            batch_size = s2_features.shape[0]
-            targets = torch.arange(batch_size, device=s1_logits.device)
-            targets = targets + batch_size * self._rank
+        if torch.is_tensor(curv):
+            curv = curv.to(device=s1_features.device, dtype=s1_features.dtype)
+        else:
+            curv = torch.tensor(curv, device=s1_features.device, dtype=s1_features.dtype)
 
-        return s1_logits, s2_logits, targets, _curv
+        if self.world_size > 1:
+            all_s1_features, all_s2_features = gather_features(
+                s1_features,
+                s2_features,
+                local_loss=False,
+                gather_with_grad=self.gather_with_grad,
+                rank=self.rank,
+                world_size=self.world_size,
+                use_horovod=self.use_horovod,
+            )
+        else:
+            all_s1_features = s1_features
+            all_s2_features = s2_features
+
+        device_type = s1_features.device.type
+        autocast_enabled = device_type in {"cuda", "cpu", "xpu", "mps"}
+        autocast_context = (
+            torch.autocast(device_type=device_type, dtype=torch.float32)
+            if autocast_enabled
+            else nullcontext()
+        )
+
+        anchor_s1 = s1_features if self.local_loss or self.world_size > 1 else all_s1_features
+        anchor_s2 = s2_features if self.local_loss or self.world_size > 1 else all_s2_features
+
+        with autocast_context:
+            s1_logits = -L.pairwise_oxy_angle(anchor_s1, all_s2_features, curv)
+            s2_logits = L.pairwise_oxy_angle(anchor_s2, all_s1_features, curv)
+
+        if logit_bias is not None:
+            s1_logits = s1_logits + logit_bias
+            s2_logits = s2_logits + logit_bias
+
+        batch_size = s1_features.shape[0]
+        targets = torch.arange(batch_size, device=s1_features.device, dtype=torch.long)
+        if self.world_size > 1:
+            targets = targets + batch_size * self.rank
+
+        return s1_logits, s2_logits, targets
 
         # PRIOR IMPLEMENTATION (INCORRECT)
         # curvature = self._get_curvature(dtype=s1_features.dtype, device=s1_features.device)
