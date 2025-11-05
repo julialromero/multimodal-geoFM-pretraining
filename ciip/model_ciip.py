@@ -370,12 +370,15 @@ class CIIP(nn.Module):
     #     return x
 
     def forward(self, s1, s2):
-        # returns normalized logits along with the raw encoder outputs
-        s1_features_vc = self.encode_s1(s1, normalize=False)
-        s2_features_vc = self.encode_s2(s2, normalize=False)
+        # # returns normalized logits along with the raw encoder outputs
+        # s1_features_vc = self.encode_s1(s1, normalize=False)
+        # s2_features_vc = self.encode_s2(s2, normalize=False)
 
-        s1_features = F.normalize(s1_features_vc, dim=-1)
-        s2_features = F.normalize(s2_features_vc, dim=-1)
+        # s1_features = F.normalize(s1_features_vc, dim=-1)
+        # s2_features = F.normalize(s2_features_vc, dim=-1)
+
+        s1_features = self.encode_s1(s1, normalize=True) # normalize after projection
+        s2_features = self.encode_s2(s2, normalize=True)
 
         # # cosine similarity as logits
         logit_scale = self.logit_scale.exp()
@@ -384,8 +387,8 @@ class CIIP(nn.Module):
         out_dict = {
             "s1_features": s1_features,
             "s2_features": s2_features,
-            "s1_features_vc": s1_features_vc,
-            "s2_features_vc": s2_features_vc,
+            # "s1_features_vc": s1_features_vc,
+            # "s2_features_vc": s2_features_vc,
             "logit_scale": logit_scale
             }
 
@@ -394,94 +397,94 @@ class CIIP(nn.Module):
 
         return out_dict
 
-    def get_logits(self, s1, s2):
-        s1_features = self.encode_s1(s1, normalize=True)
-        s2_features = self.encode_s2(s2, normalize=True)
-        s1_logits = self.logit_scale.exp() * s1_features @ s2_features.T
-        if self.logit_bias is not None:
-            s1_logits += self.logit_bias
-        s2_logits = s1_logits.T
-        return s1_logits, s2_logits
+    # def get_logits(self, s1, s2, lorentz: bool = False):
+    #     s1_features = self.encode_s1(s1, normalize=True)
+    #     s2_features = self.encode_s2(s2, normalize=True)
+    #     s1_logits = self.logit_scale.exp() * s1_features @ s2_features.T
+    #     if self.logit_bias is not None:
+    #         s1_logits += self.logit_bias
+    #     s2_logits = s1_logits.T
+    #     return s1_logits, s2_logits
     
 
-    def compute_embeddings(self, s1, s2):
-        s1_features = self.encode_s1(s1, normalize=False)
-        s2_features = self.encode_s2(s2, normalize=False)
+    # def compute_embeddings(self, s1, s2):
+    #     s1_features = self.encode_s1(s1, normalize=False)
+    #     s2_features = self.encode_s2(s2, normalize=False)
 
-        # these should be normalized already
-        # # # normalized features
-        # s1_features  = s1_features  / s1_features.norm(dim=1, keepdim=True)
-        # s2_features = s2_features / s2_features.norm(dim=1, keepdim=True)
+    #     # these should be normalized already
+    #     # # # normalized features
+    #     # s1_features  = s1_features  / s1_features.norm(dim=1, keepdim=True)
+    #     # s2_features = s2_features / s2_features.norm(dim=1, keepdim=True)
 
-        out_dict = {
-            "s1_features": s1_features,
-            "s2_features": s2_features,
-            }
+    #     out_dict = {
+    #         "s1_features": s1_features,
+    #         "s2_features": s2_features,
+    #         }
     
-        return out_dict
+    #     return out_dict
 
-    def compute_orthogonal_matrix(self, s1, s2):
-        self.encoder_s1.compute_orthogonal_matrix = True
-        self.encoder_s2.compute_orthogonal_matrix = True
+    # def compute_orthogonal_matrix(self, s1, s2):
+    #     self.encoder_s1.compute_orthogonal_matrix = True
+    #     self.encoder_s2.compute_orthogonal_matrix = True
 
         
-        s1_layer1_features = self.encode_s1(s1, normalize=True)
-        s2_layer1_features = self.encode_s2(s2, normalize=True)
+    #     s1_layer1_features = self.encode_s1(s1, normalize=True)
+    #     s2_layer1_features = self.encode_s2(s2, normalize=True)
 
 
-        # Compute centroids BEFORE alignment (mean over batch and spatial dims)
-        centroid_s1 = s1_layer1_features.mean(dim=0) # shape (num_samples, num_feats) ## #.mean(dim=[0, 2, 3])  # shape: (feat_dim,)
-        centroid_s2 = s2_layer1_features.mean(dim=0) #.mean(dim=[0, 2, 3])
+    #     # Compute centroids BEFORE alignment (mean over batch and spatial dims)
+    #     centroid_s1 = s1_layer1_features.mean(dim=0) # shape (num_samples, num_feats) ## #.mean(dim=[0, 2, 3])  # shape: (feat_dim,)
+    #     centroid_s2 = s2_layer1_features.mean(dim=0) #.mean(dim=[0, 2, 3])
 
-        # normalize the centroids as well (to compare directions)
-        centroid_s1 = centroid_s1 / centroid_s1.norm()
-        centroid_s2 = centroid_s2 / centroid_s2.norm()
+    #     # normalize the centroids as well (to compare directions)
+    #     centroid_s1 = centroid_s1 / centroid_s1.norm()
+    #     centroid_s2 = centroid_s2 / centroid_s2.norm()
   
-        l2_before = torch.norm(centroid_s1 - centroid_s2, p=2).item()
-        cos_before = F.cosine_similarity(centroid_s1.unsqueeze(0), centroid_s2.unsqueeze(0)).item()
-        logging.info(f"--- Before Orthogonal Transformation ---")
-        logging.info(f"L2 norm between centroids: {l2_before:.6f}")
-        logging.info(f"Cosine similarity between centroids: {cos_before:.6f}")
+    #     l2_before = torch.norm(centroid_s1 - centroid_s2, p=2).item()
+    #     cos_before = F.cosine_similarity(centroid_s1.unsqueeze(0), centroid_s2.unsqueeze(0)).item()
+    #     logging.info(f"--- Before Orthogonal Transformation ---")
+    #     logging.info(f"L2 norm between centroids: {l2_before:.6f}")
+    #     logging.info(f"Cosine similarity between centroids: {cos_before:.6f}")
 
 
-        W = compute_optimal_orthogonal_mapping(s2_layer1_features, s1_layer1_features)
-        W = W.to(device=s1.device, dtype=torch.float32, non_blocking=True)
+    #     W = compute_optimal_orthogonal_mapping(s2_layer1_features, s1_layer1_features)
+    #     W = W.to(device=s1.device, dtype=torch.float32, non_blocking=True)
 
-        s1_layer1_features = s1_layer1_features.to(dtype=torch.float32)
-        s1_aligned = s1_layer1_features @ W
+    #     s1_layer1_features = s1_layer1_features.to(dtype=torch.float32)
+    #     s1_aligned = s1_layer1_features @ W
     
 
-        # Normalize the aligned features
-        s1_aligned = s1_aligned / s1_aligned.norm(dim=1, keepdim=True)
+    #     # Normalize the aligned features
+    #     s1_aligned = s1_aligned / s1_aligned.norm(dim=1, keepdim=True)
 
-        # Compute centroids AFTER alignment
-        centroid_s1_aligned = s1_aligned.mean(dim=0) #.mean(dim=[0, 2, 3])
+    #     # Compute centroids AFTER alignment
+    #     centroid_s1_aligned = s1_aligned.mean(dim=0) #.mean(dim=[0, 2, 3])
 
-        l2_after = torch.norm(centroid_s1_aligned - centroid_s2, p=2).item()
-        cos_after = F.cosine_similarity(centroid_s1_aligned.unsqueeze(0), centroid_s2.unsqueeze(0)).item()
+    #     l2_after = torch.norm(centroid_s1_aligned - centroid_s2, p=2).item()
+    #     cos_after = F.cosine_similarity(centroid_s1_aligned.unsqueeze(0), centroid_s2.unsqueeze(0)).item()
 
-        logging.info(f"--- After Orthogonal Transformation ---")
-        logging.info(f"L2 norm between centroids: {l2_after:.6f}")
-        logging.info(f"Cosine similarity between centroids: {cos_after:.6f}")
+    #     logging.info(f"--- After Orthogonal Transformation ---")
+    #     logging.info(f"L2 norm between centroids: {l2_after:.6f}")
+    #     logging.info(f"Cosine similarity between centroids: {cos_after:.6f}")
 
 
-        self.encoder_s1.compute_orthogonal_matrix = False
-        self.encoder_s2.compute_orthogonal_matrix = False
-        self.encoder_s1.apply_orthogonal_matrix = True
-        # self.encoder_s1.W = W
-        self.encoder_s1.register_buffer("W", W)
+    #     self.encoder_s1.compute_orthogonal_matrix = False
+    #     self.encoder_s2.compute_orthogonal_matrix = False
+    #     self.encoder_s1.apply_orthogonal_matrix = True
+    #     # self.encoder_s1.W = W
+    #     self.encoder_s1.register_buffer("W", W)
         
 
 
-        # create dictionary to return
-        out_dict = {
-        "l2_before": float(l2_before),
-        "cos_before": float(cos_before),
-        "l2_after": float(l2_after),
-        "cos_after": float(cos_after)
-        }
+    #     # create dictionary to return
+    #     out_dict = {
+    #     "l2_before": float(l2_before),
+    #     "cos_before": float(cos_before),
+    #     "l2_after": float(l2_after),
+    #     "cos_after": float(cos_after)
+    #     }
 
-        return W.detach().cpu(), out_dict
+    #     return W.detach().cpu(), out_dict
 
 
 
@@ -491,6 +494,187 @@ class CIIP(nn.Module):
     
     def count_parameters_encoder2(self):
         return sum(p.numel() for p in self.encoder_s2.parameters() if p.requires_grad)
+
+
+class LorentzCIIP(CIIP):
+    def __init__(self, 
+        # Base CIIP parameters first
+        embed_dim: int,
+        s1_resolution: int,
+        s1_layers: Union[Tuple[int, int, int, int], int],
+        s1_width: int,
+        s1_patch_size: int,
+        s1_bands: int,
+        s2_resolution: int,
+        s2_layers: Union[Tuple[int, int, int, int], int],
+        s2_width: int,
+        s2_patch_size: int,
+        s2_bands: int,
+        framework: None,
+        # Lorentz-specific parameters
+        curv_init: float = 1.0,
+        learn_curv: bool = True,
+        entail_weight: float = 0.0,
+        **kwargs):
+        
+        # Remove Lorentz-specific params before passing to parent
+        super().__init__(
+            embed_dim=embed_dim,
+            s1_resolution=s1_resolution,
+            s1_layers=s1_layers,
+            s1_width=s1_width,
+            s1_patch_size=s1_patch_size,
+            s1_bands=s1_bands,
+            s2_resolution=s2_resolution,
+            s2_layers=s2_layers,
+            s2_width=s2_width,
+            s2_patch_size=s2_patch_size,
+            s2_bands=s2_bands,
+            framework=framework,
+            **kwargs
+        )
+
+        # Initialize curvature parameter. Hyperboloid curvature will be `-curv`.
+        self.curv = nn.Parameter(
+            torch.tensor(curv_init).log(), requires_grad=learn_curv
+        )
+        # When learning the curvature parameter, restrict it in this interval to
+        # prevent training instability.
+        self._curv_minmax = {
+            "max": math.log(curv_init * 5),
+            "min": math.log(curv_init / 5),
+        }
+        self.entail_weight = entail_weight
+
+        # Learnable scalars to ensure that image/text features have an expected
+        # unit norm before exponential map (at initialization).
+        self.s2_alpha = nn.Parameter(torch.tensor(embed_dim**-0.5).log())
+        self.s1_alpha = nn.Parameter(torch.tensor(embed_dim**-0.5).log())
+
+
+    def encode_s2(self, s2: torch.Tensor, lorentz: bool):
+        """
+        Args:
+            project: Lift features from the encoder onto the Hyperboloid.
+
+        """
+
+        # Get Euclidean features from the encoder (without L2 normalization).
+        s2_feats = super().encode_s2(s2, normalize=False) # get post-head un-norm euclidean feats
+
+        # These features are space components of embeddings in the tangent
+        # space of the Hyperboloid origin (which is Euclidean). Apply projection.
+        if lorentz:
+            s2_feats = s2_feats * self.s2_alpha.exp()
+            with torch.autocast(self.device.type, dtype=torch.float32):
+                s2_feats = L.exp_map0(s2_feats, self.curv.exp())
+
+        return s2_feats
+
+    def encode_s1(self, s1: list[torch.Tensor], lorentz: bool):
+        # Get Euclidean features from the encoder (without L2 normalization).
+        s1_feats = super().encode_s1(s1, normalize=False)
+
+        if lorentz:
+            s1_feats = s1_feats * self.s1_alpha.exp()
+            with torch.autocast(self.device.type, dtype=torch.float32):
+                s1_feats = L.exp_map0(s1_feats, self.curv.exp())
+
+        return s1_feats
+
+
+    def einstein_loss(self, features, dist, curv):
+   #     print(features.shape)
+        feature_norm = torch.sum(features ** 2, dim=-1, keepdim= True)
+        features_time = torch.sqrt(1 / curv + feature_norm)
+        klein_features = features/features_time
+        lorenz_factors = 1/torch.sqrt(1+ curv * feature_norm**2)
+        klein_average = torch.sum(features * lorenz_factors, dim = 0, keepdim= True)/torch.sum(lorenz_factors, dim = 0, keepdim= True)
+       # print(klein_average.shape)
+
+        klein_norm = torch.sum(klein_average ** 2, dim=-1, keepdim= True)
+        avg_time = 1/torch.sqrt(1 + curv * klein_norm)
+
+        avg_lorenz = klein_average/torch.sqrt(1 + curv * klein_norm)
+
+        geo_dist = L.pairwise_dist(avg_lorenz, torch.zeros_like(avg_lorenz))
+        
+        return  geo_dist # torch.abs(geo_dist - dist) 
+    
+
+
+    def forward(
+        self, s2: torch.Tensor, s1: list[torch.Tensor]
+    ) -> dict[str, torch.Tensor]:
+        """
+        Args:
+            images: Image batch in BCHW format, with pixel values in `[0, 1]`.
+            tokens: List of tensors, each containing text tokens. Tensors may have
+                variable length (they will be padded internally).
+        """
+
+        self.curv.data = torch.clamp(self.curv.data, **self._curv_minmax)
+        _curv = self.curv.exp()
+
+        self.s2_alpha.data = torch.clamp(self.s2_alpha.data, max=0.0)
+        self.s1_alpha.data = torch.clamp(self.s1_alpha.data, max=0.0)
+
+        # shape: (batch_size, embed_dim)
+        s2_feats = self.encode_s2(s2, lorentz=True)
+        s1_feats = self.encode_s1(s1, lorentz=True)
+
+        # Clamp logit scale to prevent extreme scaling (ln(100) ≈ 4.6052)
+        self.logit_scale.data = torch.clamp(self.logit_scale.data, max=4.6052)
+        logit_scale = self.logit_scale.exp()
+
+        # Return dictionary similar to base CIIP class
+        out_dict = {
+            "s1_features": s1_features,
+            "s2_features": s2_features,
+            "logit_scale": logit_scale,
+            "curv": _curv,  # Include curvature for loss computation
+        }
+
+        if self.logit_bias is not None:
+            out_dict['logit_bias'] = self.logit_bias
+
+        return out_dict
+
+
+        ## ATMG seems like they compute the contrsative loss in forward here, but do they use einstein loss at all? 
+        # all_s2_feats = dist.gather_across_processes(s2_feats)
+        # all_s1_feats = dist.gather_across_processes(s1_feats)
+
+        # all_s2_feats = torch.cat(all_s2_feats, dim=0)
+        # all_s1_feats = torch.cat(all_s1_feats, dim=0)
+        # with torch.autocast(self.device.type, dtype=torch.float32):
+        #     # Compute logits for hyperbolic angle based contrastive loss.
+        #     text_logits = -L.pairwise_oxy_angle(s1_feats, all_s2_feats, _curv)
+        #     image_logits = L.pairwise_oxy_angle(s2_feats, all_s1_feats, _curv)
+        #     batch_size = s2_feats.shape[0]
+        #     targets = torch.arange(batch_size, device=text_logits.device)
+        #     targets = targets + batch_size * self._rank
+
+        #     # Clamp temperature such that logits are not scaled more than 100x.
+        #     # ln(100) = ~4.6052
+        #     self.logit_scale.data = torch.clamp(self.logit_scale.data, max=4.6052)
+        #     _scale = self.logit_scale.exp()
+
+        #     contrastive_loss =  0.5*(
+        #         nn.functional.cross_entropy(_scale * image_logits, targets) + 
+        #         nn.functional.cross_entropy(_scale * text_logits, targets)
+        #     )
+
+        #   #  loss = contrastive_loss
+        # return {
+        #     "loss": contrastive_loss,
+        #     "logging": {
+        #         "contrastive_loss": contrastive_loss,
+        #         "logit_scale": _scale,
+        #         "curv": _curv,
+        #     },
+        # }
+
 
 
 

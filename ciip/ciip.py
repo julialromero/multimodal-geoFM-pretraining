@@ -24,7 +24,7 @@ if version.parse(torch.__version__) < version.parse("1.7.1"):
     warnings.warn("PyTorch version 1.7.1 or higher is recommended")
 
 
-__all__ = ["available_models", "load", "tokenize"]
+__all__ = ["available_models", "load"]
 # _tokenizer = _Tokenizer()
 
 _MODELS = {
