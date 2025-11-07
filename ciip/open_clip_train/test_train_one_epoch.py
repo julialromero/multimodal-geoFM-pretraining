@@ -2,21 +2,11 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.cuda.amp import GradScaler
-import os
-import sys
 
-from data import get_data
-# from test_data import get_dummy_dataloader
-# from ..loss import ClipLoss
-from train import train_one_epoch
-
-# Add the parent directory to sys.path
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-sys.path.insert(0, parent_dir)
-
-# Now you can import your function
-from loss import CiipLoss
-from model_ciip import CIIP
+from ciip.model_ciip import CIIP
+from ciip.open_clip_train.data import get_data
+from ciip.open_clip_train.loss import CiipLoss
+from ciip.open_clip_train.train import train_one_epoch
 
 ciip_model = CIIP(
     embed_dim=512,

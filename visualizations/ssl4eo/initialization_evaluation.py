@@ -1,40 +1,34 @@
-import torch
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import os
+import ast
 import json
-from geopy.distance import geodesic
-from pyproj import Proj, Transformer
+import logging
+import os
+import random
+
+import hydra
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import random
-from sklearn.manifold import TSNE
-from sklearn.decomposition import PCA
-# import hdbscan
-import sklearn.cluster as cluster
-from sklearn.preprocessing import StandardScaler
-import umap
-import torch.nn.functional as F
-import matplotlib.pyplot as plt
-from sklearn.metrics.pairwise import euclidean_distances
-import ast
-from omegaconf import OmegaConf, DictConfig
-import hydra
-import sys
-parent_dir = '/home/juro4948/ciip/ciip/open_clip_train/'
-sys.path.insert(0, parent_dir)
-from open_clip import get_input_dtype
-from open_clip_train.precision import get_autocast
-from open_clip_train.distributed import is_master
-from open_clip_train.distributed import is_master, init_distributed_device
-from utils import create_model
-import logging
-from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score
-from sklearn.metrics.pairwise import cosine_similarity
+import torch
 import torch.nn as nn
+import torch.nn.functional as F
+import umap
+from geopy.distance import geodesic
+from omegaconf import DictConfig, OmegaConf
+from open_clip import get_input_dtype
+from pyproj import Proj, Transformer
+from sklearn.decomposition import PCA
+from sklearn.linear_model import LogisticRegression
+from sklearn.manifold import TSNE
+from sklearn.metrics import accuracy_score
+from sklearn.metrics.pairwise import cosine_similarity, euclidean_distances
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+
+from ciip.open_clip_train.distributed import init_distributed_device, is_master
+from ciip.open_clip_train.precision import get_autocast
+from ciip.open_clip_train.utils import create_model
 
 
 def compare_keys(model, state_dict):

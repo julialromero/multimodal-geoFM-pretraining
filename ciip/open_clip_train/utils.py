@@ -7,15 +7,13 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, Union
 
-import torch
-import sys
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
-sys.path.insert(0, parent_dir)
-from model_ciip import CIIP, LorentzCIIP
-from loss import CiipLoss, SigLipLoss
-from torch import nn
-from omegaconf import DictConfig, ListConfig, OmegaConf
 import numpy as np
+import torch
+from omegaconf import DictConfig, ListConfig, OmegaConf
+from torch import nn
+
+from ciip.model_ciip import CIIP, LorentzCIIP
+from ciip.open_clip_train.loss import CiipLoss, SigLipLoss
 
 
 def get_cast_dtype(precision: str):
