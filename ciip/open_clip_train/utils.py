@@ -11,7 +11,7 @@ import torch
 import sys
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 sys.path.insert(0, parent_dir)
-from model_ciip import CIIP
+from model_ciip import CIIP, LorentzCIIP
 from loss import CiipLoss, SigLipLoss
 from torch import nn
 from omegaconf import DictConfig, ListConfig, OmegaConf
@@ -197,8 +197,6 @@ def create_model(args, device, **model_kwargs):
     else:
         init_logit_bias = None
 
-
-
     # force_preprocess_cfg = force_preprocess_cfg or {}
     # preprocess_cfg = asdict(PreprocessCfg())
     # has_hf_hub_prefix = model_name.startswith(HF_HUB_PREFIX)
@@ -223,24 +221,49 @@ def create_model(args, device, **model_kwargs):
 
     pre_projection_dim = getattr(args.model, "pre_projection_dim", args.model.embed_dim)
 
-    model = CIIP(embed_dim=args.model.embed_dim,
-        pre_projection_dim=pre_projection_dim,
-        s1_resolution=args.model.s1_resolution,
-        s1_layers=OmegaConf.to_object(args.model.s1_layers),
-        s1_width=args.model.width,
-        s1_patch_size=args.model.s1_patch_size, # used by transformer
-        s1_bands=len(args.model.s1_bands),
-        s2_resolution=args.model.s2_resolution,
-        s2_layers=OmegaConf.to_object(args.model.s2_layers), #Resnet-34
-        s2_width=args.model.width,
-        s2_patch_size=args.model.s2_patch_size, # used by transformer
-        s2_bands=len(args.model.s2_bands),
-        framework=args.model.framework,
-        pretrain=args.model.pretrain.load,
-        s1_weights=args.model.pretrain.s1_weights,
-        s2_weights=args.model.pretrain.s2_weights,
-        init_logit_scale=init_logit_scale,
-        init_logit_bias=init_logit_bias)
+    if args.loss.hyperbolic:
+        print("Using hyperbolic model")
+        model = LorentzCIIP(embed_dim=args.model.embed_dim,
+            pre_projection_dim=pre_projection_dim,
+            s1_resolution=args.model.s1_resolution,
+            s1_layers=OmegaConf.to_object(args.model.s1_layers),
+            s1_width=args.model.width,
+            s1_patch_size=args.model.s1_patch_size, # used by transformer
+            s1_bands=len(args.model.s1_bands),
+            s2_resolution=args.model.s2_resolution,
+            s2_layers=OmegaConf.to_object(args.model.s2_layers), #Resnet-34
+            s2_width=args.model.width,
+            s2_patch_size=args.model.s2_patch_size, # used by transformer
+            s2_bands=len(args.model.s2_bands),
+            framework=args.model.framework,
+            pretrain=args.model.pretrain.load,
+            s1_weights=args.model.pretrain.s1_weights,
+            s2_weights=args.model.pretrain.s2_weights,
+            init_logit_scale=init_logit_scale,
+            init_logit_bias=init_logit_bias,
+            curv_init=args.loss.curvature_init,
+            learn_curv=args.loss.learn_curv,
+            entail_weight=args.loss.entail_weight)
+    else:
+
+        model = CIIP(embed_dim=args.model.embed_dim,
+            pre_projection_dim=pre_projection_dim,
+            s1_resolution=args.model.s1_resolution,
+            s1_layers=OmegaConf.to_object(args.model.s1_layers),
+            s1_width=args.model.width,
+            s1_patch_size=args.model.s1_patch_size, # used by transformer
+            s1_bands=len(args.model.s1_bands),
+            s2_resolution=args.model.s2_resolution,
+            s2_layers=OmegaConf.to_object(args.model.s2_layers), #Resnet-34
+            s2_width=args.model.width,
+            s2_patch_size=args.model.s2_patch_size, # used by transformer
+            s2_bands=len(args.model.s2_bands),
+            framework=args.model.framework,
+            pretrain=args.model.pretrain.load,
+            s1_weights=args.model.pretrain.s1_weights,
+            s2_weights=args.model.pretrain.s2_weights,
+            init_logit_scale=init_logit_scale,
+            init_logit_bias=init_logit_bias)
     # , 
         # cast_dtype=cast_dtype)
 

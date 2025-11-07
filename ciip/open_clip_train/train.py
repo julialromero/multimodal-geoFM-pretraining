@@ -9,7 +9,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from typing import Dict
+from typing import Dict, Optional
 
 from torch.nn.parallel.distributed import DistributedDataParallel
 from torch.autograd.profiler import record_function
@@ -343,6 +343,8 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
         data_time_m.update(time.time() - end)
         optimizer.zero_grad()
 
+        curv_scalar: Optional[float] = None
+
         if args.train.accum_freq == 1:
             with autocast():
                 model_out = model(s1, s2)
@@ -356,6 +358,9 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
 
                 total_loss = sum(losses.values())
                 losses["loss"] = total_loss
+
+            if "curv" in model_out:
+                curv_scalar = float(model_out["curv"].detach().item())
 
             _accumulate_vc_metrics(loss, model_out, vc_metrics_m, s1.shape[0])
             backward(total_loss, scaler)
@@ -371,6 +376,8 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                     _accumulate_vc_metrics(loss, model_out, vc_metrics_m, s1.shape[0])
 
                     for key, val in model_out.items():
+                        if val.ndim == 0:
+                            continue
                         if key in accum_features:
                             accum_features[key].append(val)
                         else:
@@ -405,6 +412,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                         inputs_no_accum["logit_scale"] = logit_scale = model_out.pop("logit_scale")
                         if "logit_bias" in model_out:
                             inputs_no_accum["logit_bias"] = model_out.pop("logit_bias")
+                        
 
                         # inputs = {}
                         # for key, val in accum_features.items():
@@ -416,6 +424,17 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                             temp_accumulated = list(accum_features_current_loop[key]) # Create a copy for modification
                             temp_accumulated[j] = model_out[key] # Replace with the current grad-tracked feature
                             inputs[key] = torch.cat(temp_accumulated)
+
+                        # Add scalar metadata (e.g. curvature) directly from the current
+                        # model output. These values should not be concatenated across
+                        # micro-batches because the loss expects scalars.
+                        for key, val in model_out.items():
+                            if key in inputs or key in inputs_no_accum:
+                                continue
+                            inputs[key] = val
+
+                        if "curv" in model_out:
+                            curv_scalar = float(model_out["curv"].detach().item())
 
                         losses = loss(**inputs, **inputs_no_accum, output_dict=True)
                         # logging.info(f"Losses for batch {i_accum}, inner pass {j + 1}/{args.train.accum_freq}: {losses}")
@@ -492,6 +511,10 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 metrics_log_parts.extend(
                     f"{name}: {value:#.5g}" for name, value in loss_param_state.items()
                 )
+            if curv_scalar is None and loss_param_state:
+                curv_scalar = loss_param_state.get("curvature")
+            if curv_scalar is not None:
+                metrics_log_parts.append(f"curv: {curv_scalar:#.5g}")
             metrics_log = " ".join(metrics_log_parts)
             samples_per_second = args.train.accum_freq * args.datamodule.batch_size * args.datamodule.world_size / batch_time_m.val
             samples_per_second_per_gpu = args.train.accum_freq * args.datamodule.batch_size / batch_time_m.val
@@ -517,6 +540,8 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 log_data.update({name: meter.val for name, meter in vc_metrics_m.items()})
             if loss_param_state:
                 log_data.update({f"loss/{name}": value for name, value in loss_param_state.items()})
+            if curv_scalar is not None:
+                log_data["curv"] = curv_scalar
             log_data = {"train/" + name: val for name, val in log_data.items()}
 
             if tb_writer is not None:

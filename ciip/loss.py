@@ -125,39 +125,24 @@ class CiipLoss(nn.Module):
         self.batch_uniformity_weight = float(batch_uniformity_weight)
 
         self.use_hyperbolic = bool(hyperbolic)
-        self.hyperbolic_normalize = bool(hyperbolic_normalize)
-        self.hyperbolic_eps = float(hyperbolic_eps)
-        self.centroid_lambda = float(centroid_lambda)
-        self.centroid_p = float(centroid_p)
-        self.centroid_q = float(centroid_q)
+        # self.hyperbolic_normalize = bool(hyperbolic_normalize)
+        # self.hyperbolic_eps = float(hyperbolic_eps)
+        # self.centroid_lambda = float(centroid_lambda)
+        # self.centroid_p = float(centroid_p)
+        # self.centroid_q = float(centroid_q)
 
-        curvature_init = max(float(hyperbolic_curvature_init), self.hyperbolic_eps)
+        # curvature_init = max(float(hyperbolic_curvature_init), self.hyperbolic_eps)
 
-        # Learnable positive scale on Euclidean features BEFORE Lorentz lift
-        # (stabilizes early training without destroying radial info)
-        self.hyp_scale = nn.Parameter(torch.tensor(0.5))
-        curvature_alpha = math.log(math.expm1(curvature_init))
-        self.curvature_alpha = nn.Parameter(torch.tensor(curvature_alpha))
+        # # Learnable positive scale on Euclidean features BEFORE Lorentz lift
+        # # (stabilizes early training without destroying radial info)
+        # self.hyp_scale = nn.Parameter(torch.tensor(0.5))
+        # curvature_alpha = math.log(math.expm1(curvature_init))
+        # self.curvature_alpha = nn.Parameter(torch.tensor(curvature_alpha))
 
         # cache state
         self.prev_num_logits = 0
         self.labels = {}
 
-    def get_loggable_state(self) -> Dict[str, float]:
-        """Return scalar values for learnable parameters and their projections."""
-        state: Dict[str, float] = {}
-        for name, param in self.named_parameters():
-            state[f"{name}_raw"] = float(param.detach().item())
-
-        if self.use_hyperbolic:
-            hyp_scale = F.softplus(self.hyp_scale.detach())
-            curvature = F.softplus(self.curvature_alpha.detach()) + self.hyperbolic_eps
-            state.update({
-                "hyp_scale": float(hyp_scale.item()),
-                "curvature": float(curvature.item()),
-            })
-
-        return state
 
     def _variance_regularizer(self, features: torch.Tensor) -> torch.Tensor:
         if features.ndim != 2 or features.shape[0] <= 1:
@@ -267,6 +252,7 @@ class CiipLoss(nn.Module):
         need_vc = self.vc_reg_enabled and self.vc_weight != 0
         need_batch_uniformity = self.batch_uniformity_enabled and self.batch_uniformity_weight != 0
         gather_for_vc = need_vc and self.world_size > 1
+
         logits_outputs = self.get_logits(
             s1_features,
             s2_features,

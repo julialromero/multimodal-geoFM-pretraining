@@ -27,6 +27,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+
+import sys
+sys.path.append('/home/juro4948/ciip/')
+sys.path.append('/home/juro4948/ciip/ciip/')
+sys.path.append('/home/juro4948/ciip/ciip/open_clip_train/')
+
 from ciip.loss import CiipLoss
 from ciip.open_clip_train.data import SSL4EODataset
 from visualizations.ssl4eo.embedding_collapse_diagnostics import (

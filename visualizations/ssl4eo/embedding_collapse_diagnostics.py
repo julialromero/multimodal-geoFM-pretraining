@@ -440,68 +440,6 @@ def compare_state_keys(model: torch.nn.Module, state_dict: Dict[str, torch.Tenso
     return model_keys - checkpoint_keys, checkpoint_keys - model_keys
 
 
-# def load_model_from_checkpoint(
-#     config: DictConfig,
-#     checkpoint_path: Path,
-#     *,
-#     device: torch.device,
-#     input_dtype: torch.dtype,
-#     w_path: Optional[Path] = None,
-#     skip_final_fc: bool = False,
-#     use_orthogonal_mapping: bool = False,
-# ) -> torch.nn.Module:
-#     """Instantiate a CIIP model and load weights from ``checkpoint_path``."""
-
-#     model = create_model(config, device=device)
-
-#     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-#     state_dict = checkpoint.get("state_dict", checkpoint)
-
-#     try:
-#         model.load_state_dict(state_dict, strict=True)
-#     except Exception:
-#         cleaned = {k.replace("module.", ""): v for k, v in state_dict.items()}
-#         try:
-#             model.load_state_dict(cleaned, strict=True)
-#         except Exception:
-#             if "encoder_s1.W" in cleaned:
-#                 del cleaned["encoder_s1.W"]
-#             missing, unexpected = compare_state_keys(model, cleaned)
-#             if missing or unexpected:
-#                 raise RuntimeError(
-#                     f"Checkpoint {checkpoint_path} is incompatible with the CIIP architecture."
-#                 )
-#             model.load_state_dict(cleaned, strict=True)
-#         else:
-#             state_dict = cleaned
-
-#     use_w_mapping = bool(use_orthogonal_mapping and w_path is not None and w_path.exists())
-#     if use_w_mapping:
-#         try:
-#             orthogonal = torch.load(w_path, map_location=device)
-#         except Exception as exc:  # pragma: no cover - defensive branch
-#             _LOGGER.warning("Failed to load orthogonal mapping from %s: %s", w_path, exc)
-#             use_w_mapping = False
-#         else:
-#             if hasattr(model, "encoder_s1"):
-#                 model.encoder_s1.register_buffer("W", orthogonal)
-#     if hasattr(model, "encoder_s1") and hasattr(model.encoder_s1, "apply_orthogonal_matrix"):
-#         model.encoder_s1.apply_orthogonal_matrix = use_w_mapping
-
-#     if input_dtype is not None:
-#         model = model.to(device, dtype=input_dtype, non_blocking=True)
-#     else:
-#         model = model.to(device, non_blocking=True)
-
-#     if skip_final_fc:
-#         if hasattr(model, "encoder_s1") and hasattr(model.encoder_s1, "fc"):
-#             model.encoder_s1.fc = nn.Identity()
-#         if hasattr(model, "encoder_s2") and hasattr(model.encoder_s2, "fc"):
-#             model.encoder_s2.fc = nn.Identity()
-
-#     model.eval()
-#     return model
-
 def load_model_from_checkpoint(
     config: DictConfig,
     checkpoint_path: Path,
@@ -512,126 +450,76 @@ def load_model_from_checkpoint(
     skip_final_fc: bool = False,
     use_orthogonal_mapping: bool = False,
 ) -> torch.nn.Module:
-    """Instantiate a CIIP model and load weights from ``checkpoint_path``."""
+    """Instantiate a CIIP model and load weights from checkpoint_path."""
 
     model = create_model(config, device=device)
-
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     state_dict = checkpoint.get("state_dict", checkpoint)
 
-    def _check_and_replace_fc_layers(model, state_dict):
-        """Check fc layer dimensions and replace if incompatible."""
-        replacements_made = []
-        
+    def _replace_incompatible_fc_layers(model, state_dict):
+        """Replace FC layers with incompatible dimensions."""
+        replacements = []
         for encoder_name in ['encoder_s1', 'encoder_s2']:
-            if not hasattr(model, encoder_name):
-                continue
-                
-            encoder = getattr(model, encoder_name)
-            if not hasattr(encoder, 'fc'):
+            encoder = getattr(model, encoder_name, None)
+            if encoder is None or not hasattr(encoder, 'fc'):
                 continue
                 
             fc_weight_key = f"{encoder_name}.fc.weight"
-            fc_bias_key = f"{encoder_name}.fc.bias"
-            
             if fc_weight_key not in state_dict:
                 continue
                 
-            # Get dimensions from checkpoint and model
-            checkpoint_weight = state_dict[fc_weight_key]
-            model_fc = encoder.fc
-            
-            checkpoint_shape = checkpoint_weight.shape
-            model_shape = model_fc.weight.shape
+            checkpoint_shape = state_dict[fc_weight_key].shape
+            model_shape = encoder.fc.weight.shape
             
             if checkpoint_shape != model_shape:
                 _LOGGER.warning(
-                    f"FC layer dimension mismatch in {encoder_name}: "
-                    f"checkpoint {checkpoint_shape} vs model {model_shape}. "
-                    f"Replacing with compatible layer."
+                    f"FC dimension mismatch in {encoder_name}: "
+                    f"checkpoint {checkpoint_shape} vs model {model_shape}. Replacing."
                 )
                 
-                # Create new fc layer with checkpoint dimensions
-                in_features = checkpoint_shape[1]
-                out_features = checkpoint_shape[0]
-                has_bias = fc_bias_key in state_dict
-                
-                new_fc = nn.Linear(in_features, out_features, bias=has_bias)
-                setattr(encoder, 'fc', new_fc)
-                replacements_made.append(f"{encoder_name}.fc")
+                in_features, out_features = checkpoint_shape[1], checkpoint_shape[0]
+                has_bias = f"{encoder_name}.fc.bias" in state_dict
+                encoder.fc = nn.Linear(in_features, out_features, bias=has_bias)
+                replacements.append(f"{encoder_name}.fc")
         
-        return replacements_made
+        return replacements
 
+    # Try loading state dict with progressively relaxed constraints
     try:
         model.load_state_dict(state_dict, strict=True)
-    except Exception as e:
-        _LOGGER.info(f"Initial load failed: {e}. Attempting fixes...")
-        
-        # Try removing module prefix
+    except Exception:
+        # Remove module prefix and problematic keys
         cleaned = {k.replace("module.", ""): v for k, v in state_dict.items()}
+        if "encoder_s1.W" in cleaned:
+            del cleaned["encoder_s1.W"]
         
-        try:
-            model.load_state_dict(cleaned, strict=True)
-        except Exception:
-            # Remove problematic keys
-            if "encoder_s1.W" in cleaned:
-                del cleaned["encoder_s1.W"]
-            
-            # Check and replace incompatible fc layers
-            replacements = _check_and_replace_fc_layers(model, cleaned)
-            if replacements:
-                _LOGGER.info(f"Replaced incompatible layers: {replacements}")
-            
-            # Check for remaining compatibility issues
-            missing, unexpected = compare_state_keys(model, cleaned)
-            
-            # Filter out the layers we just replaced from missing keys
-            missing_filtered = set()
-            for key in missing:
-                is_replaced_layer = any(key.startswith(repl) for repl in replacements)
-                if not is_replaced_layer:
-                    missing_filtered.add(key)
-            
-            if missing_filtered or unexpected:
-                _LOGGER.warning(f"Missing keys: {missing_filtered}")
-                _LOGGER.warning(f"Unexpected keys: {unexpected}")
-                
-                # Only raise error if there are critical missing keys
-                critical_missing = {k for k in missing_filtered 
-                                  if not any(pattern in k for pattern in ['fc.weight', 'fc.bias', 'W'])}
-                if critical_missing:
-                    raise RuntimeError(
-                        f"Checkpoint {checkpoint_path} has critical incompatibilities: {critical_missing}"
-                    )
-            
-            # Load with non-strict mode to handle the replaced layers
-            model.load_state_dict(cleaned, strict=False)
-        else:
-            state_dict = cleaned
+        # Replace incompatible FC layers
+        replacements = _replace_incompatible_fc_layers(model, cleaned)
+        if replacements:
+            _LOGGER.info(f"Replaced incompatible layers: {replacements}")
+        
+        # Check for remaining issues
+        missing, unexpected = compare_state_keys(model, cleaned)
+        missing_filtered = {k for k in missing if not any(k.startswith(r) for r in replacements)}
+        
+        if missing_filtered or unexpected:
+            _LOGGER.warning(f"Missing: {missing_filtered}, Unexpected: {unexpected}")
+            critical_missing = {k for k in missing_filtered 
+                              if not any(p in k for p in ['fc.weight', 'fc.bias', 'W'])}
+            if critical_missing:
+                raise RuntimeError(f"Critical incompatibilities: {critical_missing}")
+        
+        model.load_state_dict(cleaned, strict=False)
 
-    use_w_mapping = bool(use_orthogonal_mapping and w_path is not None and w_path.exists())
-    if use_w_mapping:
-        try:
-            orthogonal = torch.load(w_path, map_location=device)
-        except Exception as exc:  # pragma: no cover - defensive branch
-            _LOGGER.warning("Failed to load orthogonal mapping from %s: %s", w_path, exc)
-            use_w_mapping = False
-        else:
-            if hasattr(model, "encoder_s1"):
-                model.encoder_s1.register_buffer("W", orthogonal)
-    if hasattr(model, "encoder_s1") and hasattr(model.encoder_s1, "apply_orthogonal_matrix"):
-        model.encoder_s1.apply_orthogonal_matrix = use_w_mapping
+    # Apply dtype and device
+    model = model.to(device, dtype=input_dtype, non_blocking=True)
 
-    if input_dtype is not None:
-        model = model.to(device, dtype=input_dtype, non_blocking=True)
-    else:
-        model = model.to(device, non_blocking=True)
-
+    # Skip final FC layers if requested
     if skip_final_fc:
-        if hasattr(model, "encoder_s1") and hasattr(model.encoder_s1, "fc"):
-            model.encoder_s1.fc = nn.Identity()
-        if hasattr(model, "encoder_s2") and hasattr(model.encoder_s2, "fc"):
-            model.encoder_s2.fc = nn.Identity()
+        for encoder_name in ['encoder_s1', 'encoder_s2']:
+            encoder = getattr(model, encoder_name, None)
+            if encoder and hasattr(encoder, 'fc'):
+                encoder.fc = nn.Identity()
 
     model.eval()
     return model
@@ -753,6 +641,10 @@ def extract_embeddings_for_dataset(
 ]:
     """Run the encoders over ``dataset`` and return raw & normalized embeddings."""
 
+    # check if model is LorentzCIIP
+    is_lorentz = model.__class__.__name__ == "LorentzCIIP"
+    print(f"Extracting embeddings using LorentzCIIP model: {is_lorentz}")
+
     base_dataset, index_map = _unwrap_subset(dataset)
     s1_vectors: List[torch.Tensor] = []
     s2_vectors: List[torch.Tensor] = []
@@ -796,9 +688,14 @@ def extract_embeddings_for_dataset(
                     s1_norm = s2_norm = None
 
                 if s1_embed is None or s2_embed is None:
-                    with autocast():
-                        s1_embed = model.encode_s1(s1_tensor, normalize=False)
-                        s2_embed = model.encode_s2(s2_tensor, normalize=False)
+                    if is_lorentz:
+                        with autocast():
+                            s1_embed = model.encode_s1(s1_tensor, lorentz=True)
+                            s2_embed = model.encode_s2(s2_tensor, lorentz=True)
+                    else:
+                        with autocast():
+                            s1_embed = model.encode_s1(s1_tensor, normalize=False)
+                            s2_embed = model.encode_s2(s2_tensor, normalize=False)
                     s1_norm = None
                     s2_norm = None
 
@@ -1011,10 +908,10 @@ def collect_epoch_embeddings(
         max_checkpoints=max_checkpoints,
     )
 
-    w_path = checkpoint_root / "W.pt"
-    if not w_path.exists():
-        w_path = None
-        print("No orthogonal mapping W.pt found in checkpoint root")
+    # w_path = checkpoint_root / "W.pt"
+    # if not w_path.exists():
+    #     w_path = None
+    #     print("No orthogonal mapping W.pt found in checkpoint root")
 
     epochs: List[EpochEmbeddings] = []
     for idx, checkpoint_path in enumerate(checkpoints):
@@ -1027,7 +924,7 @@ def collect_epoch_embeddings(
             checkpoint_path,
             device=device,
             input_dtype=input_dtype,
-            w_path=w_path,
+            # w_path=w_path,
             skip_final_fc=skip_final_fc,
             use_orthogonal_mapping=use_orthogonal_mapping,
         )

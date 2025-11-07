@@ -5,12 +5,13 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
+import math
 
 from torchgeo.models import resnet18, ResNet18_Weights, ResNet50_Weights, resnet50
 from model import ModifiedResNet #, ResNet50 #, S1Transformer, S2Transformer
 # VisionTransformer
 import logging
-
+import lorentz as L
 
 ##############################################################
 ############ START CIIP MODEL IMPLEMENTATION #################
@@ -552,12 +553,14 @@ class LorentzCIIP(CIIP):
         self.s1_alpha = nn.Parameter(torch.tensor(embed_dim**-0.5).log())
 
 
-    def encode_s2(self, s2: torch.Tensor, lorentz: bool):
+    def encode_s2(self, s2: torch.Tensor, lorentz: bool, normalize: bool = False):
         """
         Args:
             project: Lift features from the encoder onto the Hyperboloid.
 
         """
+        if normalize:
+            print("Warning: normalize=True is ignored in LorentzCIIP.encode_s2")
 
         # Get Euclidean features from the encoder (without L2 normalization).
         s2_feats = super().encode_s2(s2, normalize=False) # get post-head un-norm euclidean feats
@@ -566,18 +569,21 @@ class LorentzCIIP(CIIP):
         # space of the Hyperboloid origin (which is Euclidean). Apply projection.
         if lorentz:
             s2_feats = s2_feats * self.s2_alpha.exp()
-            with torch.autocast(self.device.type, dtype=torch.float32):
+            with torch.autocast(s2_feats.device.type, dtype=torch.float32):
                 s2_feats = L.exp_map0(s2_feats, self.curv.exp())
 
         return s2_feats
 
-    def encode_s1(self, s1: list[torch.Tensor], lorentz: bool):
+    def encode_s1(self, s1: list[torch.Tensor], lorentz: bool, normalize: bool = False):
+        if normalize:
+            print("Warning: normalize=True is ignored in LorentzCIIP.encode_s2")
+            
         # Get Euclidean features from the encoder (without L2 normalization).
         s1_feats = super().encode_s1(s1, normalize=False)
 
         if lorentz:
             s1_feats = s1_feats * self.s1_alpha.exp()
-            with torch.autocast(self.device.type, dtype=torch.float32):
+            with torch.autocast(s1_feats.device.type, dtype=torch.float32):
                 s1_feats = L.exp_map0(s1_feats, self.curv.exp())
 
         return s1_feats
@@ -604,7 +610,7 @@ class LorentzCIIP(CIIP):
 
 
     def forward(
-        self, s2: torch.Tensor, s1: list[torch.Tensor]
+        self, s1: torch.Tensor, s2: list[torch.Tensor]
     ) -> dict[str, torch.Tensor]:
         """
         Args:
@@ -615,6 +621,9 @@ class LorentzCIIP(CIIP):
 
         self.curv.data = torch.clamp(self.curv.data, **self._curv_minmax)
         _curv = self.curv.exp()
+        # _curv = _curv.unsqueeze(0)
+        # # assert that there is a batch dim
+        # assert _curv.dim() == 1
 
         self.s2_alpha.data = torch.clamp(self.s2_alpha.data, max=0.0)
         self.s1_alpha.data = torch.clamp(self.s1_alpha.data, max=0.0)
@@ -629,8 +638,8 @@ class LorentzCIIP(CIIP):
 
         # Return dictionary similar to base CIIP class
         out_dict = {
-            "s1_features": s1_features,
-            "s2_features": s2_features,
+            "s1_features": s1_feats,
+            "s2_features": s2_feats,
             "logit_scale": logit_scale,
             "curv": _curv,  # Include curvature for loss computation
         }
