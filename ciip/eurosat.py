@@ -11,7 +11,12 @@ from sklearn.metrics import f1_score
 from collections import OrderedDict
 from datetime import datetime
 import warnings 
-from eval_utils import CustomTransform, create_ciip_model, load_ciip_model_checkpoint, modify_ciip_for_eurosat
+from .eval_utils import (
+    CustomTransform,
+    create_ciip_model,
+    load_ciip_model_checkpoint,
+    modify_ciip_for_eurosat,
+)
 
 # from torch.nn import Module, ModuleList, Conv1d, Sequential, ReLU, Dropout, Linear
 

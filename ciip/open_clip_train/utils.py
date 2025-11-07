@@ -13,7 +13,7 @@ from omegaconf import DictConfig, ListConfig, OmegaConf
 from torch import nn
 
 from ciip.model_ciip import CIIP, LorentzCIIP
-from ciip.open_clip_train.loss import CiipLoss, SigLipLoss
+from ..loss import CiipLoss, SigLipLoss
 
 
 def get_cast_dtype(precision: str):

@@ -8,7 +8,7 @@ from torch import nn
 import math
 
 from torchgeo.models import resnet18, ResNet18_Weights, ResNet50_Weights, resnet50
-from model import ModifiedResNet #, ResNet50 #, S1Transformer, S2Transformer
+from .model import ModifiedResNet  # , ResNet50 #, S1Transformer, S2Transformer
 # VisionTransformer
 import logging
 import lorentz as L

@@ -14,6 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import umap
+from importlib import resources
 from geopy.distance import geodesic
 from omegaconf import DictConfig, OmegaConf
 from open_clip import get_input_dtype
@@ -328,8 +329,12 @@ class Subset(Dataset):
 
 CONF = "prod_default"
 
-from data import get_data
-@hydra.main(config_path="/home/juro4948/ciip/ciip/open_clip_train/configs", config_name=CONF)
+from ciip.open_clip_train.data import get_data
+
+CONFIG_DIR = resources.files("ciip.open_clip_train") / "configs"
+
+
+@hydra.main(config_path=os.fspath(CONFIG_DIR), config_name=CONF)
 
 def main(args: DictConfig):
     print('----')
