@@ -2,33 +2,27 @@ import json
 import logging
 import math
 import os
+import random
 import time
-import sys
+from contextlib import nullcontext
+from typing import Dict, Optional
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-
-from typing import Dict, Optional
-
-from torch.nn.parallel.distributed import DistributedDataParallel
+from open_clip import get_input_dtype
 from torch.autograd.profiler import record_function
+from torch.nn.parallel.distributed import DistributedDataParallel
+from torch.utils.data import DataLoader, Dataset
 
 try:
     import wandb
 except ImportError:
     wandb = None
 
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
-sys.path.insert(0, parent_dir)
-from open_clip import get_input_dtype
-from open_clip_train.distributed import is_master
-from open_clip_train.zero_shot import zero_shot_eval
-from open_clip_train.precision import get_autocast
-
-import random
-from torch.utils.data import Dataset, DataLoader
-from contextlib import nullcontext
+from ciip.open_clip_train.distributed import is_master
+from ciip.open_clip_train.precision import get_autocast
+from ciip.open_clip_train.zero_shot import zero_shot_eval
 
 class Subset(Dataset):
 

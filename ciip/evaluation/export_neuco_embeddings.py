@@ -21,36 +21,25 @@ from __future__ import annotations
 
 import argparse
 import csv
+import glob
 import logging
+import os
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
-import argparse, logging, os, glob
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
 import xarray as xr
-from zarr.storage import ZipStore
+from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 from tqdm import tqdm
-# --- plug your local helper that builds the CIIP model ---
-# Ensure this import resolves (you had it earlier)
-import sys
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-PACKAGE_ROOT = Path(__file__).resolve().parents[1]
-for candidate in (PROJECT_ROOT, PACKAGE_ROOT):
-    s = str(candidate)
-    if s not in sys.path:
-        sys.path.insert(0, s)
+from zarr.storage import ZipStore
 
-sys.path.append('/home/juro4948/ciip/ciip/')
-sys.path.append('/local/ms-data/NeuCo-Bench/examples/')
-from eval_utils import create_ciip_model  # type: ignore
-from data.submission_utils import create_submission_from_dict, test_submission
+from ciip.eval_utils import create_ciip_model
 
 # ------------------------
 # Config & normalisation

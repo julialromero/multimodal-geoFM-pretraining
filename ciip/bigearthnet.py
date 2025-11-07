@@ -4,7 +4,7 @@ from torch.utils.data import DataLoader
 from torchvision.transforms import v2 as transforms
 from torchgeo.datasets import BigEarthNet
 from torchgeo.models import resnet50, ResNet50_Weights
-from model_ciip import CIIP
+from ciip.model_ciip import CIIP
 
 # Load the BigEarthNet dataset
 # https://torchgeo.readthedocs.io/en/stable/api/datasets.html#bigearthnet

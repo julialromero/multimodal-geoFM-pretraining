@@ -17,9 +17,9 @@ from sklearn.metrics import accuracy_score, f1_score
 from tqdm import tqdm
 import torch.nn as nn
 import torch.optim as optim
-from eval_utils import create_ciip_model, load_ciip_model_checkpoint, CustomTransform
+from .eval_utils import create_ciip_model, load_ciip_model_checkpoint, CustomTransform
 
-from model import ResNet50
+from .model import ResNet50
 import json
 from datetime import datetime
 

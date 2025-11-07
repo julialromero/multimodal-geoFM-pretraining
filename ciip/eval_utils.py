@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from collections import OrderedDict
-from model_ciip import CIIP  # Make sure this is defined correctly  
+from ciip.model_ciip import CIIP  # Make sure this is defined correctly
 import torch.nn.functional as F
 
 
