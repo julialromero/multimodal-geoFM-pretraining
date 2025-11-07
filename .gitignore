@@ -26,6 +26,8 @@ data/**
 local/*
 **/local/*
 **/notebooks/
+!ciip/visualizations/ssl4eo/notebooks/
+!ciip/visualizations/ssl4eo/notebooks/**
 **/tests/
 
 # **/open_clip_train/outputs/
