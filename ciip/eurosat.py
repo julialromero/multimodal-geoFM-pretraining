@@ -6,7 +6,7 @@ from torchvision.transforms import v2 as transforms
 from torchgeo.datasets import EuroSAT
 from torchgeo.models import resnet50, ResNet50_Weights
 from torchgeo.models import resnet18, ResNet18_Weights
-from model_ciip import CIIP
+from ciip.model_ciip import CIIP
 from sklearn.metrics import f1_score
 from collections import OrderedDict
 from datetime import datetime
