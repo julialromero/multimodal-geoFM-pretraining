@@ -1,21 +1,17 @@
+import json
 import os
 from configparser import ConfigParser
 from types import SimpleNamespace
-import sys
-import time
-import json
+
 import numpy as np
 import torch
-
-from train import train_one_epoch, evaluate
-from data import get_data
-
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
-sys.path.insert(0, parent_dir)
-from model_ciip import CIIP
 from open_clip import get_input_dtype
-from open_clip_train.precision import get_autocast
-from open_clip_train.distributed import is_master
+
+from ciip.model_ciip import CIIP
+from ciip.open_clip_train.data import get_data
+from ciip.open_clip_train.distributed import is_master
+from ciip.open_clip_train.precision import get_autocast
+from ciip.open_clip_train.train import evaluate, train_one_epoch
 
 LATEST_CHECKPOINT_NAME = "epoch_20.pt"
 CHECKPOINT_EPOCH = '20'

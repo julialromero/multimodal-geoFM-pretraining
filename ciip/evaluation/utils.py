@@ -1,21 +1,27 @@
+import csv
+import hashlib
+import json
+import os
+import re
+from collections import OrderedDict
+from datetime import datetime
+
+import matplotlib.pyplot as plt
+import numpy as np
 import torch
 import torch.nn as nn
-from collections import OrderedDict
-
-import sys
-sys.path.append('/home/juro4948/ciip/ciip')
-from model_ciip import CIIP  # Make sure this is defined correctly  
 import torch.nn.functional as F
-import hashlib
-from torchgeo.models import resnet50, ResNet50_Weights, resnet18, ResNet18_Weights, ViTSmall16_Weights, \
-    vit_small_patch16_224
-import json
-from datetime import datetime
-import numpy as np
-import os
-import csv
-import matplotlib.pyplot as plt
-import re
+from torchgeo.models import (
+    ResNet18_Weights,
+    ResNet50_Weights,
+    ViTSmall16_Weights,
+    resnet18,
+    resnet50,
+    vit_small_patch16_224,
+)
+
+from ciip.model_ciip import CIIP
+from ciip.eval_utils import create_ciip_model
 
 def sample_episode(dataset, n_way, k_shot, query_per_class=15):
     """

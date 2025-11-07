@@ -56,27 +56,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
-import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
-from matplotlib.backends.backend_pdf import PdfPages
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from matplotlib.backends.backend_pdf import PdfPages
 from omegaconf import DictConfig, OmegaConf
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 
-import sys
-parent_dir = '/home/juro4948/ciip/ciip/open_clip_train/'
-sys.path.insert(0, parent_dir)
-
-# from ciip.open_clip_train.data import get_data
-# from ciip.open_clip_train.precision import get_autocast
-# from ciip.open_clip_train.utils import create_model
-from data import get_data
-from utils import create_model
-from open_clip_train.precision import get_autocast
+from ciip.open_clip_train.data import get_data
+from ciip.open_clip_train.precision import get_autocast
+from ciip.open_clip_train.utils import create_model
 
 import os
 try:

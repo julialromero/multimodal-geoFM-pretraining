@@ -6,12 +6,17 @@ from torchvision.transforms import v2 as transforms
 from torchgeo.datasets import EuroSAT
 from torchgeo.models import resnet50, ResNet50_Weights
 from torchgeo.models import resnet18, ResNet18_Weights
-from model_ciip import CIIP
+from ciip.model_ciip import CIIP
 from sklearn.metrics import f1_score
 from collections import OrderedDict
 from datetime import datetime
 import warnings 
-from eval_utils import CustomTransform, create_ciip_model, load_ciip_model_checkpoint, modify_ciip_for_eurosat
+from .eval_utils import (
+    CustomTransform,
+    create_ciip_model,
+    load_ciip_model_checkpoint,
+    modify_ciip_for_eurosat,
+)
 
 # from torch.nn import Module, ModuleList, Conv1d, Sequential, ReLU, Dropout, Linear
 

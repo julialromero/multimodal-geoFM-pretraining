@@ -1,23 +1,19 @@
+import json
 import os
+import time
 from configparser import ConfigParser
 from types import SimpleNamespace
-import sys
-import time
-import json
+
 import numpy as np
-import torch
-
-from train import train_one_epoch, evaluate
-from data import get_data
-
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
-sys.path.insert(0, parent_dir)
-from open_clip import get_input_dtype
-from open_clip_train.precision import get_autocast
-from open_clip_train.distributed import is_master
-
 import timm
+import torch
+from open_clip import get_input_dtype
 from torchgeo.models import ResNet50_Weights
+
+from ciip.open_clip_train.data import get_data
+from ciip.open_clip_train.distributed import is_master
+from ciip.open_clip_train.precision import get_autocast
+from ciip.open_clip_train.train import evaluate, train_one_epoch
 
 MODEL_NAME = "MoCo"
 

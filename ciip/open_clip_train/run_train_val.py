@@ -2,7 +2,6 @@ import logging
 import os
 import hydra
 from omegaconf import DictConfig, OmegaConf
-import sys
 from comet_ml import Experiment
 from comet_ml.integration.pytorch import log_model
 
@@ -11,13 +10,10 @@ import numpy as np
 import torch
 from torch import optim
 
-from train import train_one_epoch, evaluate
-from data import get_data
-
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
-sys.path.insert(0, parent_dir)
-from model_ciip import CIIP
-from utils import create_loss
+from ciip.model_ciip import CIIP
+from ciip.open_clip_train.data import get_data
+from ciip.open_clip_train.train import evaluate, train_one_epoch
+from ciip.open_clip_train.utils import create_loss
 
 from torchvision.transforms import v2
 # from torchvision.transforms import *

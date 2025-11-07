@@ -1,18 +1,18 @@
 import glob
 import logging
 import os
+import random
 import re
 import subprocess
-import sys
-import random
-import hydra
 from datetime import datetime
 from functools import partial
-from omegaconf import DictConfig, OmegaConf
-from comet_ml import Experiment
-from comet_ml.integration.pytorch import log_model
+
+import hydra
 import numpy as np
 import torch
+from comet_ml import Experiment
+from comet_ml.integration.pytorch import log_model
+from omegaconf import DictConfig, OmegaConf
 from torch import optim
 from torch.cuda.amp import GradScaler
 
@@ -31,22 +31,24 @@ try:
 except ImportError:
     hvd = None
 
-######## added
-from comet_ml import Experiment
-from comet_ml.integration.pytorch import log_model
-from utils import create_loss, create_model
+from ciip.open_clip_train import transforms
+from ciip.open_clip_train.data import get_data
+from ciip.open_clip_train.distributed import (
+    broadcast_object,
+    init_distributed_device,
+    is_master,
+)
+from ciip.open_clip_train.file_utils import (
+    check_exists,
+    pt_load,
+    remote_sync,
+    start_sync_process,
+)
+from ciip.open_clip_train.logger import setup_logging
+from ciip.open_clip_train.scheduler import const_lr, const_lr_cooldown, cosine_lr
+from ciip.open_clip_train.train import evaluate, train_one_epoch
+from ciip.open_clip_train.utils import create_loss, create_model
 from torchvision.transforms import v2
-from transforms import *
-###
-
-# from open_clip import create_model_and_transforms #, trace_model, get_tokenizer, create_loss
-from open_clip_train.data import get_data
-from open_clip_train.distributed import is_master, init_distributed_device, broadcast_object
-from open_clip_train.logger import setup_logging
-from open_clip_train.params import parse_args
-from open_clip_train.scheduler import cosine_lr, const_lr, const_lr_cooldown
-from open_clip_train.train import train_one_epoch, evaluate
-from open_clip_train.file_utils import pt_load, check_exists, start_sync_process, remote_sync
 
 
 LATEST_CHECKPOINT_NAME = "epoch_latest.pt"
@@ -405,7 +407,9 @@ def main(args: DictConfig, start_epoch=0):
     #   ])
         assert args.model.s1_resolution != args.model.s2_resolution, 'S1 target resolution is not the same as S2 target resolution'
         # transforms = PairGeom(out_size=args.model.s1_resolution)
-        transforms = PairAugmented(pair_geom=PairGeom(out_size=args.model.s1_resolution))
+        transforms = transforms.PairAugmented(
+            pair_geom=transforms.PairGeom(out_size=args.model.s1_resolution)
+        )
     else:
         transforms = None
 

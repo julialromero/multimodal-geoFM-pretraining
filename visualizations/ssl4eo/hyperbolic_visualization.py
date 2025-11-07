@@ -9,7 +9,6 @@ import configparser
 import csv
 import math
 import random
-import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -22,16 +21,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-
-import sys
-sys.path.append('/home/juro4948/ciip/')
-sys.path.append('/home/juro4948/ciip/ciip/')
-sys.path.append('/home/juro4948/ciip/ciip/open_clip_train/')
 
 from ciip.loss import CiipLoss
 from ciip.open_clip_train.data import SSL4EODataset
