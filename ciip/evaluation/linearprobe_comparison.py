@@ -814,9 +814,21 @@ if __name__ == "__main__":
     #     epochs=epochs,
     # )
     # ciip_root = f"/home/juro4948/ciip/logs/2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints"
-    ciip_root = '/home/juro4948/ciip/logs/2025_09_10-11_37_00-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints'
-    epochs = [1, 2, 3, 5, 10, 15, 20, 30]
-    base_name="2025_09_10_RandomInit-hal-bs5120"
+    ciip_root = '/local/ms-data/SSL4EO/model/2025_11_01-21_12_21-model_resnet50-lr_0.001-b_128-j_6-p_amp/checkpoints'
+    base_name="2025_11_01_RandomInit-hal-hyperbolic"
+    # '/local/ms-data/SSL4EO/model/2025_10_24-08_47_11-model_resnet50-lr_0.001-b_128-j_6-p_amp/checkpoints'
+    # '/local/ms-data/SSL4EO/model/2025_10_24-08_47_11-model_resnet50-lr_0.001-b_128-j_6-p_amp/checkpoints'
+
+    epochs = discover_checkpoints(
+        ciip_root,
+        pattern=r"epoch",
+        include_init=True,
+    )
+
+
+    # '/home/juro4948/ciip/logs/2025_09_10-11_37_00-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints'
+    # epochs = [1, 2, 3, 5, 10, 15, 20, 30]
+    
     MODEL_CONFIGS = generate_ciip_model_configs(
         model_root=ciip_root,
         base_name=base_name,
@@ -910,12 +922,12 @@ if __name__ == "__main__":
     plot_results(results, CONFIG["percents"], metric="accuracy", output_file=os.path.join(output_dir, "linearprobe_accuracy.png"))
     plot_results(results, CONFIG["percents"], metric="f1", output_file=os.path.join(output_dir, "linearprobe_f1.png"))
 
-    plot_primary_over_epochs(results, CONFIG["percents"], metric="accuracy", primary_regex=r"RandomInit-hal-epoch(\d+)", 
+    plot_primary_over_epochs(results, CONFIG["percents"], metric="accuracy", primary_regex=base_name+r"-epoch(\d+)", 
         baselines=("SSL4EO-ResNet50_MoCo","SSL4EO-ResNet50_DINO","ResNet50_Random"),
         layout="facets",                         # or "single"
         title=f"{base_name} Linear probe clf head accuracy vs epoch",
         output_file=os.path.join(output_dir, "svm_accuracy_per_epoch.png"))
-    plot_primary_over_epochs(results, CONFIG["percents"], metric="f1", primary_regex=r"RandomInit-hal-epoch(\d+)",
+    plot_primary_over_epochs(results, CONFIG["percents"], metric="f1", primary_regex=base_name+r"-epoch(\d+)",
         baselines=("SSL4EO-ResNet50_MoCo","SSL4EO-ResNet50_DINO","ResNet50_Random"),
         layout="facets",                         # or "single"
         title=f"{base_name} Linear probe clf head f1 vs epoch",

@@ -517,3 +517,23 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
 
 __all__ = ["ModelEvalConfig", "run_full_evaluation"]
 
+
+
+if __name__ == "__main__":
+    from pathlib import Path
+    from ciip.evaluation.unified_evaluation import ModelEvalConfig, run_full_evaluation
+
+    model_root = '/local/ms-data/SSL4EO/model/'
+    model_path = '2025_11_05-21_04_44-model_resnet50-lr_0.001-b_128-j_6-p_amp/'
+    checkpoint_root = Path(model_root) / model_path / "checkpoints"
+    output_dir = Path("diagnostics/output")
+
+    cfg = ModelEvalConfig(
+        checkpoint=Path("checkpoint_root/epoch_10.pt"),
+        eurosat_root=Path("/local/ms-data/EuroSAT/"),
+        neuco_root=Path("/local/ms-data/SSL4EO-S12-downstream/data"),
+        output_dir=Path("/home/juro4948/ciip/diagnostics/curv_init_1")
+    )
+    run_full_evaluation(cfg)
+
+
