@@ -346,21 +346,7 @@ def load_model_from_checkpoint(
     # Import lazily to avoid circular imports at module load time.
     from ciip.evaluation import unified_evaluation
 
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
-    if "state_dict" in checkpoint:
-        state_dict = checkpoint["state_dict"]
-    else:
-        state_dict = checkpoint
-    cleaned_state = unified_evaluation._clean_state_dict(state_dict)
-
     model, _ = unified_evaluation._build_model(checkpoint_path)
-
-    try:
-        model.load_state_dict(cleaned_state, strict=True)
-    except RuntimeError as exc:  # pragma: no cover - defensive
-        raise RuntimeError(
-            "Failed to load checkpoint with strict=True; ensure FC layers are present"
-        ) from exc
 
     model = model.to(device=device, dtype=input_dtype, non_blocking=True)
     if skip_final_fc:
