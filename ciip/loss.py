@@ -19,7 +19,8 @@ try:
 except ImportError:
     hvd = None
 
-import lorentz as L
+# import lorentz as L
+from . import lorentz as L
 
 
 def gather_features(
@@ -423,70 +424,7 @@ class CiipLoss(nn.Module):
 
         return s1_logits, s2_logits, targets
 
-        # PRIOR IMPLEMENTATION (INCORRECT)
-        # curvature = self._get_curvature(dtype=s1_features.dtype, device=s1_features.device)
-        # XH = self._exp_map_lorentz(s1_features, curvature)
-        # YH = self._exp_map_lorentz(s2_features, curvature)
-
-        # if self.world_size > 1:
-        #     XH_all, YH_all = gather_features(
-        #         XH,
-        #         YH,
-        #         self.local_loss,
-        #         self.gather_with_grad,
-        #         self.rank,
-        #         self.world_size,
-        #         self.use_horovod,
-        #     )
-        # else:
-        #     XH_all, YH_all = XH, YH
-
-        # if self.local_loss:
-        #     alpha = self._angles_matrix(XH, YH_all, curvature)
-        # else:
-        #     alpha = self._angles_matrix(XH_all, YH_all, curvature)
-
-        # beta = math.pi - alpha
-
-        # logits_neg_alpha = (-alpha) * logit_scale
-        # logits_beta = beta * logit_scale
-
-        # if logit_bias is not None:
-        #     logits_neg_alpha = logits_neg_alpha + logit_bias
-        #     logits_beta = logits_beta + logit_bias
-
-        # hyperbolic_context = {
-        #     "curvature": curvature,
-        #     "XH_all": XH_all,
-        #     "YH_all": YH_all,
-        # }
-
-        # if return_gathered:
-        #     if self.world_size > 1:
-        #         gathered_s1_features, gathered_s2_features = gather_features(
-        #             s1_features,
-        #             s2_features,
-        #             self.local_loss,
-        #             True,
-        #             self.rank,
-        #             self.world_size,
-        #             self.use_horovod,
-        #         )
-        #     else:
-        #         gathered_s1_features = s1_features
-        #         gathered_s2_features = s2_features
-        #     return (
-        #         logits_neg_alpha,
-        #         logits_beta,
-        #         hyperbolic_context,
-        #         gathered_s1_features,
-        #         gathered_s2_features,
-        #     )
-
-        # return logits_neg_alpha, logits_beta, hyperbolic_context
-
-
-
+      
 
 
 # class CoCaLoss(ClipLoss):

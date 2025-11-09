@@ -11,8 +11,8 @@ from torchgeo.models import resnet18, ResNet18_Weights, ResNet50_Weights, resnet
 from .model import ModifiedResNet  # , ResNet50 #, S1Transformer, S2Transformer
 # VisionTransformer
 import logging
-import lorentz as L
-
+# import lorentz as L
+from . import lorentz as L
 ##############################################################
 ############ START CIIP MODEL IMPLEMENTATION #################
 ##############################################################

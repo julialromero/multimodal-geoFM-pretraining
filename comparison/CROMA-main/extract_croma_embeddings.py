@@ -9,6 +9,7 @@ from typing import Dict, List, Optional
 import torch
 from torch.utils.data import DataLoader
 from torchvision import transforms
+import torch.nn.functional as F
 
 from use_croma import PretrainedCROMA
 from ciip.evaluation.export_neuco_embeddings import (
@@ -16,6 +17,7 @@ from ciip.evaluation.export_neuco_embeddings import (
     Normalize,
     TemporalMean,
     collate_fn,
+    _build_resizer,
 )
 
 # Model configuration is kept inside this script as requested.
@@ -31,7 +33,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--data-root",
         type=Path,
-        default=Path("/local/ms-data/SSL4EO-S12-downstream/data"),
+        default=Path("/local/ms-data/SSL4EO-S12-downstream/data/data/SSL4EO-S12-v1.1/train"),
+        # "/local/ms-data/SSL4EO-S12-downstream/data"),
         help="Path to the root directory containing the NeuCo challenge data.",
     )
     parser.add_argument(
@@ -78,7 +81,7 @@ def parse_args() -> argparse.Namespace:
 
 def _default_modalities() -> List[str]:
     # Concise helper to mirror export_neuco_embeddings defaults while fixing modality.
-    return ["s2l1c"]
+    return ['s2l2a'] 
 
 
 def _build_dataset(data_root: Path) -> E2SChallengeDataset:
@@ -86,6 +89,8 @@ def _build_dataset(data_root: Path) -> E2SChallengeDataset:
         Normalize(),
         TemporalMean(),
     ])
+
+    
 
     dataset = E2SChallengeDataset(
         data_path=str(data_root),
@@ -105,7 +110,23 @@ def _prepare_batch(batch: Dict[str, torch.Tensor], device: torch.device) -> torc
     data = batch["data"].to(device=device, non_blocking=True)
     if data.ndim == 5 and data.size(1) == 1:
         data = data.squeeze(1)
-    return data.float()
+    data = data.float()
+
+    # CROMA expects 12 Sentinel-2 channels (B01-B09, B8A, B11, B12). Drop the
+    # cirrus band (B10) when present in the NeuCo challenge data.
+    if data.size(1) == 13:
+        data = torch.cat([data[:, :10], data[:, 11:]], dim=1)
+
+    if data.size(1) != 12:
+        raise RuntimeError(
+            f"Expected 12 Sentinel-2 channels after preprocessing, but received {data.size(1)}."
+        )
+
+    target_resolution = _MODEL_KWARGS["image_resolution"]
+    if data.size(-1) != target_resolution or data.size(-2) != target_resolution:
+        data = F.adaptive_avg_pool2d(data, output_size=(target_resolution, target_resolution))
+
+    return data
 
 
 def _trim_batch(
@@ -137,6 +158,9 @@ def main() -> None:
         drop_last=False,
     )
 
+    # print dataset length
+    print(f"Dataset contains {len(dataset)} samples.")
+
     model = PretrainedCROMA(pretrained_path=str(args.weights_path), **_MODEL_KWARGS)
     model = model.to(device).eval()
 
@@ -146,10 +170,23 @@ def main() -> None:
     embeddings: Dict[str, torch.Tensor] = {}
     processed = 0
 
+    resize_hw = 120
+    # Dim sanity (optional)
+    # with torch.no_grad():
+    #     dummy = torch.zeros(1, dataset[0]['data'].shape[2], *(resize_hw or dataset[0]['data'].shape[-2:]), device=device)  # (B=1,C,H,W)
+        # no forward — just ensure C matches expected after transforms
+
+    resizer = _build_resizer(resize_hw).to(device).eval()
+
     with torch.no_grad():
-        for batch in loader:
+        # for batch in loader:
+        # only loop through first 10 batches
+        for i, batch in enumerate(loader):
+            if i > 6: 
+                break
             file_names = list(batch["file_name"])
             data = _prepare_batch(batch, device)
+            data = resizer(data) 
 
             remaining = None
             if args.max_samples is not None:
@@ -160,7 +197,8 @@ def main() -> None:
             data, file_names = _trim_batch(data, file_names, remaining)
             if data.size(0) == 0:
                 break
-
+            
+            print(data.shape)
             outputs = model(optical_images=data)
             optical_gap = outputs["optical_GAP"].detach().cpu()
 
@@ -176,7 +214,7 @@ def main() -> None:
 
     ids = list(embeddings.keys())
     stacked = torch.stack(list(embeddings.values()))
-    torch.save({"ids": ids, "embeddings": stacked}, output_dir / "s2l1c_embeddings.pt")
+    torch.save({"ids": ids, "embeddings": stacked}, output_dir / "s2l2a_embeddings.pt")
 
 
 if __name__ == "__main__":

@@ -179,7 +179,8 @@ def _extract_embeddings(
 
     for batch in tqdm(dataloader, desc="Extracting embeddings"):
         if isinstance(batch, dict):
-            image = batch.get("image") or batch.get("data")
+            # print(batch)
+            image = batch.get("image") # or batch.get("data")
             batch_labels = batch.get("label")
             batch_ids = batch.get("file_name")
         else:
@@ -358,6 +359,9 @@ def _run_linear_probe(
         fig.savefig(plots_dir / f"{label}_{key}_curves.png", dpi=200)
         plt.close(fig)
 
+    # print the save path
+    logging.info(f"Linear probe results saved to {plots_dir}")
+
 
 def _export_neuco(
     bundle: EmbeddingBundle,
@@ -484,15 +488,15 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
 
     _run_linear_probe(config, eurosat_embeddings, output_dir=output_dir, label="eurosat")
 
-    neuco_loader = _build_neuco_loader(config)
-    neuco_bundle = _extract_embeddings(
-        model,
-        neuco_loader,
-        device=device,
-        is_lorentz=is_lorentz,
-        require_ids=True,
-    )
-    _export_neuco(neuco_bundle, output_dir / "neuco_export", label="s2l1c")
+    # neuco_loader = _build_neuco_loader(config)
+    # neuco_bundle = _extract_embeddings(
+    #     model,
+    #     neuco_loader,
+    #     device=device,
+    #     is_lorentz=is_lorentz,
+    #     require_ids=True,
+    # )
+    # _export_neuco(neuco_bundle, output_dir / "neuco_export", label="s2l1c")
 
     _run_embedding_diagnostics(
         config,
@@ -529,7 +533,7 @@ if __name__ == "__main__":
     output_dir = Path("diagnostics/output")
 
     cfg = ModelEvalConfig(
-        checkpoint=Path("checkpoint_root/epoch_10.pt"),
+        checkpoint=Path(f"{checkpoint_root}/epoch_10.pt"),
         eurosat_root=Path("/local/ms-data/EuroSAT/"),
         neuco_root=Path("/local/ms-data/SSL4EO-S12-downstream/data"),
         output_dir=Path("/home/juro4948/ciip/diagnostics/curv_init_1")

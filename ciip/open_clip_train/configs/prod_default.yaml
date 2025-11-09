@@ -55,18 +55,15 @@ loss:
   batch_uniformity_enabled: False
   batch_uniformity_weight: 0.01
 
-  vc_enabled: False
+  vc_reg_enabled: False
   vc_weight: 0.0
   vc_gamma: 1.0
   vc_covariance_weights: [1.0, 1.0]
   
-  hyperbolic: True
-  hyperbolic_normalize: False
-  hyperbolic_curvature_init: 1.0
-  hyperbolic_eps: 1.0e-5
-  centroid_lambda: 0.0
-  centroid_p: 1.0
-  centroid_q: 0.5
+  hyperbolic: False
+  curvature_init: 0.1
+  learn_curv: True
+  entail_weight: 0.0
 
 datamodule:
   batch_size: 128 # batch size per GPU
@@ -101,7 +98,7 @@ train:
   val_frac: 0.0
   epochs: 200
   lr: 0.001
-  wd: 0.02
+  wd: 0.02 #0.2
   warmup: 5000
   beta1: 0.9
   beta2: 0.98

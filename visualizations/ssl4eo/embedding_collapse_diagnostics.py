@@ -444,7 +444,7 @@ def load_model_from_checkpoint(
     use_orthogonal_mapping: bool = False,
 ) -> torch.nn.Module:
     """Instantiate a CIIP model and load weights from checkpoint_path."""
-
+    print(config)
     model = create_model(config, device=device)
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     state_dict = checkpoint.get("state_dict", checkpoint)
@@ -495,12 +495,12 @@ def load_model_from_checkpoint(
         missing, unexpected = compare_state_keys(model, cleaned)
         missing_filtered = {k for k in missing if not any(k.startswith(r) for r in replacements)}
         
-        if missing_filtered or unexpected:
-            _LOGGER.warning(f"Missing: {missing_filtered}, Unexpected: {unexpected}")
-            critical_missing = {k for k in missing_filtered 
-                              if not any(p in k for p in ['fc.weight', 'fc.bias', 'W'])}
-            if critical_missing:
-                raise RuntimeError(f"Critical incompatibilities: {critical_missing}")
+        # if missing_filtered or unexpected:
+        #     _LOGGER.warning(f"Missing: {missing_filtered}, Unexpected: {unexpected}")
+        #     critical_missing = {k for k in missing_filtered 
+        #                       if not any(p in k for p in ['fc.weight', 'fc.bias', 'W'])}
+        #     if critical_missing:
+        #         raise RuntimeError(f"Critical incompatibilities: {critical_missing}")
         
         model.load_state_dict(cleaned, strict=False)
 
@@ -635,6 +635,7 @@ def extract_embeddings_for_dataset(
     """Run the encoders over ``dataset`` and return raw & normalized embeddings."""
 
     # check if model is LorentzCIIP
+    # print(model)
     is_lorentz = model.__class__.__name__ == "LorentzCIIP"
     print(f"Extracting embeddings using LorentzCIIP model: {is_lorentz}")
 
@@ -646,77 +647,76 @@ def extract_embeddings_for_dataset(
     pre_projection_cache, layer_cache, handles = _register_pre_projection_hooks(model)
     uids: List[str] = []
 
-    try:
-        with torch.no_grad():
-            for local_idx, base_idx in enumerate(index_map):
-                sample = dataset[local_idx]
-                if isinstance(sample, dict):
-                    s1_img = sample.get("s1")
-                    s2_img = sample.get("s2")
+    with torch.no_grad():
+        for local_idx, base_idx in enumerate(index_map):
+            sample = dataset[local_idx]
+            if isinstance(sample, dict):
+                s1_img = sample.get("s1")
+                s2_img = sample.get("s2")
+            else:
+                s1_img, s2_img = sample  # type: ignore[misc]
+
+            if s1_img is None or s2_img is None:
+                continue
+
+            s1_tensor = torch.as_tensor(s1_img).unsqueeze(0)
+            s2_tensor = torch.as_tensor(s2_img).unsqueeze(0)
+            if input_dtype is not None:
+                s1_tensor = s1_tensor.to(device=device, dtype=input_dtype, non_blocking=True)
+                s2_tensor = s2_tensor.to(device=device, dtype=input_dtype, non_blocking=True)
+            else:
+                s1_tensor = s1_tensor.to(device=device, non_blocking=True)
+                s2_tensor = s2_tensor.to(device=device, non_blocking=True)
+
+            with autocast():
+                model_out = model(s1_tensor, s2_tensor)
+
+            if isinstance(model_out, dict):
+                s1_embed = model_out.get("s1_features_vc")
+                s2_embed = model_out.get("s2_features_vc")
+                s1_norm = model_out.get("s1_features")
+                s2_norm = model_out.get("s2_features")
+            else:
+                s1_embed = s2_embed = None
+                s1_norm = s2_norm = None
+
+            if s1_embed is None or s2_embed is None:
+                if is_lorentz:
+                    with autocast():
+                        s1_embed = model.encode_s1(s1_tensor, lorentz=True)
+                        s2_embed = model.encode_s2(s2_tensor, lorentz=True)
                 else:
-                    s1_img, s2_img = sample  # type: ignore[misc]
+                    with autocast():
+                        s1_embed = model.encode_s1(s1_tensor, normalize=False)
+                        s2_embed = model.encode_s2(s2_tensor, normalize=False)
+                s1_norm = None
+                s2_norm = None
 
-                if s1_img is None or s2_img is None:
-                    continue
+            if s1_norm is None:
+                s1_norm = F.normalize(s1_embed, dim=-1)
+            if s2_norm is None:
+                s2_norm = F.normalize(s2_embed, dim=-1)
 
-                s1_tensor = torch.as_tensor(s1_img).unsqueeze(0)
-                s2_tensor = torch.as_tensor(s2_img).unsqueeze(0)
-                if input_dtype is not None:
-                    s1_tensor = s1_tensor.to(device=device, dtype=input_dtype, non_blocking=True)
-                    s2_tensor = s2_tensor.to(device=device, dtype=input_dtype, non_blocking=True)
-                else:
-                    s1_tensor = s1_tensor.to(device=device, non_blocking=True)
-                    s2_tensor = s2_tensor.to(device=device, non_blocking=True)
+            s1_embed = s1_embed.squeeze(0).detach()
+            s2_embed = s2_embed.squeeze(0).detach()
+            s1_norm = s1_norm.squeeze(0).detach()
+            s2_norm = s2_norm.squeeze(0).detach()
+            del model_out
 
-                with autocast():
-                    model_out = model(s1_tensor, s2_tensor)
+            s1_cpu = s1_embed.cpu()
+            s2_cpu = s2_embed.cpu()
+            s1_vectors.append(s1_cpu)
+            s2_vectors.append(s2_cpu)
 
-                if isinstance(model_out, dict):
-                    s1_embed = model_out.get("s1_features_vc")
-                    s2_embed = model_out.get("s2_features_vc")
-                    s1_norm = model_out.get("s1_features")
-                    s2_norm = model_out.get("s2_features")
-                else:
-                    s1_embed = s2_embed = None
-                    s1_norm = s2_norm = None
+            s1_normalized_vectors.append(s1_norm.to(dtype=torch.float32).cpu())
+            s2_normalized_vectors.append(s2_norm.to(dtype=torch.float32).cpu())
 
-                if s1_embed is None or s2_embed is None:
-                    if is_lorentz:
-                        with autocast():
-                            s1_embed = model.encode_s1(s1_tensor, lorentz=True)
-                            s2_embed = model.encode_s2(s2_tensor, lorentz=True)
-                    else:
-                        with autocast():
-                            s1_embed = model.encode_s1(s1_tensor, normalize=False)
-                            s2_embed = model.encode_s2(s2_tensor, normalize=False)
-                    s1_norm = None
-                    s2_norm = None
-
-                if s1_norm is None:
-                    s1_norm = F.normalize(s1_embed, dim=-1)
-                if s2_norm is None:
-                    s2_norm = F.normalize(s2_embed, dim=-1)
-
-                s1_embed = s1_embed.squeeze(0).detach()
-                s2_embed = s2_embed.squeeze(0).detach()
-                s1_norm = s1_norm.squeeze(0).detach()
-                s2_norm = s2_norm.squeeze(0).detach()
-                del model_out
-
-                s1_cpu = s1_embed.cpu()
-                s2_cpu = s2_embed.cpu()
-                s1_vectors.append(s1_cpu)
-                s2_vectors.append(s2_cpu)
-
-                s1_normalized_vectors.append(s1_norm.to(dtype=torch.float32).cpu())
-                s2_normalized_vectors.append(s2_norm.to(dtype=torch.float32).cpu())
-
-                if hasattr(base_dataset, "get_sample_uid"):
-                    uid, _ = base_dataset.get_sample_uid(base_idx)
-                else:
-                    uid = base_idx
-                uids.append(str(uid))
-    finally:
+            if hasattr(base_dataset, "get_sample_uid"):
+                uid, _ = base_dataset.get_sample_uid(base_idx)
+            else:
+                uid = base_idx
+            uids.append(str(uid))
+  
         for handle in handles:
             handle.remove()
 
@@ -844,6 +844,7 @@ def discover_checkpoints(
     
 
     epochs = sorted(keep)
+    epochs = [1, 20]
 
     if subtract == True:
         epochs = [e + minimum for e in epochs]
@@ -1456,6 +1457,8 @@ def compute_epoch_metrics(
         metrics.s2_variance = s2_var
         metrics.s1_singular_values = compute_singular_values(s1_tensor, covariance=cov_s1)
         metrics.s2_singular_values = compute_singular_values(s2_tensor, covariance=cov_s2)
+        s1_normalized = None
+        s2_normalized = None
         if epoch.s1_normalized is not None:
             metrics.s1_normalized_singular_values = compute_singular_values(epoch.s1_normalized)
         if epoch.s2_normalized is not None:
@@ -2079,6 +2082,7 @@ def _plot_pre_post_metric_timeseries(
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=45, ha="right")
     ax.set_ylim(*y_limits)
+    ax.set_xlim(0, 50)
     ax.grid(True, alpha=0.3)
 
     if show_legend:
@@ -2379,6 +2383,8 @@ def _plot_single_singular_series(
     ax.set_xlabel("Component")
     ax.set_ylabel("Singular value")
     ax.set_yscale("log")
+    # set xlim
+    ax.set_xlim(1, 50)
     ax.grid(True, which="both", alpha=0.3)
 
 
@@ -2501,6 +2507,7 @@ def plot_svd_epoch_grid(
     for ax in axes_iter:
         ax.set_xlim(1, k)
         ax.set_ylim(global_min, global_max)
+    ax.set_xlim(1, 50)
 
     if use_correlation:
         title_core = "Correlation spectrum"

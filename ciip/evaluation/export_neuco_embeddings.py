@@ -60,40 +60,6 @@ MODALITY_STATS: Dict[str, Tuple[np.ndarray, np.ndarray]] = {
     # add s1 if you use it
 }
 
-# @dataclass
-# class DatasetConfig:
-#     data_root: Path
-#     # Either pass one modality via `modality` or multiple via `modalities`
-#     modality: str = "s2l1c"
-#     modalities: Sequence[str] = field(default_factory=tuple)
-
-#     dataset_name: Optional[str] = "band"   # try to read this var first
-#     seasons: int = 1                       # number of time slices to select
-#     randomize_seasons: bool = False
-#     possible_seasons: Sequence[int] = field(default_factory=lambda: [0,1,2,3])  # S12 has 4 time steps
-
-#     concat: bool = True                    # return concatenated channels across modalities
-#     expected_channels: Optional[int] = 13  # S2 has 13 bands
-#     time_reduction: Optional[str] = "mean" # None|"first"|"mean"|"median"
-
-#     normalize_mode: str = "percentile"     # "none"|"percentile"|"standardize"
-#     scale: Optional[float] = 10000.0       # divide raw integers by 1e4 to get reflectance
-#     clip_range: Optional[Tuple[float, float]] = (0.0, 1.0)
-#     resize_hw: Optional[Tuple[int, int]] = None
-
-#     shift_s2_channels: bool = True         # +1000 shift to align SSL4EO-S12 v1.1
-#     # (not needed) auto_scale_reflectance: bool = False
-
-#     def __post_init__(self):
-#         if not self.modalities:
-#             self.modalities = (self.modality,)
-#         # clamp seasons to available indices length
-#         if self.seasons <= 0:
-#             self.seasons = len(self.possible_seasons)
-
-
-# # ------------------------
-# # xarray / zarr helpers
 # # ------------------------
 
 def _open_xr_zarr_any(spath: str) -> xr.Dataset:
@@ -503,8 +469,16 @@ class E2SChallengeDataset(Dataset):
         self.concat = concat
         self.output_file_name = output_file_name
         self.shift_s2_channels = shift_s2_channels
+
+        modalities[0] = modalities[0].upper()
         
+        print(os.path.join(data_path, modalities[0], '*', '*.zarr.zip'))
         self.samples = glob.glob(os.path.join(data_path, modalities[0], '*', '*.zarr.zip'))
+        if self.samples == []:
+            modalities[0] = modalities[0].upper()
+            print(os.path.join(data_path, modalities[0], '*.zarr.zip'))
+
+            self.samples = glob.glob(os.path.join(data_path, modalities[0], '*.zarr.zip'))
 
     def __len__(self):
 
@@ -700,105 +674,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--log-level", default="INFO", choices=["DEBUG","INFO","WARNING","ERROR"])
     return p.parse_args()
 
-# def main() -> None:
-#     args = parse_args()
-#     logging.basicConfig(level=getattr(logging, args.log_level))
-
-#     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
-#     logging.info("Device: %s", device)
-
-#     # Dataset config
-#     shift_flag = True
-#     if args.no_shift_s2_channels:
-#         shift_flag = False
-#     elif args.shift_s2_channels:
-#         shift_flag = True
-
-#     # cfg = DatasetConfig(
-#     #     data_root=args.data_root,
-#     #     modalities=tuple(args.modalities),
-#     #     modality=args.modalities[0],
-#     #     dataset_name="band",
-#     #     seasons=args.seasons,
-#     #     randomize_seasons=args.randomize_seasons,
-#     #     concat=True,
-#     #     expected_channels=args.expected_channels,
-#     #     time_reduction=args.time_reduction,
-#     #     normalize_mode=args.normalize_mode,
-#     #     scale=args.scale,
-#     #     clip_range=tuple(args.clip) if args.clip is not None else None,
-#     #     resize_hw=tuple(args.resize) if args.resize is not None else None,
-#     #     shift_s2_channels=shift_flag,
-#     # )
-
-#     # dataset = NeucoZarrDataset(cfg)
-#     # def _collate(batch: Sequence[Tuple[str, torch.Tensor]]) -> Tuple[List[str], torch.Tensor]:
-#     #     ids, tensors = zip(*batch)
-#     #     return list(ids), torch.stack(tensors, dim=0)
-
-#     transform = transforms.Compose([
-#         Normalize(), # scale to [0,1]
-#         TemporalMean() # average over 4 seasonal timesteps
-#         ])
-
-#     dataset = E2SChallengeDataset(
-#         DATA_PATH,
-#         modalities=MODALITIES,
-#         seasons=4,
-#         dataset_name='bands',
-#         transform=transform,
-#         concat=True,
-#         output_file_name=True,
-#     )
-
-#     # logger.info(f'Dataset length: {len(dataset)} samples')
-#     # sample = dataset[0]['data']
-#     # logger.info(f'Sample data shape: {sample.shape}')
-
-#     loader = DataLoader(
-#         dataset,
-#         batch_size=1,
-#         num_workers=0,
-#         pin_memory=True,
-#         collate_fn=collate_fn,
-#     )
-
-#     # Model
-#     model = load_ciip_model(args.weights, args.embed_dim, args.pre_projection_dim).to(device).eval()
-#     encoder = prepare_s2_encoder(model).to(device).eval()
-#     print(encoder)
-
-#     logger.info(f'Dataset length: {len(dataset)} samples')
-#     sample = dataset[0]['data']
-#     logger.info(f'Sample data shape: {sample.shape}')
-
-#     loader = DataLoader(
-#         dataset,
-#         batch_size=1,
-#         num_workers=0,
-#         pin_memory=True,
-#         collate_fn=collate_fn,
-#     )
-
-
-
-#     embeddings = {}
-#     resizer = InputResizer(INPUT_SIZE).to(device)
-
-#     # Extract embeddings
-#     for batch in tqdm(loader, desc='Extracting embeddings'):
-#         data = batch['data'].squeeze(0).to(device)
-#         data = resizer(data)
-
-#         with torch.no_grad():
-#             features = extractor(data)
-
-#     # Create and save embedding csv file
-#     submission_df = create_submission_from_dict(embeddings)
-#     logger.info(f"Number of embeddings: {len(submission_df)}")
-#     submission_df.to_csv(OUTPUT_PATH, index=False)
-#     logger.info(f"Saved embeddings to {OUTPUT_PATH}")
-
 
 SPACE_CHOICES = ("pre", "post")  # pre = encoder features; post = proj+L2
 DEFAULT_SPACE = "pre"
@@ -900,11 +775,6 @@ def main() -> None:
     if export_space == "post" and not isinstance(proj, nn.Module):
         logger.warning("No encoder.proj found; falling back to 'pre' features.")
         export_space = "pre"
-
-    # Dim sanity (optional)
-    with torch.no_grad():
-        dummy = torch.zeros(1, dataset[0]['data'].shape[2], *(resize_hw or dataset[0]['data'].shape[-2:]), device=device)  # (B=1,C,H,W)
-        # no forward — just ensure C matches expected after transforms
 
     resizer = _build_resizer(resize_hw).to(device).eval()
 

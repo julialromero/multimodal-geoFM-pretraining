@@ -244,8 +244,8 @@ def create_model(args, device, **model_kwargs):
             entail_weight=args.loss.entail_weight)
     else:
 
-        model = CIIP(embed_dim=args.model.embed_dim,
-            pre_projection_dim=pre_projection_dim,
+        model = CIIP(embed_dim=2048,#args.model.embed_dim,
+            pre_projection_dim=1024,#pre_projection_dim,
             s1_resolution=args.model.s1_resolution,
             s1_layers=OmegaConf.to_object(args.model.s1_layers),
             s1_width=args.model.width,
