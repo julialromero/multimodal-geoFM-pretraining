@@ -1,6 +1,6 @@
 import math
 from contextlib import nullcontext
-from typing import Dict
+from typing import Dict, Tuple
 
 import torch
 import torch.nn as nn
@@ -72,6 +72,17 @@ def gather_features(
 
 class CiipLoss(nn.Module):
 
+    def __setattr__(self, name, value):
+        if (
+            name == "hyperbolic_eps"
+            and "_buffers" in self.__dict__
+            and name in self.__dict__["_buffers"]
+            and not isinstance(value, torch.Tensor)
+        ):
+            self.__dict__["_buffers"][name].fill_(float(value))
+            return
+        super().__setattr__(name, value)
+
     def __init__(
             self,
             local_loss=False,
@@ -126,19 +137,22 @@ class CiipLoss(nn.Module):
         self.batch_uniformity_weight = float(batch_uniformity_weight)
 
         self.use_hyperbolic = bool(hyperbolic)
-        # self.hyperbolic_normalize = bool(hyperbolic_normalize)
-        # self.hyperbolic_eps = float(hyperbolic_eps)
-        # self.centroid_lambda = float(centroid_lambda)
-        # self.centroid_p = float(centroid_p)
-        # self.centroid_q = float(centroid_q)
+        self.hyperbolic_normalize = bool(hyperbolic_normalize)
+        self.register_buffer("hyperbolic_eps", torch.tensor(float(hyperbolic_eps)))
+        self.centroid_lambda = float(centroid_lambda)
+        self.centroid_p = float(centroid_p)
+        self.centroid_q = float(centroid_q)
 
-        # curvature_init = max(float(hyperbolic_curvature_init), self.hyperbolic_eps)
+        curvature_init = max(
+            float(hyperbolic_curvature_init), float(self.hyperbolic_eps.item())
+        )
 
-        # # Learnable positive scale on Euclidean features BEFORE Lorentz lift
-        # # (stabilizes early training without destroying radial info)
-        # self.hyp_scale = nn.Parameter(torch.tensor(0.5))
-        # curvature_alpha = math.log(math.expm1(curvature_init))
-        # self.curvature_alpha = nn.Parameter(torch.tensor(curvature_alpha))
+        # Learnable positive scale on Euclidean features BEFORE Lorentz lift
+        # (stabilizes early training without destroying radial info)
+        self.hyp_scale = nn.Parameter(torch.tensor(0.5))
+        curvature_alpha = math.log(math.expm1(curvature_init))
+        self.curvature_alpha = nn.Parameter(torch.tensor(curvature_alpha))
+        self.aperture_logk = nn.Parameter(torch.tensor(0.0))
 
         # cache state
         self.prev_num_logits = 0
@@ -423,6 +437,81 @@ class CiipLoss(nn.Module):
             targets = targets + batch_size * self.rank
 
         return s1_logits, s2_logits, targets
+
+    def _get_curvature(self, dtype=None, device=None):
+        if not self.use_hyperbolic:
+            raise RuntimeError("Curvature requested but hyperbolic mode is disabled")
+
+        if dtype is None:
+            dtype = self.curvature_alpha.dtype
+        if device is None:
+            device = self.curvature_alpha.device
+
+        alpha = self.curvature_alpha.to(device=device, dtype=dtype)
+        eps_tensor = self._hyperbolic_eps_tensor(dtype=dtype, device=device)
+        return F.softplus(alpha) + eps_tensor
+
+    def _maybe_normalize(self, features: torch.Tensor) -> torch.Tensor:
+        if self.hyperbolic_normalize:
+            return F.normalize(features, dim=-1)
+        return features
+
+    def _hyperbolic_eps_value(self) -> float:
+        eps = self.hyperbolic_eps
+        return float(eps.item() if torch.is_tensor(eps) else eps)
+
+    def _hyperbolic_eps_tensor(self, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+        eps = self.hyperbolic_eps
+        if torch.is_tensor(eps):
+            return eps.to(device=device, dtype=dtype)
+        return torch.tensor(float(eps), device=device, dtype=dtype)
+
+    def _exp_map_lorentz(self, features: torch.Tensor, curvature: torch.Tensor) -> torch.Tensor:
+        if not torch.is_tensor(curvature):
+            curvature = torch.tensor(curvature, device=features.device, dtype=features.dtype)
+        else:
+            curvature = curvature.to(device=features.device, dtype=features.dtype)
+
+        scaled = self._maybe_normalize(features)
+        scale = F.softplus(self.hyp_scale).to(device=features.device, dtype=features.dtype)
+        scaled = scaled * scale
+        eps_value = self._hyperbolic_eps_value()
+        return L.exp_map0(scaled, curv=curvature, eps=eps_value)
+
+    def _hyperbolic_directions(
+        self, points: torch.Tensor, curvature: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if not torch.is_tensor(curvature):
+            curvature = torch.tensor(curvature, device=points.device, dtype=points.dtype)
+        else:
+            curvature = curvature.to(device=points.device, dtype=points.dtype)
+
+        eps_value = self._hyperbolic_eps_value()
+        tangent = L.log_map0(points, curv=curvature, eps=eps_value)
+        distances = torch.norm(tangent, dim=-1)
+        denom = torch.clamp(distances.unsqueeze(-1), min=eps_value)
+        dirs = tangent / denom
+        dirs = torch.where(distances.unsqueeze(-1) > 0, dirs, torch.zeros_like(dirs))
+
+        sqrt_curv = torch.sqrt(curvature)
+        scaled = torch.clamp(sqrt_curv * distances, max=50.0)
+        inner = torch.cosh(scaled)
+        return dirs, distances, inner
+
+    def _angle_matrix_from_dirs(
+        self, s1_dirs: torch.Tensor, s2_dirs: torch.Tensor
+    ) -> torch.Tensor:
+        def _safe_normalize(vecs: torch.Tensor) -> torch.Tensor:
+            norms = torch.norm(vecs, dim=-1, keepdim=True)
+            safe = torch.where(norms > 0, vecs / norms, torch.zeros_like(vecs))
+            return safe
+
+        s1_unit = _safe_normalize(s1_dirs)
+        s2_unit = _safe_normalize(s2_dirs)
+        cosine = s1_unit @ s2_unit.T
+        eps_value = self._hyperbolic_eps_value()
+        cosine = torch.clamp(cosine, min=-1.0 + eps_value, max=1.0 - eps_value)
+        return torch.acos(cosine)
 
       
 
