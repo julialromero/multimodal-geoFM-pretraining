@@ -136,18 +136,27 @@ def _build_model(checkpoint: Path) -> Tuple[nn.Module, bool]:
     else:
         model = CIIP(**kwargs)
 
-    missing, unexpected = model.load_state_dict(cleaned, strict=False)
-    allowed_missing = {
-        "encoder_s1.fc.weight",
-        "encoder_s1.fc.bias",
-        "encoder_s2.fc.weight",
-        "encoder_s2.fc.bias",
-    }
-    remaining_missing = {key for key in missing if key not in allowed_missing}
-    if remaining_missing or unexpected:
+    try:
+        model.load_state_dict(cleaned, strict=True)
+    except RuntimeError as exc:  # pragma: no cover - informative error path
+        model_keys = set(model.state_dict().keys())
+        checkpoint_keys = set(cleaned.keys())
+        missing = sorted(model_keys - checkpoint_keys)
+        unexpected = sorted(checkpoint_keys - model_keys)
+        fc_keys = [
+            "encoder_s1.fc.weight",
+            "encoder_s1.fc.bias",
+            "encoder_s2.fc.weight",
+            "encoder_s2.fc.bias",
+        ]
+        missing_fc = [key for key in fc_keys if key in missing]
+        if missing_fc:
+            raise RuntimeError(
+                f"Checkpoint missing required FC weights: {missing_fc}"
+            ) from exc
         raise RuntimeError(
-            f"Checkpoint incompatible with model (missing={remaining_missing}, unexpected={unexpected})"
-        )
+            f"Checkpoint incompatible with model (missing={missing}, unexpected={unexpected})"
+        ) from exc
     model.eval()
     return model, is_lorentz
 

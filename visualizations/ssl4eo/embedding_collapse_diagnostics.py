@@ -29,7 +29,6 @@ from sklearn.manifold import TSNE
 
 from ciip.open_clip_train.data import get_data
 from ciip.open_clip_train.precision import get_autocast
-from ciip.open_clip_train.utils import create_model
 
 try:  # optional dependency
     import umap  # type: ignore
@@ -344,22 +343,11 @@ def load_model_from_checkpoint(
     skip_final_fc: bool = False,
     use_orthogonal_mapping: bool = False,
 ) -> nn.Module:
-    model = create_model(config, device=device)
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    state_dict = checkpoint.get("state_dict", checkpoint)
-    cleaned = {k.replace("module.", ""): v for k, v in state_dict.items()}
-    missing, unexpected = model.load_state_dict(cleaned, strict=False)
-    allowed_missing = {
-        "encoder_s1.fc.weight",
-        "encoder_s1.fc.bias",
-        "encoder_s2.fc.weight",
-        "encoder_s2.fc.bias",
-    }
-    remaining_missing = {key for key in missing if key not in allowed_missing}
-    if remaining_missing:
-        _LOGGER.warning("Missing keys when loading %s: %s", checkpoint_path.name, sorted(remaining_missing))
-    if unexpected:
-        _LOGGER.warning("Unexpected keys when loading %s: %s", checkpoint_path.name, sorted(unexpected))
+    # Import lazily to avoid circular imports at module load time.
+    from ciip.evaluation import unified_evaluation
+
+    model, _ = unified_evaluation._build_model(checkpoint_path)
+
     model = model.to(device=device, dtype=input_dtype, non_blocking=True)
     if skip_final_fc:
         for encoder_name in ["encoder_s1", "encoder_s2"]:
