@@ -1,68 +1,28 @@
 #!/usr/bin/env python3
-"""Utilities for visualizing embedding collapse and training instability.
+"""Single-epoch embedding diagnostics utilities.
 
-This script loads CIIP checkpoints, extracts embeddings for a shared subset of
-samples, and produces a suite of plots that are commonly used to diagnose
-representation collapse:
-
-* Positive vs. negative cosine similarity statistics.
-* Cosine similarity histograms per epoch.
-* Per-dimension embedding variance heatmaps and summaries.
-* Singular value epoch grids for raw and normalized embeddings.
-* Variance-covariance geometry diagnostics (std minima, γ gap, off-diagonal Frobenius norm, participation ratio).
-* Linear probe accuracy overlays (optional, from CSV exports).
-* t-SNE / UMAP projections of the embedding space across epochs.
-
-The implementation follows the data loading patterns used in
-``visualizations/ssl4eo/initialization_evaluation.py`` and
-``ciip/evaluation/linearprobe_comparison.py`` so it can load models,
-instantiate the SSL4EO dataset, and compute embeddings on-the-fly without
-pre-extracted features.
-
-Example usage::
-
-    # python -m visualizations.ssl4eo.embedding_collapse_diagnostics \
-    #     --checkpoint-root /home/juro4948/ciip/logs/2025_09_05-13_28_50-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints \
-    #     --output-dir diagnostics/random_init \
-    #     --dataset-root /local/ms-data/SSL4EO/ \
-    #     --subset-size 2048 \
-    #     --negative-samples 2000 \
-    #     --linear-probe-csv results.csv \
-    #     --linear-probe-pattern "RandomInit-hal-epoch(\\d+)" \
-    #     --tsne-samples 800 \
-    #     --umap-samples 800 \
-    #     --use-orthogonal-mapping  # opt-in to applying W.pt to s*_features_vc
-
-All plots are saved in the provided output directory; intermediate statistics
-are exported as JSON/NumPy files for downstream analysis. The VC diagnostics are
-also written to ``vc_metrics.csv`` and summarized in
-``vc_metrics_timeseries_s1.png`` / ``vc_metrics_timeseries_s2.png``.
-
-By default, embeddings are exported directly from the encoders (raw ``s*_features_vc``).
-Pass ``--use-orthogonal-mapping`` to apply the optional ``W.pt`` alignment when present.
+This module intentionally favours clarity over feature completeness.  It exposes
+helpers that are consumed by other research scripts (``unified_evaluation.py``
+and ``eval_collapse_diagnostics.py``) while providing a compact CLI for
+producing diagnostics for a single checkpoint epoch.
 """
 
 from __future__ import annotations
 
 import argparse
 import contextlib
-import csv
+import inspect
 import json
 import logging
-import math
 import re
-import textwrap
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
-import matplotlib.image as mpimg
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from matplotlib.backends.backend_pdf import PdfPages
 from omegaconf import DictConfig, OmegaConf
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
@@ -71,2661 +31,98 @@ from ciip.open_clip_train.data import get_data
 from ciip.open_clip_train.precision import get_autocast
 from ciip.open_clip_train.utils import create_model
 
-import os
-try:
+try:  # optional dependency
     import umap  # type: ignore
-except ImportError:  # pragma: no cover - optional dependency
+except ImportError:  # pragma: no cover - optional in CI
     umap = None
-
-try:  # pragma: no cover - optional dependency
-    from open_clip import get_input_dtype  # type: ignore
-except ImportError:  # pragma: no cover - open_clip is optional for docs/tests
-    get_input_dtype = None  # type: ignore[assignment]
-
 
 _LOGGER = logging.getLogger("embedding_collapse")
 
-
-@dataclass
-class EpochEmbeddings:
-    """Container for the embeddings associated with a single epoch."""
-
-    label: str
-    epoch_index: int
-    path: Path
-    s1: Optional[torch.Tensor]
-    s2: Optional[torch.Tensor]
-    uids: List[str]
-    s1_normalized: Optional[torch.Tensor] = None
-    s2_normalized: Optional[torch.Tensor] = None
-    s1_pre_projection: Optional[torch.Tensor] = None
-    s2_pre_projection: Optional[torch.Tensor] = None
-    s1_layer_activations: Optional[Dict[str, torch.Tensor]] = None
-    s2_layer_activations: Optional[Dict[str, torch.Tensor]] = None
+# ---------------------------------------------------------------------------
+# Dataclasses
+# ---------------------------------------------------------------------------
 
 
 @dataclass
-class EpochMetrics:
-    """Aggregated metrics computed for a single epoch."""
+class ModalityEmbeddings:
+    """Embeddings and layer activations for one modality."""
+
+    raw: torch.Tensor
+    normalized: torch.Tensor
+    layer_activations: Dict[str, torch.Tensor]
+
+
+@dataclass
+class EpochDiagnostics:
+    """Diagnostics computed for a single checkpoint epoch."""
 
     label: str
-    epoch_index: int
-    sample_count: int
-    cosine_positive: Optional[np.ndarray] = None
-    cosine_negative: Optional[np.ndarray] = None
-    s1_variance: Optional[np.ndarray] = None
-    s2_variance: Optional[np.ndarray] = None
-    s1_spectrum: Optional[np.ndarray] = None
-    s2_spectrum: Optional[np.ndarray] = None
-    s1_singular_values: Optional[np.ndarray] = None
-    s2_singular_values: Optional[np.ndarray] = None
-    s1_pre_singular_values: Optional[np.ndarray] = None
-    s2_pre_singular_values: Optional[np.ndarray] = None
-    s1_normalized_singular_values: Optional[np.ndarray] = None
-    s2_normalized_singular_values: Optional[np.ndarray] = None
-    s1_pre_spectrum: Optional[np.ndarray] = None
-    s2_pre_spectrum: Optional[np.ndarray] = None
-    s1_condition_number: Optional[float] = None
-    s2_condition_number: Optional[float] = None
-    s1_pre_condition_number: Optional[float] = None
-    s2_pre_condition_number: Optional[float] = None
-    s1_std_min: Optional[float] = None
-    s2_std_min: Optional[float] = None
-    s1_cov_fro: Optional[float] = None
-    s2_cov_fro: Optional[float] = None
-    s1_participation_ratio: Optional[float] = None
-    s2_participation_ratio: Optional[float] = None
-    s1_participation_ratio_normalized: Optional[float] = None
-    s2_participation_ratio_normalized: Optional[float] = None
-    s1_cov_top_eig_share: Optional[float] = None
-    s2_cov_top_eig_share: Optional[float] = None
-    s1_variance_floor_pct: Optional[float] = None
-    s2_variance_floor_pct: Optional[float] = None
-    s1_cov_redundancy: Optional[float] = None
-    s2_cov_redundancy: Optional[float] = None
-    s1_correlation_spectrum: Optional[np.ndarray] = None
-    s2_correlation_spectrum: Optional[np.ndarray] = None
-    s1_pre_correlation_spectrum: Optional[np.ndarray] = None
-    s2_pre_correlation_spectrum: Optional[np.ndarray] = None
-    s1_corr_participation_ratio: Optional[float] = None
-    s2_corr_participation_ratio: Optional[float] = None
-    s1_corr_spectral_entropy: Optional[float] = None
-    s2_corr_spectral_entropy: Optional[float] = None
-    s1_corr_offdiag_fro: Optional[float] = None
-    s2_corr_offdiag_fro: Optional[float] = None
-    s1_corr_top_eig_share: Optional[float] = None
-    s2_corr_top_eig_share: Optional[float] = None
-    cca_spectrum: Optional[np.ndarray] = None
-    cca_rho_max: Optional[float] = None
-    cca_rho_topk_mean: Optional[float] = None
-    s1_pre_std_min: Optional[float] = None
-    s2_pre_std_min: Optional[float] = None
-    s1_pre_cov_fro: Optional[float] = None
-    s2_pre_cov_fro: Optional[float] = None
-    s1_pre_participation_ratio: Optional[float] = None
-    s2_pre_participation_ratio: Optional[float] = None
-    s1_pre_participation_ratio_normalized: Optional[float] = None
-    s2_pre_participation_ratio_normalized: Optional[float] = None
-    s1_pre_cov_top_eig_share: Optional[float] = None
-    s2_pre_cov_top_eig_share: Optional[float] = None
-    s1_pre_variance_floor_pct: Optional[float] = None
-    s2_pre_variance_floor_pct: Optional[float] = None
-    s1_pre_cov_redundancy: Optional[float] = None
-    s2_pre_cov_redundancy: Optional[float] = None
-    s1_pre_corr_participation_ratio: Optional[float] = None
-    s2_pre_corr_participation_ratio: Optional[float] = None
-    s1_pre_corr_spectral_entropy: Optional[float] = None
-    s2_pre_corr_spectral_entropy: Optional[float] = None
-    s1_pre_corr_offdiag_fro: Optional[float] = None
-    s2_pre_corr_offdiag_fro: Optional[float] = None
-    s1_pre_corr_top_eig_share: Optional[float] = None
-    s2_pre_corr_top_eig_share: Optional[float] = None
-    s1_delta_participation_ratio: Optional[float] = None
-    s2_delta_participation_ratio: Optional[float] = None
-    s1_shape_change: Optional[np.ndarray] = None
-    s2_shape_change: Optional[np.ndarray] = None
-    s1_pre_post_cca: Optional[np.ndarray] = None
-    s2_pre_post_cca: Optional[np.ndarray] = None
-    s1_pre_post_cca_topk_mean: Optional[float] = None
-    s2_pre_post_cca_topk_mean: Optional[float] = None
-    s1_within_cka: Optional[np.ndarray] = None
-    s2_within_cka: Optional[np.ndarray] = None
-    cross_cka: Optional[np.ndarray] = None
-    s1_cka_layer_names: Optional[List[str]] = None
-    s2_cka_layer_names: Optional[List[str]] = None
-    cross_cka_s1_layers: Optional[List[str]] = None
-    cross_cka_s2_layers: Optional[List[str]] = None
-
-    def to_summary_dict(self) -> Dict[str, object]:
-        """Return a JSON-friendly summary of the metrics."""
-
-        def _safe_stats(values: Optional[np.ndarray]) -> Dict[str, float]:
-            if values is None or values.size == 0:
-                return {}
-            return {
-                "mean": float(np.mean(values)),
-                "std": float(np.std(values)),
-                "min": float(np.min(values)),
-                "max": float(np.max(values)),
-            }
-
-        def _top_components(values: Optional[np.ndarray], count: int = 10) -> List[float]:
-            if values is None:
-                return []
-            array = np.asarray(values)
-            if array.size == 0:
-                return []
-            top = array[: min(count, array.size)]
-            return [float(v) for v in top]
-
-        def _matrix_stats(matrix: Optional[np.ndarray]) -> Dict[str, float]:
-            if matrix is None:
-                return {}
-            array = np.asarray(matrix, dtype=np.float64)
-            if array.size == 0:
-                return {}
-            mask = np.isfinite(array)
-            if not np.any(mask):
-                return {}
-            values = array[mask]
-            return {
-                "mean": float(np.mean(values)),
-                "min": float(np.min(values)),
-                "max": float(np.max(values)),
-            }
-
-        vc_metrics = {
-            "s1": {
-                "std_min": self.s1_std_min,
-                "cov_fro": self.s1_cov_fro,
-                "participation_ratio": self.s1_participation_ratio,
-                "participation_ratio_normalized": self.s1_participation_ratio_normalized,
-                "cov_top_eig_share": self.s1_cov_top_eig_share,
-                "variance_floor_pct": self.s1_variance_floor_pct,
-                "cov_redundancy": self.s1_cov_redundancy,
-                "correlation_participation_ratio": self.s1_corr_participation_ratio,
-                "correlation_spectral_entropy": self.s1_corr_spectral_entropy,
-                "correlation_offdiag_fro": self.s1_corr_offdiag_fro,
-                "correlation_top_eig_share": self.s1_corr_top_eig_share,
-            },
-            "s2": {
-                "std_min": self.s2_std_min,
-                "cov_fro": self.s2_cov_fro,
-                "participation_ratio": self.s2_participation_ratio,
-                "participation_ratio_normalized": self.s2_participation_ratio_normalized,
-                "cov_top_eig_share": self.s2_cov_top_eig_share,
-                "variance_floor_pct": self.s2_variance_floor_pct,
-                "cov_redundancy": self.s2_cov_redundancy,
-                "correlation_participation_ratio": self.s2_corr_participation_ratio,
-                "correlation_spectral_entropy": self.s2_corr_spectral_entropy,
-                "correlation_offdiag_fro": self.s2_corr_offdiag_fro,
-                "correlation_top_eig_share": self.s2_corr_top_eig_share,
-            },
-        }
-
-        def _has_pre_metrics(*values: Optional[float]) -> bool:
-            for value in values:
-                if value is None:
-                    continue
-                value_float = float(value)
-                if not math.isnan(value_float):
-                    return True
-            return False
-
-        if _has_pre_metrics(
-            self.s1_pre_std_min,
-            self.s1_pre_cov_fro,
-            self.s1_pre_participation_ratio,
-            self.s1_pre_cov_top_eig_share,
-            self.s1_pre_corr_participation_ratio,
-            self.s1_pre_corr_spectral_entropy,
-            self.s1_pre_corr_offdiag_fro,
-            self.s1_pre_corr_top_eig_share,
-        ):
-            vc_metrics["s1_pre_projection"] = {
-                "std_min": self.s1_pre_std_min,
-                "cov_fro": self.s1_pre_cov_fro,
-                "participation_ratio": self.s1_pre_participation_ratio,
-                "participation_ratio_normalized": self.s1_pre_participation_ratio_normalized,
-                "cov_top_eig_share": self.s1_pre_cov_top_eig_share,
-                "variance_floor_pct": self.s1_pre_variance_floor_pct,
-                "cov_redundancy": self.s1_pre_cov_redundancy,
-                "correlation_participation_ratio": self.s1_pre_corr_participation_ratio,
-                "correlation_spectral_entropy": self.s1_pre_corr_spectral_entropy,
-                "correlation_offdiag_fro": self.s1_pre_corr_offdiag_fro,
-                "correlation_top_eig_share": self.s1_pre_corr_top_eig_share,
-            }
-
-        if _has_pre_metrics(
-            self.s2_pre_std_min,
-            self.s2_pre_cov_fro,
-            self.s2_pre_participation_ratio,
-            self.s2_pre_cov_top_eig_share,
-            self.s2_pre_corr_participation_ratio,
-            self.s2_pre_corr_spectral_entropy,
-            self.s2_pre_corr_offdiag_fro,
-            self.s2_pre_corr_top_eig_share,
-        ):
-            vc_metrics["s2_pre_projection"] = {
-                "std_min": self.s2_pre_std_min,
-                "cov_fro": self.s2_pre_cov_fro,
-                "participation_ratio": self.s2_pre_participation_ratio,
-                "participation_ratio_normalized": self.s2_pre_participation_ratio_normalized,
-                "cov_top_eig_share": self.s2_pre_cov_top_eig_share,
-                "variance_floor_pct": self.s2_pre_variance_floor_pct,
-                "cov_redundancy": self.s2_pre_cov_redundancy,
-                "correlation_participation_ratio": self.s2_pre_corr_participation_ratio,
-                "correlation_spectral_entropy": self.s2_pre_corr_spectral_entropy,
-                "correlation_offdiag_fro": self.s2_pre_corr_offdiag_fro,
-                "correlation_top_eig_share": self.s2_pre_corr_top_eig_share,
-            }
-
-        head_metrics = {
-            "s1": {
-                "delta_participation_ratio": self.s1_delta_participation_ratio,
-                "shape_change": _safe_stats(self.s1_shape_change),
-                "pre_post_cca_topk_mean": self.s1_pre_post_cca_topk_mean,
-                "pre_post_cca": _safe_stats(self.s1_pre_post_cca),
-                "pre_post_cca_components": _top_components(self.s1_pre_post_cca),
-            },
-            "s2": {
-                "delta_participation_ratio": self.s2_delta_participation_ratio,
-                "shape_change": _safe_stats(self.s2_shape_change),
-                "pre_post_cca_topk_mean": self.s2_pre_post_cca_topk_mean,
-                "pre_post_cca": _safe_stats(self.s2_pre_post_cca),
-                "pre_post_cca_components": _top_components(self.s2_pre_post_cca),
-            },
-        }
-
-        return {
-            "label": self.label,
-            "epoch_index": self.epoch_index,
-            "sample_count": self.sample_count,
-            "cosine_positive": _safe_stats(self.cosine_positive),
-            "cosine_negative": _safe_stats(self.cosine_negative),
-            "s1_variance": _safe_stats(self.s1_variance),
-            "s2_variance": _safe_stats(self.s2_variance),
-            "s1_condition_number": self.s1_condition_number,
-            "s2_condition_number": self.s2_condition_number,
-            "vc_metrics": vc_metrics,
-            "cca": {
-                "rho_max": self.cca_rho_max,
-                "rho_topk_mean": self.cca_rho_topk_mean,
-            },
-            "cka": {
-                "s1_layers": self.s1_cka_layer_names,
-                "s2_layers": self.s2_cka_layer_names,
-                "cross_s1_layers": self.cross_cka_s1_layers,
-                "cross_s2_layers": self.cross_cka_s2_layers,
-                "s1_stats": _matrix_stats(self.s1_within_cka),
-                "s2_stats": _matrix_stats(self.s2_within_cka),
-                "cross_stats": _matrix_stats(self.cross_cka),
-            },
-            "head_metrics": head_metrics,
-        }
-
-def _sanitize_label(label: str) -> str:
-    """Return a filesystem-friendly variant of ``label``."""
-
-    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", label).strip("_")
-    return safe or "epoch"
+    epoch: int
+    ids: List[str]
+    s1: ModalityEmbeddings
+    s2: ModalityEmbeddings
+    s1_singular_values: np.ndarray
+    s2_singular_values: np.ndarray
+    s1_layers: List[str]
+    s2_layers: List[str]
+    s1_within_cka: Optional[np.ndarray]
+    s2_within_cka: Optional[np.ndarray]
+    cross_cka: Optional[np.ndarray]
+    cross_s1_layers: List[str]
+    cross_s2_layers: List[str]
 
 
-def _natural_key(value: str) -> List[object]:
-    """Return a key for natural sorting of strings containing numbers."""
+# ---------------------------------------------------------------------------
+# Compatibility helpers imported by other modules
+# ---------------------------------------------------------------------------
 
-    return [int(text) if text.isdigit() else text.lower() for text in re.split(r"(\\d+)", value)]
 
+def ensure_hydra_original_cwd() -> None:
+    """Ensure Hydra provides a deterministic ``get_original_cwd``."""
 
-def infer_epoch_index(name: str, fallback: int) -> int:
-    """Infer an integer epoch index from a directory or model name."""
+    try:
+        from hydra.core import utils as hydra_utils  # type: ignore
 
-    for pattern in (r"epoch[_-]?(\\d+)", r"(\\d+)"):
-        match = re.search(pattern, name)
-        if match:
-            try:
-                return int(match.group(1))
-            except (ValueError, IndexError):
-                continue
-    return fallback
+        hydra_utils.get_original_cwd()
+    except Exception:
+        try:
+            from hydra.core import utils as hydra_utils  # type: ignore
+
+            repo_root = Path(__file__).resolve().parents[2]
+            default_cwd = repo_root / "ciip" / "open_clip_train"
+            hydra_utils.get_original_cwd = lambda: str(default_cwd)
+        except Exception:
+            _LOGGER.debug("Hydra not available; skipping original cwd override")
 
 
 def resolve_input_dtype(precision: str) -> torch.dtype:
-    """Resolve the tensor dtype used for model inputs."""
-
-    dtype: Optional[torch.dtype] = None
-    if get_input_dtype is not None:
-        dtype = get_input_dtype(precision)
-    if dtype is not None:
-        return dtype
+    """Map a precision string from the config to a torch dtype."""
 
     precision = precision.lower()
-    if "bf16" in precision:
+    if precision in {"bf16", "bfloat16"}:
         return torch.bfloat16
-    if "fp16" in precision or "amp" in precision:
+    if precision in {"fp16", "float16", "amp", "half"}:
         return torch.float16
     return torch.float32
 
 
-def ensure_hydra_original_cwd() -> None:
-    """Ensure ``hydra.utils.get_original_cwd`` is defined when not using Hydra."""
+# ---------------------------------------------------------------------------
+# Public helper functions (used by other modules)
+# ---------------------------------------------------------------------------
 
-    try:
-        from hydra import utils as hydra_utils  # type: ignore
-    except ImportError as exc:  # pragma: no cover - hydra is required for dataset loading
-        raise ImportError(
-            "hydra-core is required to instantiate the SSL4EO dataset; install it with `pip install hydra-core`."
-        ) from exc
 
-    try:
-        hydra_utils.get_original_cwd()
-    except Exception:
-        repo_root = Path(__file__).resolve().parents[3]
-        default_cwd = repo_root / "ciip" / "open_clip_train"
-        hydra_utils.get_original_cwd = lambda: str(default_cwd)
+def compute_singular_values(tensor: torch.Tensor) -> np.ndarray:
+    """Return singular values of ``tensor`` treated as (N, D)."""
 
-
-def compare_state_keys(model: torch.nn.Module, state_dict: Dict[str, torch.Tensor]) -> Tuple[set, set]:
-    """Return missing and unexpected keys between a model and checkpoint."""
-
-    model_keys = set(model.state_dict().keys())
-    checkpoint_keys = set(state_dict.keys())
-    return model_keys - checkpoint_keys, checkpoint_keys - model_keys
-
-
-def load_model_from_checkpoint(
-    config: DictConfig,
-    checkpoint_path: Path,
-    *,
-    device: torch.device,
-    input_dtype: torch.dtype,
-    w_path: Optional[Path] = None,
-    skip_final_fc: bool = False,
-    use_orthogonal_mapping: bool = False,
-) -> torch.nn.Module:
-    """Instantiate a CIIP model and load weights from checkpoint_path."""
-    print(config)
-    model = create_model(config, device=device)
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    state_dict = checkpoint.get("state_dict", checkpoint)
-
-    def _replace_incompatible_fc_layers(model, state_dict):
-        """Replace FC layers with incompatible dimensions."""
-        replacements = []
-        for encoder_name in ['encoder_s1', 'encoder_s2']:
-            encoder = getattr(model, encoder_name, None)
-            if encoder is None or not hasattr(encoder, 'fc'):
-                continue
-                
-            fc_weight_key = f"{encoder_name}.fc.weight"
-            if fc_weight_key not in state_dict:
-                continue
-                
-            checkpoint_shape = state_dict[fc_weight_key].shape
-            model_shape = encoder.fc.weight.shape
-            
-            if checkpoint_shape != model_shape:
-                _LOGGER.warning(
-                    f"FC dimension mismatch in {encoder_name}: "
-                    f"checkpoint {checkpoint_shape} vs model {model_shape}. Replacing."
-                )
-                
-                in_features, out_features = checkpoint_shape[1], checkpoint_shape[0]
-                has_bias = f"{encoder_name}.fc.bias" in state_dict
-                encoder.fc = nn.Linear(in_features, out_features, bias=has_bias)
-                replacements.append(f"{encoder_name}.fc")
-        
-        return replacements
-
-    # Try loading state dict with progressively relaxed constraints
-    try:
-        model.load_state_dict(state_dict, strict=True)
-    except Exception:
-        # Remove module prefix and problematic keys
-        cleaned = {k.replace("module.", ""): v for k, v in state_dict.items()}
-        if "encoder_s1.W" in cleaned:
-            del cleaned["encoder_s1.W"]
-        
-        # Replace incompatible FC layers
-        replacements = _replace_incompatible_fc_layers(model, cleaned)
-        if replacements:
-            _LOGGER.info(f"Replaced incompatible layers: {replacements}")
-        
-        # Check for remaining issues
-        missing, unexpected = compare_state_keys(model, cleaned)
-        missing_filtered = {k for k in missing if not any(k.startswith(r) for r in replacements)}
-        
-        # if missing_filtered or unexpected:
-        #     _LOGGER.warning(f"Missing: {missing_filtered}, Unexpected: {unexpected}")
-        #     critical_missing = {k for k in missing_filtered 
-        #                       if not any(p in k for p in ['fc.weight', 'fc.bias', 'W'])}
-        #     if critical_missing:
-        #         raise RuntimeError(f"Critical incompatibilities: {critical_missing}")
-        
-        model.load_state_dict(cleaned, strict=False)
-
-    # Apply dtype and device
-    model = model.to(device, dtype=input_dtype, non_blocking=True)
-
-    # Skip final FC layers if requested
-    if skip_final_fc:
-        for encoder_name in ['encoder_s1', 'encoder_s2']:
-            encoder = getattr(model, encoder_name, None)
-            if encoder and hasattr(encoder, 'fc'):
-                encoder.fc = nn.Identity()
-
-    model.eval()
-    return model
-
-
-def _unwrap_subset(dataset: torch.utils.data.Dataset) -> Tuple[torch.utils.data.Dataset, Sequence[int]]:
-    if isinstance(dataset, torch.utils.data.Subset):
-        return dataset.dataset, dataset.indices  # type: ignore[return-value]
-    return dataset, range(len(dataset))
-
-
-def _register_pre_projection_hooks(
-    model: torch.nn.Module,
-) -> Tuple[
-    Dict[str, List[torch.Tensor]],
-    Dict[str, Dict[str, List[torch.Tensor]]],
-    List[torch.utils.hooks.RemovableHandle],
-]:
-    """Register hooks that capture inputs to heads and intermediate activations."""
-
-    caches: Dict[str, List[torch.Tensor]] = {"s1": [], "s2": []}
-    layer_caches: Dict[str, Dict[str, List[torch.Tensor]]] = {"s1": {}, "s2": {}}
-    handles: List[torch.utils.hooks.RemovableHandle] = []
-
-    def _make_hook(key: str):
-        cache = caches[key]
-
-        def hook(module: torch.nn.Module, inputs: Tuple[torch.Tensor, ...], output: torch.Tensor):  # type: ignore[override]
-            if not inputs:
-                return
-            tensor = inputs[0]
-            if tensor is None:
-                return
-            cache.append(tensor.detach().to(dtype=torch.float32, device="cpu"))
-
-        return hook
-
-    def _make_layer_hook(key: str, layer_name: str):
-        cache = layer_caches[key].setdefault(layer_name, [])
-
-        def hook(module: torch.nn.Module, inputs: Tuple[torch.Tensor, ...], output):  # type: ignore[override]
-            if isinstance(output, (tuple, list)):
-                if not output:
-                    return
-                tensor = output[0]
-            else:
-                tensor = output
-            if not isinstance(tensor, torch.Tensor):
-                return
-            tensor = tensor.detach()
-            if tensor.dim() > 2:
-                tensor = F.adaptive_avg_pool2d(tensor, output_size=(1, 1))
-            tensor = tensor.flatten(start_dim=1).to(dtype=torch.float32, device="cpu")
-            cache.append(tensor)
-
-        return hook
-
-    def _maybe_register(module: Optional[torch.nn.Module], key: str) -> None:
-        if module is None:
-            return
-        try:
-            handle = module.register_forward_hook(_make_hook(key))
-        except Exception:
-            return
-        handles.append(handle)
-
-    def _register_layers(encoder: Optional[torch.nn.Module], key: str) -> None:
-        if encoder is None:
-            return
-        layer_names = ["conv1", "layer1", "layer2", "layer3", "layer4", "avgpool", "fc"]
-        for name in layer_names:
-            module = getattr(encoder, name, None)
-            if not isinstance(module, torch.nn.Module):
-                continue
-            try:
-                handle = module.register_forward_hook(_make_layer_hook(key, name))
-            except Exception:
-                continue
-            handles.append(handle)
-
-    encoder_s1 = getattr(model, "encoder_s1", None)
-    if encoder_s1 is not None:
-        for attr in ("proj", "projection_head", "fc"):
-            module = getattr(encoder_s1, attr, None)
-            if isinstance(module, torch.nn.Module):
-                _maybe_register(module, "s1")
-                break
-        _register_layers(encoder_s1, "s1")
-
-    encoder_s2 = getattr(model, "encoder_s2", None)
-    if encoder_s2 is not None:
-        for attr in ("proj", "projection_head", "fc"):
-            module = getattr(encoder_s2, attr, None)
-            if isinstance(module, torch.nn.Module):
-                _maybe_register(module, "s2")
-                break
-        _register_layers(encoder_s2, "s2")
-
-    return caches, layer_caches, handles
-
-
-def extract_embeddings_for_dataset(
-    model: torch.nn.Module,
-    dataset: torch.utils.data.Dataset,
-    *,
-    input_dtype: torch.dtype,
-    device: torch.device,
-    autocast,
-) -> Tuple[
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    Optional[torch.Tensor],
-    Optional[torch.Tensor],
-    Optional[Dict[str, torch.Tensor]],
-    Optional[Dict[str, torch.Tensor]],
-    List[str],
-]:
-    """Run the encoders over ``dataset`` and return raw & normalized embeddings."""
-
-    # check if model is LorentzCIIP
-    # print(model)
-    is_lorentz = model.__class__.__name__ == "LorentzCIIP"
-    print(f"Extracting embeddings using LorentzCIIP model: {is_lorentz}")
-
-    base_dataset, index_map = _unwrap_subset(dataset)
-    s1_vectors: List[torch.Tensor] = []
-    s2_vectors: List[torch.Tensor] = []
-    s1_normalized_vectors: List[torch.Tensor] = []
-    s2_normalized_vectors: List[torch.Tensor] = []
-    pre_projection_cache, layer_cache, handles = _register_pre_projection_hooks(model)
-    uids: List[str] = []
-
-    with torch.no_grad():
-        for local_idx, base_idx in enumerate(index_map):
-            sample = dataset[local_idx]
-            if isinstance(sample, dict):
-                s1_img = sample.get("s1")
-                s2_img = sample.get("s2")
-            else:
-                s1_img, s2_img = sample  # type: ignore[misc]
-
-            if s1_img is None or s2_img is None:
-                continue
-
-            s1_tensor = torch.as_tensor(s1_img).unsqueeze(0)
-            s2_tensor = torch.as_tensor(s2_img).unsqueeze(0)
-            if input_dtype is not None:
-                s1_tensor = s1_tensor.to(device=device, dtype=input_dtype, non_blocking=True)
-                s2_tensor = s2_tensor.to(device=device, dtype=input_dtype, non_blocking=True)
-            else:
-                s1_tensor = s1_tensor.to(device=device, non_blocking=True)
-                s2_tensor = s2_tensor.to(device=device, non_blocking=True)
-
-            with autocast():
-                model_out = model(s1_tensor, s2_tensor)
-
-            if isinstance(model_out, dict):
-                s1_embed = model_out.get("s1_features_vc")
-                s2_embed = model_out.get("s2_features_vc")
-                s1_norm = model_out.get("s1_features")
-                s2_norm = model_out.get("s2_features")
-            else:
-                s1_embed = s2_embed = None
-                s1_norm = s2_norm = None
-
-            if s1_embed is None or s2_embed is None:
-                if is_lorentz:
-                    with autocast():
-                        s1_embed = model.encode_s1(s1_tensor, lorentz=True)
-                        s2_embed = model.encode_s2(s2_tensor, lorentz=True)
-                else:
-                    with autocast():
-                        s1_embed = model.encode_s1(s1_tensor, normalize=False)
-                        s2_embed = model.encode_s2(s2_tensor, normalize=False)
-                s1_norm = None
-                s2_norm = None
-
-            if s1_norm is None:
-                s1_norm = F.normalize(s1_embed, dim=-1)
-            if s2_norm is None:
-                s2_norm = F.normalize(s2_embed, dim=-1)
-
-            s1_embed = s1_embed.squeeze(0).detach()
-            s2_embed = s2_embed.squeeze(0).detach()
-            s1_norm = s1_norm.squeeze(0).detach()
-            s2_norm = s2_norm.squeeze(0).detach()
-            del model_out
-
-            s1_cpu = s1_embed.cpu()
-            s2_cpu = s2_embed.cpu()
-            s1_vectors.append(s1_cpu)
-            s2_vectors.append(s2_cpu)
-
-            s1_normalized_vectors.append(s1_norm.to(dtype=torch.float32).cpu())
-            s2_normalized_vectors.append(s2_norm.to(dtype=torch.float32).cpu())
-
-            if hasattr(base_dataset, "get_sample_uid"):
-                uid, _ = base_dataset.get_sample_uid(base_idx)
-            else:
-                uid = base_idx
-            uids.append(str(uid))
-  
-        for handle in handles:
-            handle.remove()
-
-    if not s1_vectors or not s2_vectors:
-        raise RuntimeError("No embeddings were extracted from the provided dataset subset.")
-
-    def _stack_pre_features(key: str, expected: int) -> Optional[torch.Tensor]:
-        cache = pre_projection_cache.get(key, [])
-        if expected <= 0 or not cache:
-            return None
-        if len(cache) < expected:
-            return None
-        selected = cache[-expected:]
-        tensors: List[torch.Tensor] = []
-        for tensor in selected:
-            if tensor.dim() > 1 and tensor.shape[0] == 1:
-                tensors.append(tensor.squeeze(0))
-            else:
-                tensors.append(tensor.clone())
-        try:
-            return torch.stack(tensors, dim=0)
-        except Exception:
-            return None
-
-    def _stack_layer_features(key: str, expected: int) -> Optional[Dict[str, torch.Tensor]]:
-        layer_caches = layer_cache.get(key, {})
-        if expected <= 0 or not layer_caches:
-            return None
-        stacked_layers: Dict[str, torch.Tensor] = {}
-        for name, tensors in layer_caches.items():
-            if not tensors:
-                continue
-            selected = tensors[-expected:]
-            processed: List[torch.Tensor] = []
-            for tensor in selected:
-                if tensor.dim() > 1 and tensor.shape[0] == 1:
-                    processed.append(tensor.squeeze(0))
-                else:
-                    processed.append(tensor.clone())
-            try:
-                stacked = torch.stack(processed, dim=0)
-            except Exception:
-                continue
-            stacked_layers[name] = stacked.to(dtype=torch.float32)
-        return stacked_layers or None
-
-    s1_stack = torch.stack(s1_vectors, dim=0)
-    s2_stack = torch.stack(s2_vectors, dim=0)
-    s1_norm_stack = torch.stack(s1_normalized_vectors, dim=0)
-    s2_norm_stack = torch.stack(s2_normalized_vectors, dim=0)
-    s1_pre_stack = _stack_pre_features("s1", len(s1_vectors))
-    s2_pre_stack = _stack_pre_features("s2", len(s2_vectors))
-    s1_layer_stack = _stack_layer_features("s1", len(s1_vectors))
-    s2_layer_stack = _stack_layer_features("s2", len(s2_vectors))
-    return (
-        s1_stack,
-        s2_stack,
-        s1_norm_stack,
-        s2_norm_stack,
-        s1_pre_stack,
-        s2_pre_stack,
-        s1_layer_stack,
-        s2_layer_stack,
-        uids,
-    )
-
-
-def discover_checkpoints(
-    checkpoint_root: Path,
-    *,
-    pattern: Optional[str],
-    include_init: bool,
-    max_checkpoints: Optional[int],
-) -> List[Path]:
-    """Return checkpoint files sorted using natural ordering."""
-
-    checkpoint_root = Path(checkpoint_root)
-    if not checkpoint_root.exists():
-        raise FileNotFoundError(f"Checkpoint root '{checkpoint_root}' does not exist")
-
-    regex = re.compile(pattern) if pattern else None
-    candidates: List[Path] = []
-    for extension in ("*.pt", "*.pth"):
-        candidates.extend(checkpoint_root.glob(extension))
-
-    if regex is not None:
-        candidates = [path for path in candidates if regex.search(path.name)]
-    if not include_init:
-        candidates = [path for path in candidates if "epoch_init" not in path.name]
-
-
-    epochs = [int(p.stem.split('_')[1]) for p in candidates]
-    epochs = sorted(set(epochs))
-
-    # if min epoch is > 5
-    subtract = False
-    if min(epochs) > 5:
-        subtract = True
-        minimum = min(epochs)
-        # subtract min from all
-        epochs = [e - minimum for e in epochs]
-
-    keep = set()
-
-    # Always keep these if present
-    keep.update(e for e in epochs if e in {1, 2, 3, 5, 10, 15, 20})
-
-    if epochs:
-        max_ep = max(epochs)
-
-        # If max epoch < 50, keep it (even if not in the above list)
-        if max_ep < 50:
-            keep.add(max_ep)
-
-        # If max epoch is between 20 and 100 (inclusive),
-        # keep only every 10th epoch AFTER 20 (i.e., 30, 40, 50, ... up to max_ep)
-        if 20 < max_ep <= 100:
-            keep.update(e for e in epochs if e > 20 and e % 10 == 0 and e <= max_ep)
-
-        if 100 < max_ep:
-            keep.update(e for e in epochs if e > 20 and e % 10 == 0 and e <= 50)
-            keep.update(e for e in epochs if e > 50 and e % 20 == 0)
-
-
-    
-
-    epochs = sorted(keep)
-    epochs = [1, 20]
-
-    if subtract == True:
-        epochs = [e + minimum for e in epochs]
-
-    print(epochs)
-
-
-    # filter and keep only those epochs
-    selected_paths = [
-        p for p in candidates
-        if int(p.stem.split('_')[1]) in epochs
-    ]
-
-    # (optional) sort them by epoch number
-    candidates = sorted(
-        selected_paths,
-        key=lambda p: int(p.stem.split('_')[1])
-    )
-
-
-    # candidates = [candidates[i] for i in range(len(candidates)) if i in epochs or i == 0 or i == len(candidates)-1]
-    if max_checkpoints is not None:
-        candidates = candidates[:max_checkpoints]
-
-    if not candidates:
-        raise FileNotFoundError(f"No checkpoints matching the provided criteria were found in '{checkpoint_root}'")
-
-    return candidates
-
-
-def collect_epoch_embeddings(
-    checkpoint_root: Path,
-    config: DictConfig,
-    dataset: torch.utils.data.Dataset,
-    *,
-    input_dtype: torch.dtype,
-    device: torch.device,
-    autocast,
-    pattern: Optional[str],
-    include_init: bool,
-    max_checkpoints: Optional[int],
-    skip_final_fc: bool = False,
-    use_orthogonal_mapping: bool = False,
-) -> List[EpochEmbeddings]:
-    """Extract embeddings for each checkpoint under ``checkpoint_root``.
-
-    Raw encoder outputs are returned by default. Set ``use_orthogonal_mapping`` to ``True``
-    to apply the optional ``W.pt`` alignment when present.
-    """
-
-    checkpoints = discover_checkpoints(
-        checkpoint_root,
-        pattern=pattern,
-        include_init=include_init,
-        max_checkpoints=max_checkpoints,
-    )
-
-    # w_path = checkpoint_root / "W.pt"
-    # if not w_path.exists():
-    #     w_path = None
-    #     print("No orthogonal mapping W.pt found in checkpoint root")
-
-    epochs: List[EpochEmbeddings] = []
-    for idx, checkpoint_path in enumerate(checkpoints):
-        label = checkpoint_path.stem
-        epoch_index = infer_epoch_index(label, fallback=idx)
-        _LOGGER.info("Extracting embeddings for %s (epoch index %d)", checkpoint_path.name, epoch_index)
-
-        model = load_model_from_checkpoint(
-            config,
-            checkpoint_path,
-            device=device,
-            input_dtype=input_dtype,
-            # w_path=w_path,
-            skip_final_fc=skip_final_fc,
-            use_orthogonal_mapping=use_orthogonal_mapping,
-        )
-
-        try:
-            (
-                s1,
-                s2,
-                s1_normalized,
-                s2_normalized,
-                s1_pre,
-                s2_pre,
-                s1_layers,
-                s2_layers,
-                uids,
-            ) = extract_embeddings_for_dataset(
-                model,
-                dataset,
-                input_dtype=input_dtype,
-                device=device,
-                autocast=autocast,
-            )
-        except RuntimeError as exc:
-            _LOGGER.error("Skipping %s due to extraction failure: %s", checkpoint_path.name, exc)
-            continue
-
-        epochs.append(
-            EpochEmbeddings(
-                label,
-                epoch_index,
-                checkpoint_path,
-                s1,
-                s2,
-                uids,
-                s1_normalized,
-                s2_normalized,
-                s1_pre,
-                s2_pre,
-                s1_layers,
-                s2_layers,
-            )
-        )
-
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
-
-    epochs.sort(key=lambda e: (e.epoch_index, e.label))
-    if not epochs:
-        raise RuntimeError(f"No embeddings were extracted from checkpoints in '{checkpoint_root}'")
-
-    _LOGGER.info("Extracted embeddings for %d checkpoints from %s", len(epochs), checkpoint_root)
-    return epochs
-
-
-
-
-def build_subset(
-    dataset: torch.utils.data.Dataset,
-    subset_size: Optional[int],
-    seed: int,
-) -> torch.utils.data.Dataset:
-    """Return a subset of ``dataset`` containing ``subset_size`` samples."""
-
-    total = len(dataset)
-    if subset_size is None or subset_size <= 0 or subset_size >= total:
-        indices = list(range(total))
-    else:
-        rng = np.random.default_rng(seed)
-        indices = sorted(rng.choice(total, size=subset_size, replace=False).tolist())
-    return torch.utils.data.Subset(dataset, indices)
-
-
-def compute_covariance(tensor: torch.Tensor) -> Optional[torch.Tensor]:
-    """Return the covariance matrix for ``tensor`` (N x D) using 1/N normalization."""
-
-    if tensor.dim() != 2 or tensor.shape[0] < 2:
-        return None
-    centered = tensor.to(torch.float64) - tensor.mean(dim=0, keepdim=True).to(torch.float64)
-    cov = centered.t().matmul(centered) / max(centered.shape[0], 1)
-    return cov
-
-
-def compute_singular_values(
-    features: torch.Tensor, *, covariance: Optional[torch.Tensor] = None
-) -> Optional[np.ndarray]:
-    """Return singular values of the covariance of ``features``."""
-
-    if features.dim() != 2:
-        return None
-    batch, dims = features.shape
-    if batch < 2 or dims < 1:
-        return None
-
-    if covariance is None:
-        cov = compute_covariance(features)
-    else:
-        cov = covariance
-
-    if cov is None or cov.numel() == 0:
-        return None
-
-    cov64 = cov.to(torch.float64)
-
-    try:
-        singular = torch.linalg.svdvals(cov64)
-    except RuntimeError:
-        return None
-
-    if singular.numel() == 0:
-        return None
-
-    singular = torch.clamp(singular, min=0.0)
-    return singular.cpu().numpy()
-
-
-def compute_vc_geometry(
-    features: torch.Tensor,
-    eps: float = 1e-12,
-    covariance: Optional[torch.Tensor] = None,
-) -> Tuple[float, float, float, float, float]:
-    """Return variance-covariance diagnostics for a batch of ``features``."""
-
-    if features.dim() != 2 or features.shape[0] < 2:
-        nan = float("nan")
-        return nan, nan, nan, nan, nan
-
-    if covariance is None:
-        feats = features.to(torch.float64)
-        cov = compute_covariance(feats)
-    else:
-        cov = covariance.to(torch.float64)
-
-    if cov is None:
-        nan = float("nan")
-        return nan, nan, nan, nan, nan
-
-    diag_elements = torch.diagonal(cov)
-    if diag_elements.numel() == 0:
-        nan = float("nan")
-        return nan, nan, nan, nan, nan
-
-    std = torch.sqrt(torch.clamp(diag_elements, min=0.0))
-    std_min = float(std.min().item())
-
-    diag = torch.diag(diag_elements)
-    off_diag = cov - diag
-    off_norm = torch.linalg.norm(off_diag, ord="fro")
-    cov_norm = torch.linalg.norm(cov, ord="fro")
-    cov_fro = float(off_norm.item())
-    cov_norm_value = float(cov_norm.item())
-    if cov_norm_value <= eps:
-        redundancy = float("nan")
-    else:
-        redundancy = float((off_norm / cov_norm).item())
-
-    eigvals = torch.linalg.eigvalsh(cov).flip(0)
-    eigvals = torch.clamp(eigvals, min=0.0)
-    if eigvals.numel() == 0:
-        nan = float("nan")
-        return std_min, cov_fro, nan, nan, redundancy
-
-    eigvals_sum = float(eigvals.sum().item())
-    eigvals_sq_sum = float(eigvals.pow(2).sum().item())
-    if eigvals_sq_sum <= eps:
-        participation = float("nan")
-    else:
-        participation = float((eigvals_sum**2) / (eigvals_sq_sum + eps))
-
-    if eigvals_sum <= eps:
-        top_share = float("nan")
-    else:
-        top_share = float((eigvals.max().item()) / eigvals_sum)
-
-    return std_min, cov_fro, participation, top_share, redundancy
-
-
-def _normalized_participation_ratio(value: Optional[float], dims: int) -> float:
-    if value is None or dims <= 0:
-        return float("nan")
-    value_float = float(value)
-    if math.isnan(value_float):
-        return float("nan")
-    return value_float / float(dims)
-
-
-def _variance_floor_percentage(
-    covariance: Optional[torch.Tensor],
-    gamma: float,
-) -> float:
-    if covariance is None:
-        return float("nan")
-
-    diag = torch.diagonal(covariance.to(torch.float64))
-    if diag.numel() == 0:
-        return float("nan")
-
-    std = torch.sqrt(torch.clamp(diag, min=0.0))
-    if std.numel() == 0:
-        return float("nan")
-
-    gamma_value = float(gamma)
-    if not math.isfinite(gamma_value):
-        return float("nan")
-
-    below = (std < gamma_value).sum().item()
-    return float(100.0 * below / std.numel())
-
-
-def compute_correlation_metrics(features: torch.Tensor, eps: float = 1e-12):
-    if features.dim() != 2 or features.shape[0] < 2:
-        nan = float("nan");  return None, nan, nan, nan, nan
-
-    cov = compute_covariance(features.to(torch.float64))
-    if cov is None:
-        nan = float("nan");  return None, nan, nan, nan, nan
-
-    variances = torch.diagonal(cov)
-    std = torch.sqrt(torch.clamp(variances, min=0.0))
-    mask = std > eps
-    if mask.sum() < 2:
-        nan = float("nan");  return None, nan, nan, nan, nan
-
-    cov = cov[mask][:, mask]
-    inv_std = 1.0 / std[mask]
-    inv_std_mat = torch.diag(inv_std)
-
-    corr = inv_std_mat @ cov @ inv_std_mat
-    corr = (corr + corr.t()) / 2
-    diag = torch.diag(torch.diagonal(corr))
-    off_diag = corr - diag
-    corr_offdiag = float(torch.linalg.norm(off_diag, ord="fro").item())
-
-    try:
-        eigvals = torch.linalg.eigvalsh(corr).flip(0)
-    except RuntimeError:
-        nan = float("nan")
-        return None, nan, nan, nan, nan
-
-    eigvals_np = eigvals.cpu().numpy().astype(np.float64)
-    if eigvals_np.size == 0:
-        nan = float("nan")
-        return None, nan, nan, nan, nan
-
-    eigvals_np = np.clip(eigvals_np, a_min=0.0, a_max=None)
-    participation = float(((eigvals_np.sum() ** 2) / (np.sum(np.square(eigvals_np)) + eps)))
-
-    total = float(np.sum(eigvals_np))
-    if total <= eps:
-        spectral_entropy = float("nan")
-        top_share = float("nan")
-    else:
-        probs = eigvals_np / total
-        entropy = -float(np.sum(probs * np.log(probs + eps)))
-        if eigvals_np.size <= 1:
-            spectral_entropy = 0.0
-        else:
-            norm = math.log(eigvals_np.size)
-            spectral_entropy = float(entropy / norm) if norm > 0 else float("nan")
-        top_share = float(eigvals_np[0] / total) if eigvals_np.size else float("nan")
-
-    return eigvals_np, participation, spectral_entropy, corr_offdiag, top_share
-
-
-def _symmetric_matrix_inverse_sqrt(
-    matrix: torch.Tensor,
-    eps: float = 1e-12,
-) -> Optional[torch.Tensor]:
-    """Return ``matrix^{-1/2}`` for a symmetric positive semi-definite matrix."""
-
-    try:
-        eigvals, eigvecs = torch.linalg.eigh((matrix + matrix.t()) / 2)
-    except RuntimeError:
-        return None
-
-    eigvals = torch.clamp(eigvals, min=eps)
-    inv_sqrt = eigvecs @ torch.diag(eigvals.rsqrt()) @ eigvecs.t()
-    return inv_sqrt
-
-
-def compute_cca_spectrum(
-    s1: torch.Tensor,
-    s2: torch.Tensor,
-    eps: float = 1e-12,
-) -> Optional[np.ndarray]:
-    """Return the canonical correlation spectrum between ``s1`` and ``s2``."""
-
-    if s1.dim() != 2 or s2.dim() != 2:
-        return None
-
-    count = min(s1.shape[0], s2.shape[0])
-    if count < 2:
-        return None
-
-    x = s1[:count].to(torch.float64)
-    y = s2[:count].to(torch.float64)
-
-    x = x - x.mean(dim=0, keepdim=True)
-    y = y - y.mean(dim=0, keepdim=True)
-
-    denom = max(count - 1, 1)
-    cov_xx = (x.t().matmul(x)) / denom
-    cov_yy = (y.t().matmul(y)) / denom
-    cov_xy = (x.t().matmul(y)) / denom
-
-    inv_sqrt_xx = _symmetric_matrix_inverse_sqrt(cov_xx, eps=eps)
-    inv_sqrt_yy = _symmetric_matrix_inverse_sqrt(cov_yy, eps=eps)
-    if inv_sqrt_xx is None or inv_sqrt_yy is None:
-        return None
-
-    t_matrix = inv_sqrt_xx @ cov_xy @ inv_sqrt_yy
-    try:
-        singular_values = torch.linalg.svdvals(t_matrix)
-    except RuntimeError:
-        return None
-
-    singular_values = torch.clamp(singular_values, min=0.0, max=1.0)
-    return singular_values.cpu().numpy()
-
-
-def _prepare_cka_tensor(tensor: torch.Tensor, take: Optional[int] = None) -> Optional[torch.Tensor]:
     if tensor.dim() != 2:
-        return None
-    count = tensor.shape[0]
-    if count < 2:
-        return None
-    if take is not None and take > 0:
-        count = min(count, take)
-        tensor = tensor[:count]
-    return tensor.to(dtype=torch.float64)
-
-
-def compute_linear_cka(
-    x: torch.Tensor,
-    y: torch.Tensor,
-    eps: float = 1e-12,
-) -> Optional[float]:
-    """Return the linear CKA from Kornblith et al. (2019).
-
-    The implementation mirrors Equation (3) of *Similarity of Neural Network
-    Representations Revisited* (https://arxiv.org/abs/1905.00414) by centering
-    the sample matrices and computing ``||XᵀY||_F² / (||XᵀX||_F · ||YᵀY||_F)``.
-    A small ``eps`` is added to the denominator for numerical stability.
-    """
-    count = min(x.shape[0], y.shape[0])
-    if count < 2:
-        return None
-    x_c = x[:count] - x[:count].mean(dim=0, keepdim=True)
-    y_c = y[:count] - y[:count].mean(dim=0, keepdim=True)
-    cov_xy = x_c.t().matmul(y_c)
-    cov_xx = x_c.t().matmul(x_c)
-    cov_yy = y_c.t().matmul(y_c)
-    numerator = torch.linalg.norm(cov_xy, ord="fro") ** 2
-    denom = torch.linalg.norm(cov_xx, ord="fro") * torch.linalg.norm(cov_yy, ord="fro")
-    denom_value = float(denom.item()) if isinstance(denom, torch.Tensor) else float(denom)
-    if denom_value <= eps:
-        return None
-    value = float((numerator / (denom + eps)).item())
-    return value
-
-
-def compute_within_encoder_cka(
-    layer_features: Dict[str, torch.Tensor],
-) -> Tuple[List[str], Optional[np.ndarray]]:
-    names = sorted(layer_features.keys())
-    prepared: Dict[str, torch.Tensor] = {}
-    for name in names:
-        tensor = _prepare_cka_tensor(layer_features[name])
-        if tensor is not None:
-            prepared[name] = tensor
-    valid_names = [name for name in names if name in prepared]
-    size = len(valid_names)
-    if size == 0:
-        return [], None
-    matrix = np.full((size, size), np.nan, dtype=np.float32)
-    for i, name_i in enumerate(valid_names):
-        x = prepared[name_i]
-        matrix[i, i] = 1.0
-        for j in range(i + 1, size):
-            y = prepared[valid_names[j]]
-            value = compute_linear_cka(x, y)
-            if value is None:
-                continue
-            matrix[i, j] = matrix[j, i] = np.clip(value, 0.0, 1.0)
-    return valid_names, matrix
-
-
-def compute_cross_encoder_cka(
-    s1_layers: Dict[str, torch.Tensor],
-    s2_layers: Dict[str, torch.Tensor],
-) -> Tuple[List[str], List[str], Optional[np.ndarray]]:
-    names_s1 = sorted(s1_layers.keys())
-    names_s2 = sorted(s2_layers.keys())
-    prepared_s1: Dict[str, torch.Tensor] = {}
-    prepared_s2: Dict[str, torch.Tensor] = {}
-    for name in names_s1:
-        tensor = _prepare_cka_tensor(s1_layers[name])
-        if tensor is not None:
-            prepared_s1[name] = tensor
-    for name in names_s2:
-        tensor = _prepare_cka_tensor(s2_layers[name])
-        if tensor is not None:
-            prepared_s2[name] = tensor
-    valid_s1 = [name for name in names_s1 if name in prepared_s1]
-    valid_s2 = [name for name in names_s2 if name in prepared_s2]
-    if not valid_s1 or not valid_s2:
-        return valid_s1, valid_s2, None
-    matrix = np.full((len(valid_s1), len(valid_s2)), np.nan, dtype=np.float32)
-    for i, name_i in enumerate(valid_s1):
-        x = prepared_s1[name_i]
-        for j, name_j in enumerate(valid_s2):
-            y = prepared_s2[name_j]
-            value = compute_linear_cka(x, y)
-            if value is None:
-                continue
-            matrix[i, j] = np.clip(value, 0.0, 1.0)
-    return valid_s1, valid_s2, matrix
-
-
-def compute_condition_number(spectrum: np.ndarray, eps: float = 1e-12) -> float:
-    if spectrum.size == 0:
-        return float("nan")
-    largest = float(spectrum[0])        # spectrum assumed descending
-    smallest = float(spectrum[-1])
-    return float("inf") if smallest <= eps else largest / smallest
-
-
-def compute_log_singular_shape_change(
-    post: Optional[np.ndarray],
-    pre: Optional[np.ndarray],
-    eps: float = 1e-12,
-) -> Optional[np.ndarray]:
-    """Return log-scale singular value changes between post and pre features."""
-
-    if post is None or pre is None:
-        return None
-    take = min(post.size, pre.size)
-    if take == 0:
-        return None
-
-    post_clip = np.clip(post[:take], a_min=eps, a_max=None)
-    pre_clip = np.clip(pre[:take], a_min=eps, a_max=None)
-    return np.log(post_clip) - np.log(pre_clip)
-
-
-def _safe_difference(post: Optional[float], pre: Optional[float]) -> Optional[float]:
-    """Return ``post - pre`` guarding against ``None`` and ``NaN``."""
-
-    if post is None or pre is None:
-        return None
-    post_float = float(post)
-    pre_float = float(pre)
-    if math.isnan(post_float) or math.isnan(pre_float):
-        return None
-    return post_float - pre_float
-
-
-def compute_cosine_statistics(
-    s1: torch.Tensor,
-    s2: torch.Tensor,
-    *,
-    negative_samples: Optional[int],
-    torch_generator: Optional[torch.Generator],
-    numpy_generator: np.random.Generator,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Compute positive and (sampled) negative cosine similarities."""
-
-    if s1.shape[0] != s2.shape[0]:
-        count = min(s1.shape[0], s2.shape[0])
-        s1 = s1[:count]
-        s2 = s2[:count]
-
-    s1_norm = F.normalize(s1, dim=1)
-    s2_norm = F.normalize(s2, dim=1)
-    positive = torch.sum(s1_norm * s2_norm, dim=1).cpu().numpy()
-
-    n = s1_norm.shape[0]
-    if n < 2:
-        return positive, np.empty(0, dtype=np.float32)
-
-    total_pairs = n * (n - 1)
-    if negative_samples is None or negative_samples >= total_pairs:
-        sim_matrix = s1_norm @ s2_norm.t()
-        mask = torch.ones_like(sim_matrix, dtype=torch.bool)
-        mask.fill_diagonal_(False)
-        negatives = sim_matrix[mask].cpu().numpy()
-        if negative_samples is not None and negatives.size > negative_samples:
-            indices = numpy_generator.choice(negatives.size, size=negative_samples, replace=False)
-            negatives = negatives[indices]
-        return positive, negatives
-
-    if torch_generator is None:
-        torch_generator = torch.Generator(device=s1.device)
-    idx_i = torch.randint(0, n, (negative_samples,), generator=torch_generator)
-    idx_j = torch.randint(0, n - 1, (negative_samples,), generator=torch_generator)
-    idx_j = idx_j + (idx_j >= idx_i).long()
-    negatives = torch.sum(s1_norm[idx_i] * s2_norm[idx_j], dim=1).cpu().numpy()
-    return positive, negatives
-
-
-def compute_epoch_metrics(
-    epochs: Sequence[EpochEmbeddings],
-    *,
-    negative_samples: Optional[int],
-    random_seed: int,
-    cca_top_k: int,
-    vc_gamma: float,
-) -> List[EpochMetrics]:
-    """Compute diagnostic metrics for each epoch."""
-
-    torch_gen = torch.Generator(device="cpu")
-    torch_gen.manual_seed(random_seed)
-    np_gen = np.random.default_rng(random_seed)
-
-    results: List[EpochMetrics] = []
-    for epoch in epochs:
-        if epoch.s1 is None or epoch.s2 is None:
-            _LOGGER.warning("Skipping epoch %s due to missing embeddings", epoch.label)
-            continue
-
-        s1_tensor = epoch.s1.to(dtype=torch.float32)
-        s2_tensor = epoch.s2.to(dtype=torch.float32)
-        sample_count = s1_tensor.shape[0]
-
-        if sample_count > 1:
-            s1_var = torch.var(s1_tensor, dim=0, unbiased=True).cpu().numpy()
-            s2_var = torch.var(s2_tensor, dim=0, unbiased=True).cpu().numpy()
-        else:
-            s1_var = np.full(s1_tensor.shape[1], np.nan, dtype=np.float32)
-            s2_var = np.full(s2_tensor.shape[1], np.nan, dtype=np.float32)
-
-        cov_s1 = compute_covariance(s1_tensor)
-        cov_s2 = compute_covariance(s2_tensor)
-
-        metrics = EpochMetrics(label=epoch.label, epoch_index=epoch.epoch_index, sample_count=sample_count)
-        metrics.s1_variance = s1_var
-        metrics.s2_variance = s2_var
-        metrics.s1_singular_values = compute_singular_values(s1_tensor, covariance=cov_s1)
-        metrics.s2_singular_values = compute_singular_values(s2_tensor, covariance=cov_s2)
-        s1_normalized = None
-        s2_normalized = None
-        if epoch.s1_normalized is not None:
-            metrics.s1_normalized_singular_values = compute_singular_values(epoch.s1_normalized)
-        if epoch.s2_normalized is not None:
-            metrics.s2_normalized_singular_values = compute_singular_values(epoch.s2_normalized)
-
-        (
-            s1_std_min,
-            s1_cov_fro,
-            s1_participation,
-            s1_cov_share,
-            s1_redundancy,
-        ) = compute_vc_geometry(s1_tensor, covariance=cov_s1)
-        (
-            s2_std_min,
-            s2_cov_fro,
-            s2_participation,
-            s2_cov_share,
-            s2_redundancy,
-        ) = compute_vc_geometry(s2_tensor, covariance=cov_s2)
-
-        metrics.s1_std_min = s1_std_min
-        metrics.s2_std_min = s2_std_min
-        metrics.s1_cov_fro = s1_cov_fro
-        metrics.s2_cov_fro = s2_cov_fro
-        metrics.s1_participation_ratio = s1_participation
-        metrics.s2_participation_ratio = s2_participation
-        metrics.s1_participation_ratio_normalized = _normalized_participation_ratio(
-            s1_participation, s1_tensor.shape[1]
-        )
-        metrics.s2_participation_ratio_normalized = _normalized_participation_ratio(
-            s2_participation, s2_tensor.shape[1]
-        )
-        metrics.s1_cov_top_eig_share = s1_cov_share
-        metrics.s2_cov_top_eig_share = s2_cov_share
-        metrics.s1_variance_floor_pct = _variance_floor_percentage(cov_s1, vc_gamma)
-        metrics.s2_variance_floor_pct = _variance_floor_percentage(cov_s2, vc_gamma)
-        metrics.s1_cov_redundancy = s1_redundancy
-        metrics.s2_cov_redundancy = s2_redundancy
-
-        (
-            s1_corr_spec,
-            s1_corr_pr,
-            s1_corr_entropy,
-            s1_corr_off,
-            s1_corr_share,
-        ) = compute_correlation_metrics(s1_tensor)
-        (
-            s2_corr_spec,
-            s2_corr_pr,
-            s2_corr_entropy,
-            s2_corr_off,
-            s2_corr_share,
-        ) = compute_correlation_metrics(s2_tensor)
-
-        metrics.s1_correlation_spectrum = s1_corr_spec
-        metrics.s2_correlation_spectrum = s2_corr_spec
-        metrics.s1_corr_participation_ratio = s1_corr_pr
-        metrics.s2_corr_participation_ratio = s2_corr_pr
-        metrics.s1_corr_spectral_entropy = s1_corr_entropy
-        metrics.s2_corr_spectral_entropy = s2_corr_entropy
-        metrics.s1_corr_offdiag_fro = s1_corr_off
-        metrics.s2_corr_offdiag_fro = s2_corr_off
-        metrics.s1_corr_top_eig_share = s1_corr_share
-        metrics.s2_corr_top_eig_share = s2_corr_share
-
-        if epoch.s1_pre_projection is not None:
-            s1_pre_tensor = epoch.s1_pre_projection.to(dtype=torch.float32)
-            cov_s1_pre = compute_covariance(s1_pre_tensor)
-            metrics.s1_pre_singular_values = compute_singular_values(
-                s1_pre_tensor, covariance=cov_s1_pre
-            )
-            (
-                s1_pre_std_min,
-                s1_pre_cov_fro,
-                s1_pre_participation,
-                s1_pre_cov_share,
-                s1_pre_redundancy,
-            ) = compute_vc_geometry(s1_pre_tensor, covariance=cov_s1_pre)
-            (
-                s1_pre_corr_spec,
-                s1_pre_corr_pr,
-                s1_pre_corr_entropy,
-                s1_pre_corr_off,
-                s1_pre_corr_share,
-            ) = compute_correlation_metrics(s1_pre_tensor)
-            metrics.s1_pre_std_min = s1_pre_std_min
-            metrics.s1_pre_cov_fro = s1_pre_cov_fro
-            metrics.s1_pre_participation_ratio = s1_pre_participation
-            metrics.s1_pre_participation_ratio_normalized = _normalized_participation_ratio(
-                s1_pre_participation, s1_pre_tensor.shape[1]
-            )
-            metrics.s1_pre_corr_participation_ratio = s1_pre_corr_pr
-            metrics.s1_pre_corr_spectral_entropy = s1_pre_corr_entropy
-            metrics.s1_pre_corr_offdiag_fro = s1_pre_corr_off
-            metrics.s1_pre_correlation_spectrum = s1_pre_corr_spec
-            metrics.s1_pre_cov_top_eig_share = s1_pre_cov_share
-            metrics.s1_pre_corr_top_eig_share = s1_pre_corr_share
-            metrics.s1_pre_variance_floor_pct = _variance_floor_percentage(cov_s1_pre, vc_gamma)
-            metrics.s1_pre_cov_redundancy = s1_pre_redundancy
-            if cov_s1_pre is not None:
-                eigvals_pre = torch.linalg.eigvalsh(cov_s1_pre).flip(0).cpu().numpy()
-                metrics.s1_pre_spectrum = eigvals_pre
-                metrics.s1_pre_condition_number = compute_condition_number(eigvals_pre)
-            cca_pre_post_s1 = compute_cca_spectrum(s1_pre_tensor, s1_tensor)
-            metrics.s1_pre_post_cca = cca_pre_post_s1
-            if cca_pre_post_s1 is not None and cca_pre_post_s1.size:
-                top_k = cca_pre_post_s1.size if cca_top_k <= 0 else min(cca_top_k, cca_pre_post_s1.size)
-                metrics.s1_pre_post_cca_topk_mean = float(np.mean(cca_pre_post_s1[:top_k]))
-
-        if epoch.s2_pre_projection is not None:
-            s2_pre_tensor = epoch.s2_pre_projection.to(dtype=torch.float32)
-            cov_s2_pre = compute_covariance(s2_pre_tensor)
-            metrics.s2_pre_singular_values = compute_singular_values(
-                s2_pre_tensor, covariance=cov_s2_pre
-            )
-            (
-                s2_pre_std_min,
-                s2_pre_cov_fro,
-                s2_pre_participation,
-                s2_pre_cov_share,
-                s2_pre_redundancy,
-            ) = compute_vc_geometry(s2_pre_tensor, covariance=cov_s2_pre)
-            (
-                s2_pre_corr_spec,
-                s2_pre_corr_pr,
-                s2_pre_corr_entropy,
-                s2_pre_corr_off,
-                s2_pre_corr_share,
-            ) = compute_correlation_metrics(s2_pre_tensor)
-            metrics.s2_pre_std_min = s2_pre_std_min
-            metrics.s2_pre_cov_fro = s2_pre_cov_fro
-            metrics.s2_pre_participation_ratio = s2_pre_participation
-            metrics.s2_pre_participation_ratio_normalized = _normalized_participation_ratio(
-                s2_pre_participation, s2_pre_tensor.shape[1]
-            )
-            metrics.s2_pre_corr_participation_ratio = s2_pre_corr_pr
-            metrics.s2_pre_corr_spectral_entropy = s2_pre_corr_entropy
-            metrics.s2_pre_corr_offdiag_fro = s2_pre_corr_off
-            metrics.s2_pre_correlation_spectrum = s2_pre_corr_spec
-            metrics.s2_pre_cov_top_eig_share = s2_pre_cov_share
-            metrics.s2_pre_corr_top_eig_share = s2_pre_corr_share
-            metrics.s2_pre_variance_floor_pct = _variance_floor_percentage(cov_s2_pre, vc_gamma)
-            metrics.s2_pre_cov_redundancy = s2_pre_redundancy
-            if cov_s2_pre is not None:
-                eigvals_pre = torch.linalg.eigvalsh(cov_s2_pre).flip(0).cpu().numpy()
-                metrics.s2_pre_spectrum = eigvals_pre
-                metrics.s2_pre_condition_number = compute_condition_number(eigvals_pre)
-            cca_pre_post_s2 = compute_cca_spectrum(s2_pre_tensor, s2_tensor)
-            metrics.s2_pre_post_cca = cca_pre_post_s2
-            if cca_pre_post_s2 is not None and cca_pre_post_s2.size:
-                top_k = cca_pre_post_s2.size if cca_top_k <= 0 else min(cca_top_k, cca_pre_post_s2.size)
-                metrics.s2_pre_post_cca_topk_mean = float(np.mean(cca_pre_post_s2[:top_k]))
-
-        metrics.s1_delta_participation_ratio = _safe_difference(
-            metrics.s1_participation_ratio, metrics.s1_pre_participation_ratio
-        )
-        metrics.s2_delta_participation_ratio = _safe_difference(
-            metrics.s2_participation_ratio, metrics.s2_pre_participation_ratio
-        )
-        metrics.s1_shape_change = compute_log_singular_shape_change(
-            metrics.s1_singular_values, metrics.s1_pre_singular_values
-        )
-        metrics.s2_shape_change = compute_log_singular_shape_change(
-            metrics.s2_singular_values, metrics.s2_pre_singular_values
-        )
-
-        if epoch.s1_layer_activations is not None:
-            s1_layer_names, s1_cka = compute_within_encoder_cka(epoch.s1_layer_activations)
-            if s1_layer_names:
-                metrics.s1_cka_layer_names = s1_layer_names
-            metrics.s1_within_cka = s1_cka
-        if epoch.s2_layer_activations is not None:
-            s2_layer_names, s2_cka = compute_within_encoder_cka(epoch.s2_layer_activations)
-            if s2_layer_names:
-                metrics.s2_cka_layer_names = s2_layer_names
-            metrics.s2_within_cka = s2_cka
-        if epoch.s1_layer_activations is not None and epoch.s2_layer_activations is not None:
-            cross_s1, cross_s2, cross_cka = compute_cross_encoder_cka(
-                epoch.s1_layer_activations, epoch.s2_layer_activations
-            )
-            if cross_s1:
-                metrics.cross_cka_s1_layers = cross_s1
-            if cross_s2:
-                metrics.cross_cka_s2_layers = cross_s2
-            metrics.cross_cka = cross_cka
-
-        cca_spectrum = compute_cca_spectrum(epoch.s1, epoch.s2)
-        metrics.cca_spectrum = cca_spectrum
-        if cca_spectrum is not None and cca_spectrum.size:
-            metrics.cca_rho_max = float(cca_spectrum[0])
-            top_k = cca_spectrum.size if cca_top_k <= 0 else min(cca_top_k, cca_spectrum.size)
-            metrics.cca_rho_topk_mean = float(np.mean(cca_spectrum[:top_k]))
-
-        if cov_s1 is not None:
-            eigvals1 = torch.linalg.eigvalsh(cov_s1).flip(0).cpu().numpy()
-            metrics.s1_spectrum = eigvals1
-            metrics.s1_condition_number = compute_condition_number(eigvals1)
-        if cov_s2 is not None:
-            eigvals2 = torch.linalg.eigvalsh(cov_s2).flip(0).cpu().numpy()
-            metrics.s2_spectrum = eigvals2
-            metrics.s2_condition_number = compute_condition_number(eigvals2)
-
-        s1_for_cosine = epoch.s1_normalized if epoch.s1_normalized is not None else epoch.s1
-        s2_for_cosine = epoch.s2_normalized if epoch.s2_normalized is not None else epoch.s2
-
-        positive, negative = compute_cosine_statistics(
-            s1_for_cosine,
-            s2_for_cosine,
-            negative_samples=negative_samples,
-            torch_generator=torch_gen,
-            numpy_generator=np_gen,
-        )
-        metrics.cosine_positive = positive
-        metrics.cosine_negative = negative
-
-        results.append(metrics)
-
-    return results
-
-
-
-def _mark_axis_no_data(ax, title: str, message: str = "No data available") -> None:
-    """Annotate ``ax`` to indicate that the desired plot could not be produced."""
-
-    ax.set_title(title)
-    ax.text(0.5, 0.5, message, ha="center", va="center", transform=ax.transAxes, color="gray")
-    ax.set_xticks([])
-    ax.set_yticks([])
-
-
-def _plot_cka_heatmap(
-    ax,
-    matrix: Optional[np.ndarray],
-    x_labels: Sequence[str],
-    y_labels: Sequence[str],
-    *,
-    title: str,
-    xlabel: str,
-    ylabel: str,
-):
-    if matrix is None or getattr(matrix, "size", 0) == 0:
-        _mark_axis_no_data(ax, title, "CKA unavailable")
-        return None
-    data = np.asarray(matrix, dtype=np.float32)
-    if data.size == 0 or np.all(np.isnan(data)):
-        _mark_axis_no_data(ax, title, "CKA unavailable")
-        return None
-    im = ax.imshow(data, vmin=0.0, vmax=1.0, aspect="auto", cmap="viridis")
-    ax.set_title(title)
-    if x_labels:
-        ax.set_xticks(range(len(x_labels)))
-        ax.set_xticklabels(x_labels, rotation=45, ha="right")
-    else:
-        ax.set_xticks([])
-    if y_labels:
-        ax.set_yticks(range(len(y_labels)))
-        ax.set_yticklabels(y_labels)
-    else:
-        ax.set_yticks([])
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
-    ax.grid(False)
-    return im
-
-
-def plot_layerwise_cka(metrics: Sequence[EpochMetrics], output_dir: Path) -> None:
-    cka_dir = output_dir / "cka"
-    cka_dir.mkdir(parents=True, exist_ok=True)
-
-    for metric in metrics:
-        has_s1 = metric.s1_within_cka is not None and getattr(metric.s1_within_cka, "size", 0)
-        has_s2 = metric.s2_within_cka is not None and getattr(metric.s2_within_cka, "size", 0)
-        has_cross = metric.cross_cka is not None and getattr(metric.cross_cka, "size", 0)
-        if not (has_s1 or has_s2 or has_cross):
-            continue
-
-        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
-        im_handles: List = []
-
-        im = _plot_cka_heatmap(
-            axes[0, 0],
-            metric.s1_within_cka,
-            metric.s1_cka_layer_names or [],
-            metric.s1_cka_layer_names or [],
-            title="S1 within-encoder",
-            xlabel="Layer",
-            ylabel="Layer",
-        )
-        if im is not None:
-            im_handles.append(im)
-
-        im = _plot_cka_heatmap(
-            axes[0, 1],
-            metric.s2_within_cka,
-            metric.s2_cka_layer_names or [],
-            metric.s2_cka_layer_names or [],
-            title="S2 within-encoder",
-            xlabel="Layer",
-            ylabel="Layer",
-        )
-        if im is not None:
-            im_handles.append(im)
-
-        im = _plot_cka_heatmap(
-            axes[1, 0],
-            metric.cross_cka,
-            metric.cross_cka_s2_layers or [],
-            metric.cross_cka_s1_layers or [],
-            title="Cross-encoder",
-            xlabel="S2 layer",
-            ylabel="S1 layer",
-        )
-        if im is not None:
-            im_handles.append(im)
-
-        axes[1, 1].axis("off")
-        axes[1, 1].text(0.5, 0.5, metric.label, ha="center", va="center", transform=axes[1, 1].transAxes)
-
-        if im_handles:
-            fig.colorbar(
-                im_handles[0],
-                ax=[axes[0, 0], axes[0, 1], axes[1, 0]],
-                shrink=0.8,
-                label="Linear CKA",
-            )
-
-        fig.suptitle(f"Layerwise CKA — {metric.label}")
-        fig.tight_layout(rect=[0, 0, 1, 0.95])
-        safe_label = _sanitize_label(metric.label)
-        output_path = cka_dir / f"epoch_{metric.epoch_index:04d}_{safe_label}_cka.png"
-        fig.savefig(output_path, dpi=200)
-        plt.close(fig)
-
-
-def plot_cosine_summary(metrics: Sequence[EpochMetrics], output_dir: Path) -> None:
-    x = [m.epoch_index for m in metrics]
-    labels = [m.label for m in metrics]
-
-    pos_mean = [float(np.mean(m.cosine_positive)) if m.cosine_positive is not None else math.nan for m in metrics]
-    pos_std = [float(np.std(m.cosine_positive)) if m.cosine_positive is not None else math.nan for m in metrics]
-    neg_mean = [float(np.mean(m.cosine_negative)) if m.cosine_negative is not None and m.cosine_negative.size else math.nan for m in metrics]
-    neg_std = [float(np.std(m.cosine_negative)) if m.cosine_negative is not None and m.cosine_negative.size else math.nan for m in metrics]
-
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.errorbar(x, pos_mean, yerr=pos_std, label="Positive pairs", marker="o", capsize=4)
-    ax.errorbar(x, neg_mean, yerr=neg_std, label="Negative pairs", marker="s", capsize=4)
-    ax.set_xlabel("Epoch")
-    ax.set_ylabel("Cosine similarity")
-    ax.set_title("Cosine similarity statistics")
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=45, ha="right")
-    ax.grid(True, alpha=0.3)
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(output_dir / "cosine_similarity_summary.png", dpi=200)
-    plt.close(fig)
-
-
-def plot_cosine_histograms(metrics: Sequence[EpochMetrics], output_dir: Path, *, bins: int = 50) -> None:
-    for metric in metrics:
-        positives = metric.cosine_positive
-        negatives = metric.cosine_negative
-
-        has_positive = positives is not None and getattr(positives, "size", 0)
-        has_negative = negatives is not None and getattr(negatives, "size", 0)
-        if not (has_positive or has_negative):
-            continue
-        # fig, axes = plt.subplots(1, 2, figsize=(12, 4), sharey=True)
-        # axes[0].hist(metric.cosine_positive, bins=bins, color="#1f77b4", alpha=0.8)
-        # axes[0].set_title(f"Positive pairs — {metric.label}")
-        # axes[0].set_xlabel("Cosine similarity")
-        # axes[0].set_ylabel("Count")
-
-        # negatives = metric.cosine_negative if metric.cosine_negative is not None else np.empty(0)
-        # axes[1].hist(negatives, bins=bins, color="#ff7f0e", alpha=0.8)
-        # axes[1].set_title(f"Negative pairs — {metric.label}")
-        # axes[1].set_xlabel("Cosine similarity")
-        fig, ax = plt.subplots(figsize=(8, 4))
-        if has_positive:
-            ax.hist(
-                positives,
-                bins=bins,
-                color="#1f77b4",
-                alpha=0.6,
-                label="Positive pairs",
-            )
-        if has_negative:
-            ax.hist(
-                negatives,
-                bins=bins,
-                color="#ff7f0e",
-                alpha=0.6,
-                label="Negative pairs",
-            )
-
-        ax.set_title(f"Cosine similarity — {metric.label}")
-        ax.set_xlabel("Cosine similarity")
-        ax.set_ylabel("Count")
-        if has_positive or has_negative:
-            ax.legend()
-        ax.grid(True, alpha=0.3)
-        fig.tight_layout()
-        fig.savefig(output_dir / f"cosine_hist_{metric.label}.png", dpi=200)
-        plt.close(fig)
-
-
-def plot_variance_heatmap(
-    metrics: Sequence[EpochMetrics],
-    output_dir: Path,
-    *,
-    modality: str,
-) -> None:
-    variances = [m.s1_variance if modality == "s1" else m.s2_variance for m in metrics]
-    if any(v is None for v in variances):
-        _LOGGER.warning("Skipping variance heatmap for %s (missing data)", modality)
-        return
-    variance_matrix = np.stack(variances)
-
-    fig, ax = plt.subplots(figsize=(12, 6))
-    im = ax.imshow(variance_matrix, aspect="auto", interpolation="nearest", origin="lower")
-    ax.set_xlabel("Embedding dimension")
-    ax.set_ylabel("Epoch")
-    ax.set_yticks(range(len(metrics)))
-    ax.set_yticklabels([m.label for m in metrics])
-    ax.set_title(f"{modality.upper()} variance per dimension")
-    cbar = fig.colorbar(im, ax=ax)
-    cbar.set_label("Variance")
-    fig.tight_layout()
-    fig.savefig(output_dir / f"{modality}_variance_heatmap.png", dpi=200)
-    plt.close(fig)
-
-    # Summary statistics per epoch
-    stats = {
-        "mean": np.mean(variance_matrix, axis=1),
-        "median": np.median(variance_matrix, axis=1),
-        "min": np.min(variance_matrix, axis=1),
-        "max": np.max(variance_matrix, axis=1),
-    }
-    fig, ax = plt.subplots(figsize=(10, 5))
-    x = [m.epoch_index for m in metrics]
-    for name, values in stats.items():
-        ax.plot(x, values, marker="o", label=name.capitalize())
-    ax.set_xlabel("Epoch")
-    ax.set_ylabel("Variance")
-    ax.set_title(f"{modality.upper()} variance statistics")
-    ax.set_xticks(x)
-    ax.set_xticklabels([m.label for m in metrics], rotation=45, ha="right")
-    ax.grid(True, alpha=0.3)
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(output_dir / f"{modality}_variance_summary.png", dpi=200)
-    plt.close(fig)
-
-
-def _extract_metric_series(metrics: Sequence[EpochMetrics], attr: str) -> List[float]:
-    values: List[float] = []
-    for metric in metrics:
-        value = getattr(metric, attr, None)
-        if value is None:
-            values.append(math.nan)
-        else:
-            values.append(float(value))
-    return values
-
-
-def _resolve_summary_pdf_dir(output_dir: Path) -> Path:
-    """Return the directory where experiment summary PDFs should be written."""
-
-    for candidate in (output_dir, *output_dir.parents):
-        if candidate.name == "diagnostics":
-            return candidate / "experiment-summary-pdfs"
-    return output_dir / "experiment-summary-pdfs"
-
-
-def generate_summary_pdf(
-    summary_plots: Sequence[Path],
-    *,
-    metrics: Sequence[EpochMetrics],
-    output_dir: Path,
-) -> Optional[Path]:
-    """Assemble ``summary_plots`` into a single PDF for quick review."""
-
-    if not metrics:
-        return None
-
-    existing_plots: List[Path] = []
-    for path in summary_plots:
-        if path is None:
-            continue
-        if path.exists():
-            existing_plots.append(path)
-        else:
-            _LOGGER.debug("Skipping missing summary plot %s", path)
-
-    if not existing_plots:
-        _LOGGER.warning("No summary plots found; skipping PDF generation")
-        return None
-
-    max_epoch_index = max((metric.epoch_index for metric in metrics), default=0)
-    model_name = output_dir.name or "experiment"
-
-    summary_dir = _resolve_summary_pdf_dir(output_dir)
-    summary_dir.mkdir(parents=True, exist_ok=True)
-    pdf_path = summary_dir / f"{model_name}-maxepochs-{max_epoch_index}.pdf"
-
-    with PdfPages(pdf_path) as pdf:
-        metadata = pdf.infodict()
-        metadata["Title"] = f"Embedding diagnostics summary — {model_name}"
-        metadata["Author"] = "embedding_collapse_diagnostics.py"
-        metadata["Subject"] = "Summary plots for embedding collapse diagnostics"
-
-        for image_path in existing_plots:
-            image = mpimg.imread(image_path)
-            height, width = image.shape[:2]
-            if height == 0 or width == 0:
-                _LOGGER.debug("Skipping empty image %s", image_path)
-                continue
-
-            aspect = width / height
-            base_size = 11
-            if aspect >= 1:
-                figsize = (base_size, max(base_size / aspect, 4))
-            else:
-                figsize = (max(base_size * aspect, 4), base_size)
-
-            fig, ax = plt.subplots(figsize=figsize)
-            fig.patch.set_facecolor("white")
-            ax.imshow(image)
-            ax.set_axis_off()
-            title = image_path.stem.replace("_", " ").title()
-            ax.set_title(title, fontsize=12, pad=12)
-            pdf.savefig(fig, bbox_inches="tight")
-            plt.close(fig)
-
-    _LOGGER.info("Wrote summary PDF to %s", pdf_path)
-    return pdf_path
-
-
-def _plot_pre_post_metric_timeseries(
-    ax,
-    *,
-    metrics: Sequence[EpochMetrics],
-    attr_post: str,
-    attr_pre: Optional[str],
-    title: str,
-    ylabel: str,
-    color: str,
-    y_limits: Tuple[float, float],
-    show_legend: bool = False,
-    reference_lines: Optional[Sequence[Tuple[float, Optional[str]]]] = None,
-) -> None:
-    x = [m.epoch_index for m in metrics]
-    labels = [m.label for m in metrics]
-
-    post_values = np.asarray(_extract_metric_series(metrics, attr_post), dtype=np.float64)
-    pre_values: Optional[np.ndarray]
-    if attr_pre is None:
-        pre_values = None
-    else:
-        pre_values = np.asarray(_extract_metric_series(metrics, attr_pre), dtype=np.float64)
-
-    has_post = np.isfinite(post_values).any()
-    has_pre = pre_values is not None and np.isfinite(pre_values).any()
-
-    if not (has_post or has_pre):
-        _mark_axis_no_data(ax, title)
-        ax.set_xlabel("Epoch")
-        ax.set_ylabel(ylabel)
-        ax.set_xticks(x)
-        ax.set_xticklabels(labels, rotation=45, ha="right")
-        ax.set_ylim(*y_limits)
-        return
-
-    if has_post:
-        ax.plot(
-            x,
-            post_values,
-            color=color,
-            linestyle="-",
-            linewidth=2.0,
-            marker="o",
-            label="Post-head" if show_legend else None,
-        )
-
-    if has_pre and pre_values is not None:
-        ax.plot(
-            x,
-            pre_values,
-            color=color,
-            linestyle="--",
-            linewidth=1.8,
-            marker="o",
-            markerfacecolor="white",
-            alpha=0.6,
-            label="Pre-head" if show_legend else None,
-        )
-
-    if reference_lines:
-        for value, label in reference_lines:
-            if show_legend and label:
-                ax.axhline(
-                    value,
-                    color="#7f7f7f",
-                    linestyle=":",
-                    linewidth=1.0,
-                    alpha=0.8,
-                    label=label,
-                )
-            else:
-                ax.axhline(
-                    value,
-                    color="#7f7f7f",
-                    linestyle=":",
-                    linewidth=1.0,
-                    alpha=0.8,
-                )
-
-    ax.set_title(title)
-    ax.set_xlabel("Epoch")
-    ax.set_ylabel(ylabel)
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=45, ha="right")
-    ax.set_ylim(*y_limits)
-    ax.set_xlim(0, 50)
-    ax.grid(True, alpha=0.3)
-
-    if show_legend:
-        handles, legend_labels = ax.get_legend_handles_labels()
-        filtered = [
-            (handle, label)
-            for handle, label in zip(handles, legend_labels)
-            if label and label != "_nolegend_"
-        ]
-        if filtered:
-            ax.legend(*zip(*filtered))
-
-
-def plot_vc_timeseries(
-    metrics: Sequence[EpochMetrics],
-    output_dir: Path,
-    *,
-    vc_gamma: float,
-) -> None:
-    if not metrics:
-        return
-
-    modality_configs = [
-        ("s1", "S1", "#1f77b4"),
-        ("s2", "S2", "#ff7f0e"),
-    ]
-
-    for modality, title_prefix, color in modality_configs:
-        fig, axes = plt.subplots(1, 3, figsize=(18, 5), sharex=True)
-
-        _plot_pre_post_metric_timeseries(
-            axes[0],
-            metrics=metrics,
-            attr_post=f"{modality}_participation_ratio_normalized",
-            attr_pre=f"{modality}_pre_participation_ratio_normalized",
-            title="PR/d (cov)",
-            ylabel="PR/d",
-            color=color,
-            y_limits=(0.0, 1.0),
-            show_legend=True,
-        )
-
-        _plot_pre_post_metric_timeseries(
-            axes[1],
-            metrics=metrics,
-            attr_post=f"{modality}_variance_floor_pct",
-            attr_pre=f"{modality}_pre_variance_floor_pct",
-            title="% dims < γ",
-            ylabel="% below γ",
-            color=color,
-            y_limits=(0.0, 100.0),
-            reference_lines=[(0.0, "Target")],
-        )
-
-        _plot_pre_post_metric_timeseries(
-            axes[2],
-            metrics=metrics,
-            attr_post=f"{modality}_cov_redundancy",
-            attr_pre=f"{modality}_pre_cov_redundancy",
-            title="Redundancy ρ (cov)",
-            ylabel="ρ",
-            color=color,
-            y_limits=(0.0, 1.0),
-        )
-
-        fig.suptitle(f"{title_prefix} VC diagnostics over epochs (γ={vc_gamma:.2f})")
-        fig.tight_layout(rect=[0, 0, 1, 0.92])
-        fig.savefig(output_dir / f"vc_metrics_timeseries_{modality}.png", dpi=200)
-        plt.close(fig)
-
-def plot_epoch_dashboards(
-    metrics: Sequence[EpochMetrics],
-    output_dir: Path,
-    *,
-    cosine_bins: int,
-    spectrum_top_k: int,
-) -> None:
-    """Generate a multi-panel diagnostic figure for each epoch."""
-
-    diagnostics_dir = output_dir / "diagnostics"
-    diagnostics_dir.mkdir(parents=True, exist_ok=True)
-
-    for metric in metrics:
-        fig = plt.figure(figsize=(14, 12))
-        # fig.suptitle(f"Diagnostics — {metric.label}")
-        grid = fig.add_gridspec(3, 2)
-        hist_ax = fig.add_subplot(grid[0, :])
-        s1_var_ax = fig.add_subplot(grid[1, 0])
-        s2_var_ax = fig.add_subplot(grid[1, 1])
-        s1_spec_ax = fig.add_subplot(grid[2, 0])
-        s2_spec_ax = fig.add_subplot(grid[2, 1])
-
-        def _format_line(modality: str) -> str:
-            std_min = getattr(metric, f"{modality}_std_min")
-            cov_fro = getattr(metric, f"{modality}_cov_fro")
-            participation = getattr(metric, f"{modality}_participation_ratio")
-            pr_norm = getattr(metric, f"{modality}_participation_ratio_normalized")
-            variance_floor = getattr(metric, f"{modality}_variance_floor_pct")
-            redundancy = getattr(metric, f"{modality}_cov_redundancy")
-            corr_pr = getattr(metric, f"{modality}_corr_participation_ratio")
-            corr_entropy = getattr(metric, f"{modality}_corr_spectral_entropy")
-            corr_off = getattr(metric, f"{modality}_corr_offdiag_fro")
-            pre_std_min = getattr(metric, f"{modality}_pre_std_min")
-            pre_cov_fro = getattr(metric, f"{modality}_pre_cov_fro")
-            pre_participation = getattr(metric, f"{modality}_pre_participation_ratio")
-            pre_pr_norm = getattr(metric, f"{modality}_pre_participation_ratio_normalized")
-            pre_variance_floor = getattr(metric, f"{modality}_pre_variance_floor_pct")
-            pre_redundancy = getattr(metric, f"{modality}_pre_cov_redundancy")
-            pre_corr_pr = getattr(metric, f"{modality}_pre_corr_participation_ratio")
-            pre_corr_entropy = getattr(metric, f"{modality}_pre_corr_spectral_entropy")
-            pre_corr_off = getattr(metric, f"{modality}_pre_corr_offdiag_fro")
-            delta_pr = getattr(metric, f"{modality}_delta_participation_ratio")
-
-            def _fmt(value: Optional[float], fmt: str) -> str:
-                if value is None:
-                    return "NA"
-                value_float = float(value)
-                if math.isnan(value_float):
-                    return "NA"
-                return format(value_float, fmt)
-
-            def _fmt_pair(value: Optional[float], pre_value: Optional[float], fmt: str) -> str:
-                formatted = _fmt(value, fmt)
-                if pre_value is None:
-                    return formatted
-                pre_float = float(pre_value)
-                if math.isnan(pre_float):
-                    return formatted
-                return f"{formatted} (pre={_fmt(pre_value, fmt)})"
-
-            return (
-                f"{modality.upper()} std_min={_fmt_pair(std_min, pre_std_min, '.4f')}, "
-                f"‖Cov_off‖={_fmt_pair(cov_fro, pre_cov_fro, '.2e')}, "
-                f"PR/d={_fmt_pair(pr_norm, pre_pr_norm, '.3f')}, "
-                f"%<γ={_fmt_pair(variance_floor, pre_variance_floor, '.1f')}%, "
-                f"ρ={_fmt_pair(redundancy, pre_redundancy, '.3f')}, "
-                f"‖Corr_off‖={_fmt_pair(corr_off, pre_corr_off, '.2e')}, "
-                f"CovPR={_fmt_pair(participation, pre_participation, '.2f')}, "
-                f"CorrPR={_fmt_pair(corr_pr, pre_corr_pr, '.2f')}, "
-                f"CorrH={_fmt_pair(corr_entropy, pre_corr_entropy, '.3f')}, "
-                f"ΔPR={_fmt(delta_pr, '.2f')}"
-            )
-
-        fig.suptitle(
-            "\n".join(
-                [
-                    f"Diagnostics — {metric.label}",
-                    _format_line("s1"),
-                    _format_line("s2"),
-                ]
-            )
-        )
-
-        positives = metric.cosine_positive
-        negatives = metric.cosine_negative
-        has_positive = positives is not None and getattr(positives, "size", 0)
-        has_negative = negatives is not None and getattr(negatives, "size", 0)
-
-        if has_positive or has_negative:
-            if has_positive:
-                hist_ax.hist(
-                    positives,
-                    bins=cosine_bins,
-                    color="#1f77b4",
-                    alpha=0.6,
-                    label="Positive pairs",
-                )
-            if has_negative:
-                hist_ax.hist(
-                    negatives,
-                    bins=cosine_bins,
-                    color="#ff7f0e",
-                    alpha=0.6,
-                    label="Negative pairs",
-                )
-            hist_ax.set_title("Cosine similarity distribution")
-            hist_ax.set_xlabel("Cosine similarity")
-            hist_ax.set_ylabel("Count")
-            hist_ax.legend()
-            hist_ax.grid(True, alpha=0.3)
-        else:
-            _mark_axis_no_data(hist_ax, "Cosine similarity distribution")
-
-        # Variance per modality
-        if metric.s1_variance is not None and metric.s1_variance.size:
-            dims = np.arange(1, metric.s1_variance.size + 1)
-            s1_var_ax.plot(dims, metric.s1_variance, color="#2ca02c")
-            s1_var_ax.set_title("S1 variance by dimension")
-            s1_var_ax.set_xlabel("Dimension")
-            s1_var_ax.set_ylabel("Variance")
-        else:
-            _mark_axis_no_data(s1_var_ax, "S1 variance by dimension")
-
-        if metric.s2_variance is not None and metric.s2_variance.size:
-            dims = np.arange(1, metric.s2_variance.size + 1)
-            s2_var_ax.plot(dims, metric.s2_variance, color="#17becf")
-            s2_var_ax.set_title("S2 variance by dimension")
-            s2_var_ax.set_xlabel("Dimension")
-            s2_var_ax.set_ylabel("Variance")
-        else:
-            _mark_axis_no_data(s2_var_ax, "S2 variance by dimension")
-
-        # Covariance spectrum per modality
-        if metric.s1_spectrum is not None and metric.s1_spectrum.size:
-            take = min(spectrum_top_k, metric.s1_spectrum.size)
-            idx = np.arange(1, take + 1)
-            s1_spec_ax.plot(idx, metric.s1_spectrum[:take], marker="o", color="#9467bd")
-            s1_spec_ax.set_yscale("log")
-            s1_spec_ax.set_title(f"S1 covariance spectrum (top {take})")
-            s1_spec_ax.set_xlabel("Component")
-            s1_spec_ax.set_ylabel("Eigenvalue")
-            cond = metric.s1_condition_number
-            if cond is not None:
-                if math.isnan(cond):
-                    text = "cond = nan"
-                elif math.isinf(cond):
-                    text = "cond = inf"
-                else:
-                    text = f"cond = {cond:.2e}"
-                s1_spec_ax.text(
-                    0.95,
-                    0.05,
-                    text,
-                    transform=s1_spec_ax.transAxes,
-                    ha="right",
-                    va="bottom",
-                    fontsize=10,
-                    bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.6},
-                )
-        else:
-            _mark_axis_no_data(s1_spec_ax, "S1 covariance spectrum")
-
-        if metric.s2_spectrum is not None and metric.s2_spectrum.size:
-            take = min(spectrum_top_k, metric.s2_spectrum.size)
-            idx = np.arange(1, take + 1)
-            s2_spec_ax.plot(idx, metric.s2_spectrum[:take], marker="o", color="#8c564b")
-            s2_spec_ax.set_yscale("log")
-            s2_spec_ax.set_title(f"S2 covariance spectrum (top {take})")
-            s2_spec_ax.set_xlabel("Component")
-            s2_spec_ax.set_ylabel("Eigenvalue")
-            cond = metric.s2_condition_number
-            if cond is not None:
-                if math.isnan(cond):
-                    text = "cond = nan"
-                elif math.isinf(cond):
-                    text = "cond = inf"
-                else:
-                    text = f"cond = {cond:.2e}"
-                s2_spec_ax.text(
-                    0.95,
-                    0.05,
-                    text,
-                    transform=s2_spec_ax.transAxes,
-                    ha="right",
-                    va="bottom",
-                    fontsize=10,
-                    bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.6},
-                )
-        else:
-            _mark_axis_no_data(s2_spec_ax, "S2 covariance spectrum")
-
-        fig.tight_layout(rect=[0, 0, 1, 0.97])
-        safe_label = _sanitize_label(metric.label)
-        filename = diagnostics_dir / f"epoch_{metric.epoch_index:04d}_{safe_label}_diagnostics.png"
-        fig.savefig(filename, dpi=200)
-        plt.close(fig)
-
-
-
-def _plot_single_singular_series(
-    ax,
-    values: Optional[np.ndarray],
-    *,
-    top_k: int,
-    title: str,
-    color: str,
-    marker: str = "o",
-) -> None:
-    """Plot a single spectrum of singular values on ``ax``."""
-
-    if values is None or getattr(values, "size", 0) == 0:
-        _mark_axis_no_data(ax, title)
-        return
-
-    length = int(values.size)
-    take = length if top_k <= 0 else min(top_k, length)
-    dims = np.arange(1, take + 1)
-
-    ax.plot(
-        dims,
-        values[:take],
-        marker=marker,
-        linestyle="-",
-        color=color,
-    )
-
-    ax.set_title(title)
-    ax.set_xlabel("Component")
-    ax.set_ylabel("Singular value")
-    ax.set_yscale("log")
-    # set xlim
-    ax.set_xlim(1, 50)
-    ax.grid(True, which="both", alpha=0.3)
-
-
-def _prepare_spectrum(values: Optional[np.ndarray]) -> Optional[np.ndarray]:
-    """Return a sanitized copy of ``values`` suitable for plotting."""
-
-    if values is None or getattr(values, "size", 0) == 0:
-        return None
-    arr = np.asarray(values, dtype=np.float64)
-    if arr.size >= 2 and arr[0] < arr[-1]:
-        arr = arr[::-1]
-    return arr
-
-
-def plot_svd_epoch_grid(
-    metrics: Sequence[EpochMetrics],
-    output_dir: Path,
-    *,
-    modality: str = "s1",
-    use_correlation: bool = False,
-    top_k: Optional[int] = None,
-    normalized: bool = False,
-) -> Optional[Path]:
-    """Plot per-epoch spectra with shared axes to compare shapes."""
-
-    if normalized and use_correlation:
-        raise ValueError("Correlation spectra are already normalized; set only one option.")
-
-    if use_correlation:
-        attr_post = f"{modality}_correlation_spectrum"
-        attr_pre: Optional[str] = f"{modality}_pre_correlation_spectrum"
-    elif normalized:
-        attr_post = f"{modality}_normalized_singular_values"
-        attr_pre = f"{modality}_pre_normalized_singular_values"
-    else:
-        attr_post = f"{modality}_singular_values"
-        attr_pre = f"{modality}_pre_singular_values"
-
-    entries: List[Tuple[str, Optional[np.ndarray], Optional[np.ndarray]]] = []
-    max_len = 0
-    global_min = math.inf
-    global_max = -math.inf
-
-    for metric in metrics:
-        post = _prepare_spectrum(getattr(metric, attr_post, None))
-        pre = _prepare_spectrum(getattr(metric, attr_pre, None)) if attr_pre else None
-        entries.append((metric.label, post, pre))
-        for arr in (post, pre):
-            if arr is None or arr.size == 0:
-                continue
-            max_len = max(max_len, arr.size)
-
-    if max_len == 0:
-        return None
-
-    if top_k is None or top_k <= 0:
-        k = max_len
-    else:
-        k = min(top_k, max_len)
-    x = np.arange(1, k + 1)
-
-    log_specs: List[Tuple[Optional[np.ndarray], Optional[np.ndarray]]] = []
-    for _, post, pre in entries:
-        log_post = None
-        log_pre = None
-        if post is not None and post.size:
-            log_post = np.log(np.maximum(post[:k], 1e-20))
-            global_min = min(global_min, float(np.nanmin(log_post)))
-            global_max = max(global_max, float(np.nanmax(log_post)))
-        if pre is not None and pre.size:
-            log_pre = np.log(np.maximum(pre[:k], 1e-20))
-            global_min = min(global_min, float(np.nanmin(log_pre)))
-            global_max = max(global_max, float(np.nanmax(log_pre)))
-        log_specs.append((log_post, log_pre))
-
-    if not math.isfinite(global_min) or not math.isfinite(global_max):
-        return None
-
-    count = len(entries)
-    if count == 0:
-        return None
-    ncols = min(4, max(1, int(math.ceil(math.sqrt(count)))))
-    nrows = int(math.ceil(count / ncols))
-
-    fig, axes = plt.subplots(
-        nrows,
-        ncols,
-        figsize=(4.0 * ncols, 3.0 * nrows),
-        sharex=True,
-        sharey=True,
-    )
-    axes_iter = np.atleast_1d(axes).ravel()
-
-    if modality == "s1":
-        post_color, pre_color = "#2ca02c", "#98df8a"
-    else:
-        post_color, pre_color = "#17becf", "#9edae5"
-
-    for idx, (ax, (label, _post_raw, _pre_raw), (log_post, log_pre)) in enumerate(
-        zip(axes_iter, entries, log_specs)
-    ):
-        ax.set_title(label)
-        if log_post is not None:
-            length = log_post.size
-            ax.plot(x[:length], log_post, marker="o", linestyle="-", color=post_color, label="Post projection")
-        if log_pre is not None:
-            length = log_pre.size
-            ax.plot(x[:length], log_pre, marker="s", linestyle="--", color=pre_color, label="Pre projection")
-        if log_post is None and log_pre is None:
-            _mark_axis_no_data(ax, label)
-        ax.grid(True, alpha=0.3)
-        if idx == 0:
-            handles, labels = ax.get_legend_handles_labels()
-            if handles:
-                ax.legend(handles, labels, fontsize="small")
-
-    for ax in axes_iter[count:]:
-        ax.axis("off")
-
-    for ax in axes_iter:
-        ax.set_xlim(1, k)
-        ax.set_ylim(global_min, global_max)
-    ax.set_xlim(1, 50)
-
-    if use_correlation:
-        title_core = "Correlation spectrum"
-    elif normalized:
-        title_core = "Normalized singular values"
-    else:
-        title_core = "Singular values"
-    fig.supxlabel("Component index")
-    fig.supylabel("log(value)")
-    fig.suptitle(f"{title_core} per epoch — {modality.upper()}")
-    fig.tight_layout(rect=[0, 0, 1, 0.97])
-
-    filename_core = "corr" if use_correlation else "svd"
-    if normalized:
-        filename_core = f"normalized_{filename_core}"
-    filename = f"{modality}_{filename_core}_epoch_grid.png"
-    output_path = output_dir / filename
-    fig.savefig(output_path, dpi=200)
-    plt.close(fig)
-    return output_path
-
-
-def plot_epoch_singular_values(
-    metrics: Sequence[EpochMetrics],
-    output_dir: Path,
-    *,
-    top_k: int,
-) -> None:
-    """Write per-epoch singular value comparisons for pre/post features."""
-
-    singular_dir = output_dir / "singular_values"
-    singular_dir.mkdir(parents=True, exist_ok=True)
-
-    for metric in metrics:
-        fig, axes = plt.subplots(2, 2, figsize=(16, 10))
-        fig.suptitle(f"Singular values — {metric.label}")
-
-        ax_s1_pre = axes[0, 0]
-        ax_s1_post_norm = axes[0, 1]
-        ax_s2_pre = axes[1, 0]
-        ax_s2_post_norm = axes[1, 1]
-
-        _plot_single_singular_series(
-            ax_s1_pre,
-            metric.s1_pre_singular_values,
-            top_k=top_k,
-            title="S1 pre-head (unnormalized)",
-            color="#98df8a",
-            marker="s",
-        )
-
-        _plot_single_singular_series(
-            ax_s1_post_norm,
-            metric.s1_normalized_singular_values
-            if metric.s1_normalized_singular_values is not None
-            else metric.s1_singular_values,
-            top_k=top_k,
-            title="S1 post-head (normalized)",
-            color="#2ca02c",
-        )
-
-        _plot_single_singular_series(
-            ax_s2_pre,
-            metric.s2_pre_singular_values,
-            top_k=top_k,
-            title="S2 pre-head (unnormalized)",
-            color="#9edae5",
-            marker="s",
-        )
-
-        _plot_single_singular_series(
-            ax_s2_post_norm,
-            metric.s2_normalized_singular_values
-            if metric.s2_normalized_singular_values is not None
-            else metric.s2_singular_values,
-            top_k=top_k,
-            title="S2 post-head (normalized)",
-            color="#17becf",
-        )
-
-        fig.tight_layout(rect=[0, 0, 1, 0.94])
-        safe_label = _sanitize_label(metric.label)
-        output_path = singular_dir / f"epoch_{metric.epoch_index:04d}_{safe_label}_singular_values.png"
-        fig.savefig(output_path, dpi=200)
-        plt.close(fig)
-
-
-
-
-
-def parse_linear_probe_csv(
-    csv_path: Path,
-    *,
-    model_pattern: Optional[str],
-    metric: str,
-    k_value: Optional[float],
-) -> Dict[int, Tuple[float, Optional[float]]]:
-    """Parse a CSV produced by ``output_results_to_csv``.
-
-    Returns a mapping from epoch index to (mean, std) for the requested
-    configuration. When multiple rows match, later values override earlier ones.
-    """
-
-    pattern = re.compile(model_pattern) if model_pattern else None
-    results: Dict[int, Tuple[float, Optional[float]]] = {}
-
-    csv_path = Path(csv_path)
-    if not csv_path.is_file():
-        _LOGGER.warning("Linear probe CSV '%s' not found; skipping", csv_path)
-        return {}
-
-
-    os.makedirs(csv_path.parent, exist_ok=True)
-    with csv_path.open("r", newline="") as handle:
-        reader = csv.reader(handle)
-        header = next(reader)
-        total_cols = len(header)
-        split = (total_cols - 1) // 2
-        k_headers = header[1 : 1 + split]
-        std_headers = header[1 + split : 1 + 2 * split]
-        k_values = [float(h.split("=")[1]) for h in k_headers]
-
-        std_map = {float(h.split("=")[1]): idx for idx, h in enumerate(std_headers)}
-
-        for row in reader:
-            model_name = row[0]
-            if pattern and not pattern.search(model_name):
-                continue
-            epoch_idx = infer_epoch_index(model_name, fallback=-1)
-            if epoch_idx < 0:
-                continue
-
-            metrics_mean = [float(v) for v in row[1 : 1 + split]]
-            metrics_std = [float(v) for v in row[1 + split : 1 + 2 * split]]
-
-            if k_value is None and metrics_mean:
-                results[epoch_idx] = (metrics_mean[0], metrics_std[0] if metrics_std else None)
-                continue
-
-            try:
-                idx = min(range(len(k_values)), key=lambda i: abs(k_values[i] - k_value))
-            except ValueError:  # pragma: no cover - defensive
-                continue
-            results[epoch_idx] = (metrics_mean[idx], metrics_std[idx] if metrics_std else None)
-
-    return results
-
-
-def plot_linear_probe_curve(
-    linear_probe: Dict[int, Tuple[float, Optional[float]]],
-    output_dir: Path,
-    *,
-    metric: str,
-) -> None:
-    if not linear_probe:
-        _LOGGER.warning("No linear probe results to plot")
-        return
-
-    epochs = sorted(linear_probe.keys())
-    means = [linear_probe[e][0] for e in epochs]
-    stds = [linear_probe[e][1] for e in epochs]
-
-    fig, ax = plt.subplots(figsize=(8, 4.5))
-    ax.errorbar(epochs, means, yerr=stds, marker="o", capsize=4)
-    ax.set_xlabel("Epoch")
-    ax.set_ylabel(metric.capitalize())
-    ax.set_title(f"Linear probe {metric} vs. epoch")
-    ax.grid(True, alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(output_dir / f"linear_probe_{metric}.png", dpi=200)
-    plt.close(fig)
-
-
-def resolve_projection_tensors(
-    epoch: EpochEmbeddings,
-    view: str,
-) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
-    """Return the tensors to visualize for ``view``."""
-
-    if view == "pre_head":
-        if epoch.s1_pre_projection is None or epoch.s2_pre_projection is None:
-            return None
-        return epoch.s1_pre_projection, epoch.s2_pre_projection
-    if view == "post_head_normalized":
-        if epoch.s1 is None or epoch.s2 is None:
-            return None
-        s1 = epoch.s1_normalized if epoch.s1_normalized is not None else F.normalize(epoch.s1, dim=1)
-        s2 = epoch.s2_normalized if epoch.s2_normalized is not None else F.normalize(epoch.s2, dim=1)
-        return s1, s2
-    if view == "post_head_raw":
-        if epoch.s1 is None or epoch.s2 is None:
-            return None
-        return epoch.s1, epoch.s2
-
-    raise ValueError(f"Unknown projection view: {view}")
-
-
-def sample_for_projection(
-    s1: torch.Tensor,
-    s2: torch.Tensor,
-    *,
-    per_modality: int,
-    generator: np.random.Generator,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Return a stacked array of embeddings and modality labels for projection."""
-
-    if per_modality <= 0:
-        raise ValueError("per_modality must be positive")
-
-    count = min(s1.shape[0], s2.shape[0])
-    if count == 0:
-        raise ValueError("No paired embeddings available for projection")
-
-    take = min(per_modality, count)
-    indices = generator.choice(count, size=take, replace=False)
-    stacked = torch.cat([s1[indices], s2[indices]], dim=0)
-    labels = np.array(["S1"] * take + ["S2"] * take)
-    return stacked.cpu().numpy(), labels
+        tensor = tensor.flatten(start_dim=1)
+    if tensor.shape[0] < 2:
+        return np.empty(0, dtype=np.float32)
+    with torch.no_grad():
+        centered = tensor.to(torch.float64)
+        centered = centered - centered.mean(dim=0, keepdim=True)
+        u, s, _ = torch.linalg.svd(centered, full_matrices=False)
+    return s.to(torch.float32).cpu().numpy()
 
 
 def preprocess_projection_data(
@@ -2735,10 +132,9 @@ def preprocess_projection_data(
     random_state: int,
     pca_components: int = 50,
 ) -> np.ndarray:
-    """Apply preprocessing recommended for the projection ``mode``."""
+    """Prepare data prior to dimensionality reduction."""
 
     data = np.asarray(data, dtype=np.float64)
-
     if mode == "zscore":
         mean = np.mean(data, axis=0, keepdims=True)
         std = np.std(data, axis=0, keepdims=True)
@@ -2752,11 +148,10 @@ def preprocess_projection_data(
         raise ValueError(f"Unknown preprocessing mode: {mode}")
 
     if data.shape[1] > pca_components and min(data.shape[0], data.shape[1]) > 1:
-        n_components = min(pca_components, data.shape[0], data.shape[1])
-        if n_components < data.shape[1]:
-            pca = PCA(n_components=n_components, random_state=random_state)
+        components = min(pca_components, data.shape[0], data.shape[1])
+        if components < data.shape[1]:
+            pca = PCA(n_components=components, random_state=random_state)
             data = pca.fit_transform(data)
-
     return data
 
 
@@ -2766,9 +161,10 @@ def compute_projection(
     method: str,
     random_state: int,
 ) -> Optional[np.ndarray]:
+    """Compute a 2-D embedding using t-SNE or UMAP."""
+
     if data.shape[0] < 3:
         return None
-
     if method == "tsne":
         perplexity = min(30, data.shape[0] - 1)
         if perplexity < 1:
@@ -2779,53 +175,20 @@ def compute_projection(
             init="pca",
             random_state=random_state,
             metric="cosine",
-            # square_distances=True,
         )
     elif method == "umap":
         if umap is None:
-            _LOGGER.warning("UMAP is not installed; skipping projection")
+            _LOGGER.warning("UMAP requested but not installed")
             return None
-        reducer = umap.UMAP(n_components=2, random_state=random_state, init="spectral", metric="cosine")
+        reducer = umap.UMAP(
+            n_components=2,
+            random_state=random_state,
+            init="spectral",
+            metric="cosine",
+        )
     else:
         raise ValueError(f"Unknown projection method: {method}")
-
     return reducer.fit_transform(data)
-
-
-
-def _flatten_axes(axes) -> List:
-    if hasattr(axes, "flat"):
-        return list(axes.flat)
-    if isinstance(axes, (list, tuple)):
-        flattened: List = []
-        for item in axes:
-            flattened.extend(_flatten_axes(item))
-        return flattened
-    return [axes]
-
-# def plot_projection(
-def _plot_projection_panel(
-    ax,
-    coords: np.ndarray,
-    labels: np.ndarray,
-    # output_path: Path,
-    *,
-    title: str,
-    ):
-# ) -> None:
-    # fig, ax = plt.subplots(figsize=(6, 5))
-    unique_labels = np.unique(labels)
-    handles = []
-    for label in unique_labels:
-        mask = labels == label
-        handle = ax.scatter(coords[mask, 0], coords[mask, 1], label=label, alpha=0.7, s=18)
-        handles.append(handle)
-    ax.set_title(title)
-    ax.set_xlabel("Component 1")
-    ax.set_ylabel("Component 2")
-    # ax.legend()
-    ax.grid(True, alpha=0.2)
-    return handles
 
 
 def plot_projection(
@@ -2835,682 +198,614 @@ def plot_projection(
     *,
     title: str,
 ) -> None:
+    """Plot a scatter projection."""
+
     fig, ax = plt.subplots(figsize=(6, 5))
-    handles = _plot_projection_panel(ax, coords, labels, title=title)
-    if handles:
+    for label in np.unique(labels):
+        mask = labels == label
+        ax.scatter(coords[mask, 0], coords[mask, 1], label=str(label), alpha=0.7, s=18)
+    ax.set_xlabel("Component 1")
+    ax.set_ylabel("Component 2")
+    ax.set_title(title)
+    if labels.size:
         ax.legend()
+    ax.grid(True, alpha=0.2)
     fig.tight_layout()
     fig.savefig(output_path, dpi=200)
     plt.close(fig)
 
 
-def plot_projection_grid(
-    panels: Sequence[Tuple[str, np.ndarray, np.ndarray]],
-    output_path: Path,
-    *,
-    method: str,
-) -> None:
-    if not panels:
-        _LOGGER.warning("No %s projections to plot", method)
-        return
-
-    n_panels = len(panels)
-    ncols = min(3, n_panels)
-    nrows = math.ceil(n_panels / ncols)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(6 * ncols, 5 * nrows))
-    axes_list = _flatten_axes(axes)
-
-    legend_handles: List = []
-    legend_labels: List[str] = []
-
-    for idx, (ax, (epoch_label, coords, modalities)) in enumerate(zip(axes_list, panels)):
-        handles = _plot_projection_panel(ax, coords, modalities, title=f"{method} — {epoch_label}")
-        if idx == 0:
-            legend_handles = handles
-            legend_labels = [h.get_label() for h in handles]
-
-    for ax in axes_list[len(panels) :]:
-        fig.delaxes(ax)
-
-    if legend_handles:
-        fig.legend(legend_handles, legend_labels, loc="upper right", frameon=True)
-
-    fig.suptitle(f"{method} projections across epochs")
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
-    fig.savefig(output_path, dpi=200)
-    plt.close(fig)
+# ---------------------------------------------------------------------------
+# Linear CKA utilities
+# ---------------------------------------------------------------------------
 
 
-def export_metrics(metrics: Sequence[EpochMetrics], output_dir: Path) -> None:
-    summary = [m.to_summary_dict() for m in metrics]
-    with (output_dir / "metrics_summary.json").open("w") as handle:
-        json.dump(summary, handle, indent=2)
+def _prepare_cka_tensor(tensor: torch.Tensor, take: Optional[int] = None) -> Optional[torch.Tensor]:
+    if tensor.dim() != 2:
+        tensor = tensor.flatten(start_dim=1)
+    if tensor.shape[0] < 2:
+        return None
+    if take is not None and take > 0:
+        tensor = tensor[:take]
+    return tensor.to(dtype=torch.float64)
 
 
-def _csv_value(value: Optional[float]):
-    if value is None:
-        return ""
-    value_float = float(value)
-    if math.isnan(value_float):
-        return ""
-    return value_float
+def compute_linear_cka(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    eps: float = 1e-12,
+) -> Optional[float]:
+    """Compute linear CKA similarity between two activation matrices."""
+
+    count = min(x.shape[0], y.shape[0])
+    if count < 2:
+        return None
+    x = x[:count] - x[:count].mean(dim=0, keepdim=True)
+    y = y[:count] - y[:count].mean(dim=0, keepdim=True)
+    cov_xy = x.t().matmul(y)
+    cov_xx = x.t().matmul(x)
+    cov_yy = y.t().matmul(y)
+    numerator = torch.linalg.norm(cov_xy, ord="fro") ** 2
+    denom = torch.linalg.norm(cov_xx, ord="fro") * torch.linalg.norm(cov_yy, ord="fro")
+    denom_value = float(denom.item()) if isinstance(denom, torch.Tensor) else float(denom)
+    if denom_value <= eps:
+        return None
+    return float((numerator / (denom + eps)).item())
 
 
-def export_vc_metrics_csv(
-    metrics: Sequence[EpochMetrics],
-    output_dir: Path,
-    *,
-    cca_top_k: int,
-) -> None:
-    if not metrics:
-        return
-
-    cca_label = f"cca_rho_mean_top_{cca_top_k}" if cca_top_k > 0 else "cca_rho_mean_top_all"
-    fieldnames = [
-        "epoch_index",
-        "label",
-        "sample_count",
-        "vc_std_min_s1",
-        "vc_std_min_s2",
-        "vc_std_min_s1_pre",
-        "vc_std_min_s2_pre",
-        "vc_cov_fro_s1",
-        "vc_cov_fro_s2",
-        "vc_cov_fro_s1_pre",
-        "vc_cov_fro_s2_pre",
-        "vc_participation_ratio_s1",
-        "vc_participation_ratio_s2",
-        "vc_participation_ratio_s1_pre",
-        "vc_participation_ratio_s2_pre",
-        "vc_participation_ratio_norm_s1",
-        "vc_participation_ratio_norm_s2",
-        "vc_participation_ratio_norm_s1_pre",
-        "vc_participation_ratio_norm_s2_pre",
-        "vc_cov_top_eig_share_s1",
-        "vc_cov_top_eig_share_s2",
-        "vc_cov_top_eig_share_s1_pre",
-        "vc_cov_top_eig_share_s2_pre",
-        "vc_variance_floor_pct_s1",
-        "vc_variance_floor_pct_s2",
-        "vc_variance_floor_pct_s1_pre",
-        "vc_variance_floor_pct_s2_pre",
-        "vc_cov_redundancy_s1",
-        "vc_cov_redundancy_s2",
-        "vc_cov_redundancy_s1_pre",
-        "vc_cov_redundancy_s2_pre",
-        "corr_offdiag_fro_s1",
-        "corr_offdiag_fro_s2",
-        "corr_offdiag_fro_s1_pre",
-        "corr_offdiag_fro_s2_pre",
-        "corr_participation_ratio_s1",
-        "corr_participation_ratio_s2",
-        "corr_participation_ratio_s1_pre",
-        "corr_participation_ratio_s2_pre",
-        "corr_top_eig_share_s1",
-        "corr_top_eig_share_s2",
-        "corr_top_eig_share_s1_pre",
-        "corr_top_eig_share_s2_pre",
-        "corr_spectral_entropy_s1",
-        "corr_spectral_entropy_s2",
-        "corr_spectral_entropy_s1_pre",
-        "corr_spectral_entropy_s2_pre",
-        "delta_participation_ratio_s1",
-        "delta_participation_ratio_s2",
-        "cca_pre_post_topk_mean_s1",
-        "cca_pre_post_topk_mean_s2",
-        "cca_rho_max",
-        cca_label,
-    ]
-
-    with (output_dir / "vc_metrics.csv").open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        for metric in metrics:
-            writer.writerow(
-                {
-                    "epoch_index": metric.epoch_index,
-                    "label": metric.label,
-                    "sample_count": metric.sample_count,
-                    "vc_std_min_s1": _csv_value(metric.s1_std_min),
-                    "vc_std_min_s2": _csv_value(metric.s2_std_min),
-                    "vc_std_min_s1_pre": _csv_value(metric.s1_pre_std_min),
-                    "vc_std_min_s2_pre": _csv_value(metric.s2_pre_std_min),
-                    "vc_cov_fro_s1": _csv_value(metric.s1_cov_fro),
-                    "vc_cov_fro_s2": _csv_value(metric.s2_cov_fro),
-                    "vc_cov_fro_s1_pre": _csv_value(metric.s1_pre_cov_fro),
-                    "vc_cov_fro_s2_pre": _csv_value(metric.s2_pre_cov_fro),
-                    "vc_participation_ratio_s1": _csv_value(metric.s1_participation_ratio),
-                    "vc_participation_ratio_s2": _csv_value(metric.s2_participation_ratio),
-                    "vc_participation_ratio_s1_pre": _csv_value(metric.s1_pre_participation_ratio),
-                    "vc_participation_ratio_s2_pre": _csv_value(metric.s2_pre_participation_ratio),
-                    "vc_participation_ratio_norm_s1": _csv_value(
-                        metric.s1_participation_ratio_normalized
-                    ),
-                    "vc_participation_ratio_norm_s2": _csv_value(
-                        metric.s2_participation_ratio_normalized
-                    ),
-                    "vc_participation_ratio_norm_s1_pre": _csv_value(
-                        metric.s1_pre_participation_ratio_normalized
-                    ),
-                    "vc_participation_ratio_norm_s2_pre": _csv_value(
-                        metric.s2_pre_participation_ratio_normalized
-                    ),
-                    "vc_cov_top_eig_share_s1": _csv_value(metric.s1_cov_top_eig_share),
-                    "vc_cov_top_eig_share_s2": _csv_value(metric.s2_cov_top_eig_share),
-                    "vc_cov_top_eig_share_s1_pre": _csv_value(metric.s1_pre_cov_top_eig_share),
-                    "vc_cov_top_eig_share_s2_pre": _csv_value(metric.s2_pre_cov_top_eig_share),
-                    "vc_variance_floor_pct_s1": _csv_value(metric.s1_variance_floor_pct),
-                    "vc_variance_floor_pct_s2": _csv_value(metric.s2_variance_floor_pct),
-                    "vc_variance_floor_pct_s1_pre": _csv_value(metric.s1_pre_variance_floor_pct),
-                    "vc_variance_floor_pct_s2_pre": _csv_value(metric.s2_pre_variance_floor_pct),
-                    "vc_cov_redundancy_s1": _csv_value(metric.s1_cov_redundancy),
-                    "vc_cov_redundancy_s2": _csv_value(metric.s2_cov_redundancy),
-                    "vc_cov_redundancy_s1_pre": _csv_value(metric.s1_pre_cov_redundancy),
-                    "vc_cov_redundancy_s2_pre": _csv_value(metric.s2_pre_cov_redundancy),
-                    "corr_offdiag_fro_s1": _csv_value(metric.s1_corr_offdiag_fro),
-                    "corr_offdiag_fro_s2": _csv_value(metric.s2_corr_offdiag_fro),
-                    "corr_offdiag_fro_s1_pre": _csv_value(metric.s1_pre_corr_offdiag_fro),
-                    "corr_offdiag_fro_s2_pre": _csv_value(metric.s2_pre_corr_offdiag_fro),
-                    "corr_participation_ratio_s1": _csv_value(metric.s1_corr_participation_ratio),
-                    "corr_participation_ratio_s2": _csv_value(metric.s2_corr_participation_ratio),
-                    "corr_participation_ratio_s1_pre": _csv_value(metric.s1_pre_corr_participation_ratio),
-                    "corr_participation_ratio_s2_pre": _csv_value(metric.s2_pre_corr_participation_ratio),
-                    "corr_top_eig_share_s1": _csv_value(metric.s1_corr_top_eig_share),
-                    "corr_top_eig_share_s2": _csv_value(metric.s2_corr_top_eig_share),
-                    "corr_top_eig_share_s1_pre": _csv_value(metric.s1_pre_corr_top_eig_share),
-                    "corr_top_eig_share_s2_pre": _csv_value(metric.s2_pre_corr_top_eig_share),
-                    "corr_spectral_entropy_s1": _csv_value(metric.s1_corr_spectral_entropy),
-                    "corr_spectral_entropy_s2": _csv_value(metric.s2_corr_spectral_entropy),
-                    "corr_spectral_entropy_s1_pre": _csv_value(metric.s1_pre_corr_spectral_entropy),
-                    "corr_spectral_entropy_s2_pre": _csv_value(metric.s2_pre_corr_spectral_entropy),
-                    "delta_participation_ratio_s1": _csv_value(metric.s1_delta_participation_ratio),
-                    "delta_participation_ratio_s2": _csv_value(metric.s2_delta_participation_ratio),
-                    "cca_pre_post_topk_mean_s1": _csv_value(metric.s1_pre_post_cca_topk_mean),
-                    "cca_pre_post_topk_mean_s2": _csv_value(metric.s2_pre_post_cca_topk_mean),
-                    "cca_rho_max": _csv_value(metric.cca_rho_max),
-                    cca_label: _csv_value(metric.cca_rho_topk_mean),
-                }
-            )
+def _layer_sort_key(name: str) -> Tuple[int, int, str]:
+    numbers = [int(match) for match in re.findall(r"\d+", name)]
+    if not numbers:
+        return (0, 0, name)
+    return (numbers[0], numbers[1] if len(numbers) > 1 else 0, name)
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Embedding collapse diagnostic visualizations",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=textwrap.dedent(
-            """
-            Example:
-
-            python -m visualizations.ssl4eo.embedding_collapse_diagnostics \
-                --checkpoint-root '/local/ms-data/SSL4EO/model/2025-09-28_11-07-06-test-compute/checkpoints' \
-                --output-dir diagnostics/random_init/init-vcregstats \
-                --dataset-root /local/ms-data/SSL4EO/ \
-                --vc-gamma 1
-
-            python -m visualizations.ssl4eo.embedding_collapse_diagnostics \
-                --checkpoint-root '/home/juro4948/ciip/logs/2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints' \
-                --output-dir diagnostics/random_init/9-11-2025-vcregstats-testing \
-                --dataset-root /local/ms-data/SSL4EO/ \
-                --vc-gamma 1 
-            python -m visualizations.ssl4eo.embedding_collapse_diagnostics \
-                --checkpoint-root '/home/juro4948/ciip/logs/2025_09_20-22_35_45-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints' \
-                --output-dir diagnostics/random_init/9-20-2025-vcregstats \
-                --dataset-root /local/ms-data/SSL4EO/ \
-                --vc-gamma 1 
-            
-
-            python -m visualizations.ssl4eo.embedding_collapse_diagnostics \
-                --checkpoint-root '/home/juro4948/ciip/logs/2025_09_23-12_27_52-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints' \
-                --output-dir diagnostics/random_init/9-23-2025-vcregstats \
-                --dataset-root /local/ms-data/SSL4EO/ \
-                --vc-gamma 1 &
-            python -m visualizations.ssl4eo.embedding_collapse_diagnostics \
-                --checkpoint-root '/local/ms-data/SSL4EO/model/2025_09_26-13_32_23-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints' \
-                --output-dir diagnostics/random_init/9-26-2025-vcregstats \
-                --dataset-root /local/ms-data/SSL4EO/ \
-                --vc-gamma 1 
-
-            python -m visualizations.ssl4eo.embedding_collapse_diagnostics \
-                --checkpoint-root '/local/ms-data/SSL4EO/model/2025-09-28_11-07-06-test-compute/checkpoints' \
-                --output-dir diagnostics/random_init/9-28-2025-vcregstats \
-                --dataset-root /local/ms-data/SSL4EO/ \
-                --vc-gamma 1
-
-            python -m visualizations.ssl4eo.embedding_collapse_diagnostics                 --checkpoint-root '/local/ms-data/SSL4EO/model/2025-09-25_17-34-44-test-compute/2025_09_25-17_43_19-model_resnet50-lr_5e-05-b_128-j_4-p_amp/checkpoints'                 --output-dir diagnostics/random_init/9-25-2025-vcregstats                 --dataset-root /local/ms-data/SSL4EO/                 --vc-gamma 1
-            
-            
-            python -m visualizations.ssl4eo.embedding_collapse_diagnostics \
-                --checkpoint-root '/home/juro4948/ciip/logs/2025_10_07-19_45_47-model_resnet50-lr_0.001-b_128-j_6-p_amp/checkpoints' \
-                --output-dir diagnostics/random_init/10-07-2025-vcregstats \
-                --dataset-root /local/ms-data/SSL4EO/ \
-                --vc-gamma 1
-
-            python -m visualizations.ssl4eo.embedding_collapse_diagnostics \
-                --checkpoint-root '/home/juro4948/ciip/logs/2025_10_09-11_04_30-model_resnet50-lr_0.001-b_128-j_6-p_amp/checkpoints' \
-                --output-dir diagnostics/random_init/10-09-2025 \
-                --dataset-root /local/ms-data/SSL4EO/ \
-                --vc-gamma 1 &
-            python -m visualizations.ssl4eo.embedding_collapse_diagnostics \
-                --checkpoint-root '/local/ms-data/SSL4EO/model/2025_10_28-23_46_38-model_resnet50-lr_0.001-b_128-j_6-p_amp/checkpoints' \
-                --output-dir diagnostics/random_init/10-28-2025-aeuniformity0.01 \
-                --dataset-root /local/ms-data/SSL4EO/ \
-                --vc-gamma 1 &
-            python -m visualizations.ssl4eo.embedding_collapse_diagnostics \
-                --checkpoint-root '/local/ms-data/SSL4EO/model/2025_10_24-08_47_11-model_resnet50-lr_0.001-b_128-j_6-p_amp/checkpoints' \
-                --output-dir diagnostics/random_init/10-24-2025-aeuniformity0.05 \
-                --dataset-root /local/ms-data/SSL4EO/ \
-                --vc-gamma 1    
-
-            python -m visualizations.ssl4eo.embedding_collapse_diagnostics \
-                --checkpoint-root '/local/ms-data/SSL4EO/model/2025_11_01-21_12_21-model_resnet50-lr_0.001-b_128-j_6-p_amp/checkpoints' \
-                --output-dir diagnostics/random_init/2025_11_01_RandomInit-hal-hyperbolic \
-                --dataset-root /local/ms-data/SSL4EO/ \
-                --vc-gamma 1 
-
-                            
-            """
-
-            # --checkpoint-root '/home/juro4948/ciip/logs/2025_09_23-12_27_52-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints' \
-            # '' \
-        ).strip(),
-        # '/home/juro4948/ciip/logs/2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints'
-        # '/home/juro4948/ciip/logs/2025_09_22-16_02_28-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints'
-        #          /home/juro4948/ciip/logs/2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints' \
-        # /home/juro4948/ciip/logs/2025_09_20-22_35_45-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints
-    )
-    parser.add_argument("--checkpoint-root", type=Path, required=True, help="Directory containing CIIP checkpoints")
-    parser.add_argument("--output-dir", type=Path, required=True, help="Where to store plots and metrics")
-    parser.add_argument(
-        "--config-name",
-        type=str,
-        default="prod_default",
-        help="Name of the Hydra config to load (without .yaml)",
-    )
-    parser.add_argument(
-        "--config-path",
-        type=Path,
-        default=None,
-        help="Optional path to the Hydra config directory (defaults to ciip/open_clip_train/configs)",
-    )
-    parser.add_argument(
-        "--dataset-root",
-        type=Path,
-        default=None,
-        help="Override the dataset.root value from the config",
-    )
-    parser.add_argument(
-        "--subset-size",
-        type=int,
-        default=2048,
-        help="Number of samples to evaluate per epoch (0 or negative = full dataset)",
-    )
-    parser.add_argument("--subset-seed", type=int, default=42, help="Random seed for subset sampling")
-    parser.add_argument(
-        "--checkpoint-pattern",
-        type=str,
-        default=r"epoch",
-        help="Regex used to select checkpoints for evaluation",
-    )
-    parser.add_argument(
-        "--max-checkpoints",
-        type=int,
-        default=None,
-        help="Optional cap on the number of checkpoints to process",
-    )
-    parser.add_argument(
-        "--include-init",
-        action="store_true",
-        help="Include epoch_init checkpoints when present",
-    )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default=None,
-        help="Device to run extraction on (defaults to CUDA if available else CPU)",
-    )
-    parser.add_argument(
-        "--skip-final-fc",
-        action="store_true",
-        help=(
-            "Replace the encoders' final projection layers with identity mappings "
-            "when extracting embeddings (defaults to keeping the trained heads)."
-        ),
-    )
-    parser.add_argument(
-        "--use-orthogonal-mapping",
-        action="store_true",
-        help=(
-            "Apply the optional W.pt orthogonal alignment when present so s*_features_vc "
-            "match the rotated training space (defaults to raw encoder outputs)."
-        ),
-    )
-    parser.add_argument(
-        "--negative-samples",
-        type=int,
-        default=2000,
-        help="Number of negative pairs to sample for cosine similarity (None = all)",
-    )
-    parser.add_argument(
-        "--vc-gamma",
-        type=float,
-        default=None,
-        help="Override the variance floor γ used when computing VC diagnostics (defaults to config)",
-    )
-    parser.add_argument("--random-seed", type=int, default=42, help="Random seed for sampling")
-    parser.add_argument("--spectrum-top-k", type=int, default=500, help="Number of leading eigenvalues to plot")
-    parser.add_argument(
-        "--cca-top-k",
-        type=int,
-        default=5,
-        help="Number of leading canonical correlations to track (0 = all available)",
-    )
-    parser.add_argument(
-        "--linear-probe-csv",
-        type=Path,
-        default=None,
-        help="Optional CSV from output_results_to_csv containing linear probe metrics",
-    )
-    parser.add_argument(
-        "--linear-probe-pattern",
-        type=str,
-        default=None,
-        help="Regex identifying rows that correspond to the embeddings under study",
-    )
-    parser.add_argument(
-        "--linear-probe-k",
-        type=float,
-        default=None,
-        help="Desired k/percent column from the linear probe CSV (defaults to the first column)",
-    )
-    parser.add_argument(
-        "--linear-probe-metric",
-        type=str,
-        default="accuracy",
-        choices=("accuracy", "f1"),
-        help="Metric name used in the CSV file",
-    )
-    parser.add_argument(
-        "--tsne-samples",
-        type=int,
-        default=500,
-        help="Number of samples per modality for t-SNE projections (0 = skip)",
-    )
-    parser.add_argument(
-        "--umap-samples",
-        type=int,
-        default=500,
-        help="Number of samples per modality for UMAP projections (0 = skip)",
-    )
-    parser.add_argument(
-        "--cosine-hist-bins",
-        type=int,
-        default=50,
-        help="Number of bins for cosine similarity histograms",
-    )
-    return parser.parse_args()
+def _order_layers(layer_dict: Dict[str, torch.Tensor]) -> List[str]:
+    return sorted(layer_dict.keys(), key=_layer_sort_key)
 
 
-def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-    args = parse_args()
+def compute_within_encoder_cka(layer_features: Dict[str, torch.Tensor]) -> Tuple[List[str], Optional[np.ndarray]]:
+    ordered = _order_layers(layer_features)
+    prepared: Dict[str, torch.Tensor] = {}
+    for name in ordered:
+        tensor = _prepare_cka_tensor(layer_features[name])
+        if tensor is not None:
+            prepared[name] = tensor
+    names = [name for name in ordered if name in prepared]
+    size = len(names)
+    if size == 0:
+        return [], None
+    matrix = np.full((size, size), np.nan, dtype=np.float32)
+    for i, name_i in enumerate(names):
+        x = prepared[name_i]
+        matrix[i, i] = 1.0
+        for j in range(i + 1, size):
+            value = compute_linear_cka(x, prepared[names[j]])
+            if value is None:
+                continue
+            matrix[i, j] = matrix[j, i] = np.clip(value, 0.0, 1.0)
+    return names, matrix
 
-    output_dir = args.output_dir
-    output_dir.mkdir(parents=True, exist_ok=True)
 
+def compute_cross_encoder_cka(
+    s1_layers: Dict[str, torch.Tensor],
+    s2_layers: Dict[str, torch.Tensor],
+) -> Tuple[List[str], List[str], Optional[np.ndarray]]:
+    names_s1 = _order_layers(s1_layers)
+    names_s2 = _order_layers(s2_layers)
+    prepared_s1 = {name: _prepare_cka_tensor(s1_layers[name]) for name in names_s1}
+    prepared_s1 = {k: v for k, v in prepared_s1.items() if v is not None}
+    prepared_s2 = {name: _prepare_cka_tensor(s2_layers[name]) for name in names_s2}
+    prepared_s2 = {k: v for k, v in prepared_s2.items() if v is not None}
+    names_1 = [name for name in names_s1 if name in prepared_s1]
+    names_2 = [name for name in names_s2 if name in prepared_s2]
+    if not names_1 or not names_2:
+        return [], [], None
+    matrix = np.full((len(names_1), len(names_2)), np.nan, dtype=np.float32)
+    for i, name_i in enumerate(names_1):
+        for j, name_j in enumerate(names_2):
+            value = compute_linear_cka(prepared_s1[name_i], prepared_s2[name_j])
+            if value is None:
+                continue
+            matrix[i, j] = np.clip(value, 0.0, 1.0)
+    return names_1, names_2, matrix
+
+
+# ---------------------------------------------------------------------------
+# Model and data helpers
+# ---------------------------------------------------------------------------
+
+
+def _resolve_config(args: argparse.Namespace) -> DictConfig:
     repo_root = Path(__file__).resolve().parents[2]
     default_config_dir = repo_root / "ciip" / "open_clip_train" / "configs"
-    if args.config_path is not None:
-        config_dir = args.config_path
-    else:
-        config_dir = default_config_dir
-    config_file = (config_dir / f"{args.config_name}.yaml").resolve()
+    config_dir = args.config_path or default_config_dir
+    config_file = (Path(config_dir) / f"{args.config_name}.yaml").resolve()
     if not config_file.is_file():
         raise FileNotFoundError(f"Could not find config file '{config_file}'")
-
-    _LOGGER.info("Loading config from %s", config_file)
     config = OmegaConf.load(config_file)
     OmegaConf.set_struct(config, False)
-
     if args.dataset_root is not None:
         config.dataset.root = str(args.dataset_root)
-    else:
-        config.dataset.root = str(config.dataset.root)
-
     config.io.checkpoint_path = str(args.checkpoint_root)
     config.datamodule.distributed = False
     if "horovod" in config.datamodule:
         config.datamodule.horovod = False
+    return config
 
-    ensure_hydra_original_cwd()
-    data = get_data(config)
-    train_dataset = data["train"].dataloader.dataset
-    subset = build_subset(train_dataset, args.subset_size, args.subset_seed)
-    _LOGGER.info(
-        "Using %d samples per epoch from dataset root %s",
-        len(subset),
-        config.dataset.root,
+
+def load_model_from_checkpoint(
+    config: DictConfig,
+    checkpoint_path: Path,
+    *,
+    device: torch.device,
+    input_dtype: torch.dtype,
+    w_path: Optional[Path] = None,  # retained for API compatibility
+    skip_final_fc: bool = False,
+    use_orthogonal_mapping: bool = False,
+) -> nn.Module:
+    model = create_model(config, device=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    state_dict = checkpoint.get("state_dict", checkpoint)
+    cleaned = {k.replace("module.", ""): v for k, v in state_dict.items()}
+    missing, unexpected = model.load_state_dict(cleaned, strict=False)
+    allowed_missing = {
+        "encoder_s1.fc.weight",
+        "encoder_s1.fc.bias",
+        "encoder_s2.fc.weight",
+        "encoder_s2.fc.bias",
+    }
+    remaining_missing = {key for key in missing if key not in allowed_missing}
+    if remaining_missing:
+        _LOGGER.warning("Missing keys when loading %s: %s", checkpoint_path.name, sorted(remaining_missing))
+    if unexpected:
+        _LOGGER.warning("Unexpected keys when loading %s: %s", checkpoint_path.name, sorted(unexpected))
+    model = model.to(device=device, dtype=input_dtype, non_blocking=True)
+    if skip_final_fc:
+        for encoder_name in ["encoder_s1", "encoder_s2"]:
+            encoder = getattr(model, encoder_name, None)
+            if encoder is not None and hasattr(encoder, "fc"):
+                setattr(encoder, "fc", nn.Identity())
+    model.eval()
+    return model
+
+
+def _unwrap_subset(dataset: torch.utils.data.Dataset) -> Tuple[torch.utils.data.Dataset, Sequence[int]]:
+    if isinstance(dataset, torch.utils.data.Subset):
+        return dataset.dataset, dataset.indices  # type: ignore[return-value]
+    return dataset, range(len(dataset))
+
+
+def _register_layer_hooks(model: nn.Module) -> Tuple[Dict[str, Dict[str, List[torch.Tensor]]], List]:
+    layer_caches: Dict[str, Dict[str, List[torch.Tensor]]] = {"s1": {}, "s2": {}}
+    handles: List = []
+
+    def _make_layer_hook(key: str, name: str):
+        cache = layer_caches[key].setdefault(name, [])
+
+        def hook(module: nn.Module, inputs, output):  # type: ignore[override]
+            tensor = output[0] if isinstance(output, (list, tuple)) else output
+            if not isinstance(tensor, torch.Tensor):
+                return
+            tensor = tensor.detach()
+            if tensor.dim() > 2:
+                tensor = F.adaptive_avg_pool2d(tensor, (1, 1))
+            tensor = tensor.flatten(start_dim=1).to(device="cpu", dtype=torch.float32)
+            cache.append(tensor)
+
+        return hook
+
+    def _attach_layers(encoder: Optional[nn.Module], key: str) -> None:
+        if encoder is None:
+            return
+        layer_names = [
+            "conv1",
+            "bn1",
+            "relu",
+            "maxpool",
+            "layer1",
+            "layer2",
+            "layer3",
+            "layer4",
+            "avgpool",
+            "fc",
+        ]
+        for name in layer_names:
+            module = getattr(encoder, name, None)
+            if not isinstance(module, nn.Module):
+                continue
+            try:
+                handles.append(module.register_forward_hook(_make_layer_hook(key, name)))
+            except Exception:
+                continue
+
+    encoder_s1 = getattr(model, "encoder_s1", None)
+    if encoder_s1 is not None:
+        for attr in ("proj", "projection_head", "fc"):
+            module = getattr(encoder_s1, attr, None)
+            if isinstance(module, nn.Module):
+                break
+        _attach_layers(encoder_s1, "s1")
+
+    encoder_s2 = getattr(model, "encoder_s2", None)
+    if encoder_s2 is not None:
+        for attr in ("proj", "projection_head", "fc"):
+            module = getattr(encoder_s2, attr, None)
+            if isinstance(module, nn.Module):
+                break
+        _attach_layers(encoder_s2, "s2")
+
+    return layer_caches, handles
+
+
+def _encoder_accepts_lorentz(method) -> bool:
+    try:
+        signature = inspect.signature(method)
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return False
+    return "lorentz" in signature.parameters
+
+
+def _run_encoder_method(
+    method,
+    tensor: torch.Tensor,
+    *,
+    project_hyperbolic: bool,
+    normalize: bool,
+) -> torch.Tensor:
+    accepts_lorentz = _encoder_accepts_lorentz(method)
+    try:
+        if accepts_lorentz:
+            return method(tensor, lorentz=project_hyperbolic, normalize=normalize)
+        return method(tensor, normalize=normalize)
+    except TypeError:
+        # Some historical encoder signatures take positional arguments only.
+        if accepts_lorentz:
+            return method(tensor, project_hyperbolic, normalize)
+        return method(tensor, normalize)
+
+
+def extract_embeddings_for_dataset(
+    model: nn.Module,
+    dataset: torch.utils.data.Dataset,
+    *,
+    input_dtype: torch.dtype,
+    device: torch.device,
+    autocast,
+) -> Tuple[ModalityEmbeddings, ModalityEmbeddings, List[str]]:
+    base_dataset, indices = _unwrap_subset(dataset)
+    layer_cache, handles = _register_layer_hooks(model)
+    s1_vectors: List[torch.Tensor] = []
+    s2_vectors: List[torch.Tensor] = []
+    s1_norm_vectors: List[torch.Tensor] = []
+    s2_norm_vectors: List[torch.Tensor] = []
+    sample_ids: List[str] = []
+
+    def _to_tensor(array) -> torch.Tensor:
+        tensor = torch.as_tensor(array)
+        if tensor.ndim == 3:
+            return tensor
+        if tensor.ndim == 4:
+            return tensor.squeeze(0)
+        raise ValueError("Unsupported sample shape for embedding extraction")
+
+    with torch.no_grad():
+        for dataset_idx in indices:
+            sample = base_dataset[dataset_idx]
+            if isinstance(sample, dict):
+                s1_img = sample.get("s1")
+                s2_img = sample.get("s2")
+                uid = sample.get("uid") or sample.get("id") or sample.get("file_name")
+            else:
+                s1_img, s2_img = sample  # type: ignore[misc]
+                uid = str(dataset_idx)
+            if s1_img is None or s2_img is None:
+                continue
+            s1_tensor = _to_tensor(s1_img).unsqueeze(0).to(device=device, dtype=input_dtype)
+            s2_tensor = _to_tensor(s2_img).unsqueeze(0).to(device=device, dtype=input_dtype)
+            with autocast():
+                output = model(s1_tensor, s2_tensor)
+            if isinstance(output, dict):
+                s1_raw = output.get("s1_features_vc")
+                s2_raw = output.get("s2_features_vc")
+                s1_norm = output.get("s1_features")
+                s2_norm = output.get("s2_features")
+            else:
+                s1_raw = s2_raw = None
+                s1_norm = s2_norm = None
+
+            encode_s1 = getattr(model, "encode_s1", None)
+            encode_s2 = getattr(model, "encode_s2", None)
+            if (s1_raw is None or s2_raw is None) and (encode_s1 is None or encode_s2 is None):
+                raise AttributeError("Model does not expose encode_s1/encode_s2 methods for embedding extraction")
+
+            if s1_raw is None and encode_s1 is not None:
+                with autocast():
+                    s1_raw = _run_encoder_method(
+                        encode_s1,
+                        s1_tensor,
+                        project_hyperbolic=False,
+                        normalize=False,
+                    )
+            if s2_raw is None and encode_s2 is not None:
+                with autocast():
+                    s2_raw = _run_encoder_method(
+                        encode_s2,
+                        s2_tensor,
+                        project_hyperbolic=False,
+                        normalize=False,
+                    )
+
+            def _select_normalized(
+                raw_tensor: torch.Tensor,
+                encoder_method,
+                input_tensor: torch.Tensor,
+            ) -> torch.Tensor:
+                if encoder_method is None:
+                    return raw_tensor
+                try:
+                    with autocast():
+                        candidate = _run_encoder_method(
+                            encoder_method,
+                            input_tensor,
+                            project_hyperbolic=False,
+                            normalize=True,
+                        )
+                except Exception:  # pragma: no cover - encoder mismatch fallback
+                    candidate = None
+
+                if candidate is None:
+                    return raw_tensor
+
+                norms = candidate.flatten(start_dim=1).norm(dim=-1)
+                if torch.allclose(norms, torch.ones_like(norms), atol=1e-3, rtol=1e-3):
+                    return candidate
+                return raw_tensor
+
+            if s1_norm is None:
+                s1_norm = _select_normalized(s1_raw, encode_s1, s1_tensor)
+            if s2_norm is None:
+                s2_norm = _select_normalized(s2_raw, encode_s2, s2_tensor)
+            s1_vectors.append(s1_raw.squeeze(0).cpu().to(torch.float32))
+            s2_vectors.append(s2_raw.squeeze(0).cpu().to(torch.float32))
+            s1_norm_vectors.append(s1_norm.squeeze(0).cpu().to(torch.float32))
+            s2_norm_vectors.append(s2_norm.squeeze(0).cpu().to(torch.float32))
+            sample_ids.append(str(uid))
+
+    for handle in handles:
+        handle.remove()
+
+    def _stack(list_tensors: List[torch.Tensor]) -> torch.Tensor:
+        if not list_tensors:
+            return torch.empty(0, 0)
+        return torch.stack(list_tensors, dim=0)
+
+    s1_layers = {name: torch.cat(tensors, dim=0) for name, tensors in layer_cache["s1"].items() if tensors}
+    s2_layers = {name: torch.cat(tensors, dim=0) for name, tensors in layer_cache["s2"].items() if tensors}
+
+    s1_embeddings = ModalityEmbeddings(_stack(s1_vectors), _stack(s1_norm_vectors), s1_layers)
+    s2_embeddings = ModalityEmbeddings(_stack(s2_vectors), _stack(s2_norm_vectors), s2_layers)
+    return s1_embeddings, s2_embeddings, sample_ids
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics computation and plotting
+# ---------------------------------------------------------------------------
+
+
+def _discover_checkpoint(checkpoint_root: Path, epoch: int) -> Path:
+    patterns = [
+        f"epoch_{epoch}.pt",
+        f"epoch_{epoch:02d}.pt",
+        f"epoch_{epoch:03d}.pt",
+    ]
+    for pattern in patterns:
+        candidate = checkpoint_root / pattern
+        if candidate.exists():
+            return candidate
+    matches = sorted(checkpoint_root.glob(f"*{epoch}*.pt"))
+    if not matches:
+        raise FileNotFoundError(f"No checkpoint for epoch {epoch} under {checkpoint_root}")
+    return matches[0]
+
+
+def _compute_epoch_diagnostics(
+    label: str,
+    epoch: int,
+    s1: ModalityEmbeddings,
+    s2: ModalityEmbeddings,
+    ids: List[str],
+) -> EpochDiagnostics:
+    s1_sv = compute_singular_values(s1.raw)
+    s2_sv = compute_singular_values(s2.raw)
+    s1_layers, s1_cka = compute_within_encoder_cka(s1.layer_activations)
+    s2_layers, s2_cka = compute_within_encoder_cka(s2.layer_activations)
+    cross_s1, cross_s2, cross_cka = compute_cross_encoder_cka(s1.layer_activations, s2.layer_activations)
+    return EpochDiagnostics(
+        label=label,
+        epoch=epoch,
+        ids=ids,
+        s1=s1,
+        s2=s2,
+        s1_singular_values=s1_sv,
+        s2_singular_values=s2_sv,
+        s1_layers=s1_layers,
+        s2_layers=s2_layers,
+        s1_within_cka=s1_cka,
+        s2_within_cka=s2_cka,
+        cross_cka=cross_cka,
+        cross_s1_layers=cross_s1,
+        cross_s2_layers=cross_s2,
     )
 
+
+def _plot_singular_values(ax, values: np.ndarray, *, modality: str, embedding_dim: int) -> None:
+    if values.size == 0:
+        ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_title(f"{modality} singular values")
+        return
+    ax.plot(np.arange(1, values.size + 1), values, marker="o")
+    ax.set_xlim(0, 50)
+    ax.set_xlabel("Component rank")
+    ax.set_ylabel("Singular value")
+    ax.set_title(f"{modality} SVD (dim={embedding_dim})")
+    ax.grid(True, alpha=0.2)
+
+
+def _plot_cka(ax, matrix: Optional[np.ndarray], x_labels: List[str], y_labels: List[str], *, title: str, xlabel: str, ylabel: str) -> None:
+    if matrix is None or matrix.size == 0 or np.all(np.isnan(matrix)):
+        ax.text(0.5, 0.5, "CKA unavailable", ha="center", va="center", transform=ax.transAxes, color="gray")
+        ax.set_title(title)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        return
+    im = ax.imshow(matrix, vmin=0.0, vmax=1.0, aspect="auto", cmap="viridis")
+    ax.set_title(title)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_xticks(range(len(x_labels)))
+    ax.set_xticklabels(x_labels, rotation=45, ha="right")
+    ax.set_yticks(range(len(y_labels)))
+    ax.set_yticklabels(y_labels)
+    ax.figure.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="Linear CKA")
+
+
+def plot_epoch_diagnostics(epoch_diag: EpochDiagnostics, output_dir: Path) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+
+    embedding_dim_s1 = epoch_diag.s1.raw.shape[1] if epoch_diag.s1.raw.ndim == 2 else epoch_diag.s1.raw.view(epoch_diag.s1.raw.shape[0], -1).shape[1]
+    embedding_dim_s2 = epoch_diag.s2.raw.shape[1] if epoch_diag.s2.raw.ndim == 2 else epoch_diag.s2.raw.view(epoch_diag.s2.raw.shape[0], -1).shape[1]
+
+    _plot_singular_values(axes[0, 0], epoch_diag.s1_singular_values, modality="S1", embedding_dim=embedding_dim_s1)
+    _plot_singular_values(axes[0, 1], epoch_diag.s2_singular_values, modality="S2", embedding_dim=embedding_dim_s2)
+    axes[0, 2].axis("off")
+    axes[0, 2].text(0.5, 0.5, f"Epoch {epoch_diag.epoch}\n{epoch_diag.label}\nSamples: {len(epoch_diag.ids)}", ha="center", va="center", transform=axes[0, 2].transAxes)
+
+    _plot_cka(
+        axes[1, 0],
+        epoch_diag.s1_within_cka,
+        epoch_diag.s1_layers,
+        epoch_diag.s1_layers,
+        title="S1 within-encoder",
+        xlabel="Layer",
+        ylabel="Layer",
+    )
+    _plot_cka(
+        axes[1, 1],
+        epoch_diag.s2_within_cka,
+        epoch_diag.s2_layers,
+        epoch_diag.s2_layers,
+        title="S2 within-encoder",
+        xlabel="Layer",
+        ylabel="Layer",
+    )
+    _plot_cka(
+        axes[1, 2],
+        epoch_diag.cross_cka,
+        epoch_diag.cross_s2_layers,
+        epoch_diag.cross_s1_layers,
+        title="Cross encoder",
+        xlabel="S2 layer",
+        ylabel="S1 layer",
+    )
+
+    fig.suptitle(f"Embedding diagnostics — {epoch_diag.label}")
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    output_path = output_dir / "diagnostics.png"
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+    return output_path
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
+
+def _build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Single-epoch embedding diagnostics")
+    parser.add_argument("--checkpoint-root", type=Path, required=True, help="Directory containing checkpoint files")
+    parser.add_argument("--epoch", type=int, default=20, help="Epoch number to analyse")
+    parser.add_argument("--output-dir", type=Path, required=True, help="Directory for diagnostics outputs")
+    parser.add_argument("--config-name", type=str, default="ssl4eo_clip", help="Name of the training config to load")
+    parser.add_argument("--config-path", type=Path, default=None, help="Optional directory that stores config files")
+    parser.add_argument("--dataset-root", type=Path, default=None, help="Override dataset root from config")
+    parser.add_argument("--subset-size", type=int, default=2048, help="Number of samples to evaluate (0 = full dataset)")
+    parser.add_argument("--subset-seed", type=int, default=0, help="Random seed for subset sampling")
+    parser.add_argument("--device", type=str, default=None, help="Torch device (default: cuda if available else cpu)")
+    parser.add_argument("--skip-final-fc", action="store_true", help="Replace encoder FC layers with identity")
+    return parser
+
+
+def _build_subset(dataset: torch.utils.data.Dataset, subset_size: int, seed: int) -> torch.utils.data.Dataset:
+    total = len(dataset)
+    if subset_size <= 0 or subset_size >= total:
+        indices = list(range(total))
+    else:
+        rng = np.random.default_rng(seed)
+        indices = sorted(rng.choice(total, size=subset_size, replace=False).tolist())
+    return torch.utils.data.Subset(dataset, indices)
+
+
+def run_single_epoch_diagnostics(args: argparse.Namespace) -> EpochDiagnostics:
+    config = _resolve_config(args)
+    ensure_hydra_original_cwd()
+    data = get_data(config)
+    dataset = data["train"].dataloader.dataset
+    subset = _build_subset(dataset, args.subset_size, args.subset_seed)
     device_str = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     device = torch.device(device_str)
     config.datamodule.device = device_str
-
-    input_dtype = resolve_input_dtype(config.model.precision)
+    input_dtype = resolve_input_dtype(str(config.model.precision))
     if device.type != "cuda" and input_dtype in {torch.float16, torch.bfloat16}:
         input_dtype = torch.float32
-    _LOGGER.info("Running extraction on %s with input dtype %s", device, input_dtype)
-
     autocast_fn = get_autocast(config.model.precision)
     if device.type != "cuda":
         autocast_fn = contextlib.nullcontext
-
-    epochs = collect_epoch_embeddings(
-        args.checkpoint_root,
+    checkpoint_path = _discover_checkpoint(args.checkpoint_root, args.epoch)
+    model = load_model_from_checkpoint(
         config,
+        checkpoint_path,
+        device=device,
+        input_dtype=input_dtype,
+        skip_final_fc=args.skip_final_fc,
+    )
+    s1_embeddings, s2_embeddings, sample_ids = extract_embeddings_for_dataset(
+        model,
         subset,
         input_dtype=input_dtype,
         device=device,
         autocast=autocast_fn,
-        pattern=args.checkpoint_pattern,
-        include_init=args.include_init,
-        max_checkpoints=args.max_checkpoints,
-        skip_final_fc=args.skip_final_fc,
-        use_orthogonal_mapping=args.use_orthogonal_mapping,
     )
-
-    # metrics = compute_epoch_metrics(epochs, negative_samples=args.negative_samples, random_seed=args.random_seed)
-    try:
-        config_gamma = float(config.loss.vc_gamma)
-    except Exception:
-        config_gamma = None
-
-    if args.vc_gamma is not None:
-        vc_gamma = float(args.vc_gamma)
-        gamma_source = "CLI override"
-    elif config_gamma is not None:
-        vc_gamma = config_gamma
-        gamma_source = "config"
-    else:
-        vc_gamma = 1.0
-        gamma_source = "default"
-
-    _LOGGER.info("Using VC γ target of %.4f (%s)", vc_gamma, gamma_source)
-
-    cca_top_k = max(0, int(args.cca_top_k))
-
-    metrics = compute_epoch_metrics(
-        epochs,
-        negative_samples=args.negative_samples,
-        random_seed=args.random_seed,
-        cca_top_k=cca_top_k,
-        vc_gamma=vc_gamma,
-    )
-
-    summary_plot_paths: List[Path] = []
-    export_metrics(metrics, output_dir)
-    export_vc_metrics_csv(metrics, output_dir, cca_top_k=cca_top_k)
-    plot_cosine_summary(metrics, output_dir)
-    summary_plot_paths.append(output_dir / "cosine_similarity_summary.png")
-    plot_cosine_histograms(metrics, output_dir, bins=args.cosine_hist_bins)
-    plot_variance_heatmap(metrics, output_dir, modality="s1")
-    summary_plot_paths.extend(
-        [
-            output_dir / "s1_variance_heatmap.png",
-            output_dir / "s1_variance_summary.png",
-        ]
-    )
-    plot_variance_heatmap(metrics, output_dir, modality="s2")
-    summary_plot_paths.extend(
-        [
-            output_dir / "s2_variance_heatmap.png",
-            output_dir / "s2_variance_summary.png",
-        ]
-    )
-    plot_vc_timeseries(
-        metrics,
-        output_dir,
-        vc_gamma=vc_gamma,
-    )
-    summary_plot_paths.extend(
-        [
-            output_dir / "vc_metrics_timeseries_s1.png",
-            output_dir / "vc_metrics_timeseries_s2.png",
-        ]
-    )
-    plot_epoch_dashboards(
-        metrics,
-        output_dir,
-        cosine_bins=args.cosine_hist_bins,
-        spectrum_top_k=args.spectrum_top_k,
-    )
-    plot_epoch_singular_values(
-        metrics,
-        output_dir,
-        top_k=args.spectrum_top_k,
-    )
-    plot_layerwise_cka(metrics, output_dir)
-
-    for modality in ("s1", "s2"):
-        grid_path = plot_svd_epoch_grid(
-            metrics,
-            output_dir,
-            modality=modality,
-            top_k=args.spectrum_top_k,
-            normalized=False,
-        )
-        if grid_path is not None:
-            summary_plot_paths.append(grid_path)
-        grid_path_norm = plot_svd_epoch_grid(
-            metrics,
-            output_dir,
-            modality=modality,
-            top_k=args.spectrum_top_k,
-            normalized=True,
-        )
-        if grid_path_norm is not None:
-            summary_plot_paths.append(grid_path_norm)
+    label = checkpoint_path.stem
+    epoch_diag = _compute_epoch_diagnostics(label, args.epoch, s1_embeddings, s2_embeddings, sample_ids)
+    epoch_dir = args.output_dir / f"epoch_{args.epoch:04d}"
+    epoch_dir.mkdir(parents=True, exist_ok=True)
+    plot_epoch_diagnostics(epoch_diag, epoch_dir)
+    metrics_path = epoch_dir / "metrics.json"
+    metrics_payload = {
+        "label": epoch_diag.label,
+        "epoch": epoch_diag.epoch,
+        "num_samples": len(epoch_diag.ids),
+        "s1_singular_values": epoch_diag.s1_singular_values.tolist(),
+        "s2_singular_values": epoch_diag.s2_singular_values.tolist(),
+        "s1_layers": epoch_diag.s1_layers,
+        "s2_layers": epoch_diag.s2_layers,
+    }
+    with metrics_path.open("w", encoding="utf-8") as handle:
+        json.dump(metrics_payload, handle, indent=2)
+    return epoch_diag
 
 
-    if args.linear_probe_csv:
-        linear_probe = parse_linear_probe_csv(
-            args.linear_probe_csv,
-            model_pattern=args.linear_probe_pattern,
-            metric=args.linear_probe_metric,
-            k_value=args.linear_probe_k,
-        )
-        plot_linear_probe_curve(linear_probe, output_dir, metric=args.linear_probe_metric)
-        summary_plot_paths.append(output_dir / f"linear_probe_{args.linear_probe_metric}.png")
-
-    projection_views: List[Tuple[str, str, str]] = [
-        ("pre_head", "Pre-head · z-score → PCA50 → cosine", "zscore"),
-        ("post_head_normalized", "Post-head L2 · PCA50 → cosine", "l2"),
-        ("post_head_raw", "Post-head raw · z-score → PCA50 → cosine", "zscore"),
-    ]
-
-    if args.tsne_samples > 0:
-        for view_key, view_desc, mode in projection_views:
-            view_rng = np.random.default_rng(args.random_seed)
-            tsne_panels: List[Tuple[str, np.ndarray, np.ndarray]] = []
-            for epoch in epochs:
-                tensors = resolve_projection_tensors(epoch, view_key)
-                if tensors is None:
-                    continue
-                s1_proj, s2_proj = tensors
-                try:
-                    data, labels = sample_for_projection(
-                        s1_proj,
-                        s2_proj,
-                        per_modality=args.tsne_samples,
-                        generator=view_rng,
-                    )
-                except ValueError:
-                    continue
-                data = preprocess_projection_data(
-                    data,
-                    mode=mode,
-                    random_state=args.random_seed,
-                )
-                coords = compute_projection(data, method="tsne", random_state=args.random_seed)
-                if coords is None:
-                    continue
-                tsne_panels.append((epoch.label, coords, labels))
-
-            if tsne_panels:
-                tsne_path = output_dir / f"tsne_{view_key}.png"
-                plot_projection_grid(tsne_panels, tsne_path, method=f"t-SNE ({view_desc})")
-                summary_plot_paths.append(tsne_path)
-            else:
-                _LOGGER.warning(
-                    "Skipping t-SNE projections for %s (insufficient data)",
-                    view_desc,
-                )
-
-    if args.umap_samples > 0:
-        if umap is None:
-            _LOGGER.warning("UMAP requested but not installed; skipping")
-        else:
-            for view_key, view_desc, mode in projection_views:
-                view_rng = np.random.default_rng(args.random_seed)
-                umap_panels: List[Tuple[str, np.ndarray, np.ndarray]] = []
-                for epoch in epochs:
-                    tensors = resolve_projection_tensors(epoch, view_key)
-                    if tensors is None:
-                        continue
-                    s1_proj, s2_proj = tensors
-                    try:
-                        data, labels = sample_for_projection(
-                            s1_proj,
-                            s2_proj,
-                            per_modality=args.umap_samples,
-                            generator=view_rng,
-                        )
-                    except ValueError:
-                        continue
-                    data = preprocess_projection_data(
-                        data,
-                        mode=mode,
-                        random_state=args.random_seed,
-                    )
-                    coords = compute_projection(data, method="umap", random_state=args.random_seed)
-                    if coords is None:
-                        continue
-                    umap_panels.append((epoch.label, coords, labels))
-
-                if umap_panels:
-                    umap_path = output_dir / f"umap_{view_key}.png"
-                    plot_projection_grid(umap_panels, umap_path, method=f"UMAP ({view_desc})")
-                    summary_plot_paths.append(umap_path)
-                else:
-                    _LOGGER.warning(
-                        "Skipping UMAP projections for %s (insufficient data)",
-                        view_desc,
-                    )
+def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    parser = _build_arg_parser()
+    args = parser.parse_args()
+    run_single_epoch_diagnostics(args)
 
 
-    _LOGGER.info("Saved plots and metrics to %s", output_dir.resolve())
-
-    generate_summary_pdf(summary_plot_paths, metrics=metrics, output_dir=output_dir)
-
-
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     main()
