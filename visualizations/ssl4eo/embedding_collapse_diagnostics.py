@@ -334,40 +334,40 @@ def _resolve_config(args: argparse.Namespace) -> DictConfig:
     return config
 
 
-def load_model_from_checkpoint(
-    config: DictConfig,
-    checkpoint_path: Path,
-    *,
-    device: torch.device,
-    input_dtype: torch.dtype,
-    w_path: Optional[Path] = None,  # retained for API compatibility
-    skip_final_fc: bool = False,
-    use_orthogonal_mapping: bool = False,
-) -> nn.Module:
-    model = create_model(config, device=device)
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    state_dict = checkpoint.get("state_dict", checkpoint)
-    cleaned = {k.replace("module.", ""): v for k, v in state_dict.items()}
-    missing, unexpected = model.load_state_dict(cleaned, strict=False)
-    allowed_missing = {
-        "encoder_s1.fc.weight",
-        "encoder_s1.fc.bias",
-        "encoder_s2.fc.weight",
-        "encoder_s2.fc.bias",
-    }
-    remaining_missing = {key for key in missing if key not in allowed_missing}
-    if remaining_missing:
-        _LOGGER.warning("Missing keys when loading %s: %s", checkpoint_path.name, sorted(remaining_missing))
-    if unexpected:
-        _LOGGER.warning("Unexpected keys when loading %s: %s", checkpoint_path.name, sorted(unexpected))
-    model = model.to(device=device, dtype=input_dtype, non_blocking=True)
-    if skip_final_fc:
-        for encoder_name in ["encoder_s1", "encoder_s2"]:
-            encoder = getattr(model, encoder_name, None)
-            if encoder is not None and hasattr(encoder, "fc"):
-                setattr(encoder, "fc", nn.Identity())
-    model.eval()
-    return model
+# def load_model_from_checkpoint(
+#     config: DictConfig,
+#     checkpoint_path: Path,
+#     *,
+#     device: torch.device,
+#     input_dtype: torch.dtype,
+#     w_path: Optional[Path] = None,  # retained for API compatibility
+#     skip_final_fc: bool = False,
+#     use_orthogonal_mapping: bool = False,
+# ) -> nn.Module:
+#     model = create_model(config, device=device)
+#     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+#     state_dict = checkpoint.get("state_dict", checkpoint)
+#     cleaned = {k.replace("module.", ""): v for k, v in state_dict.items()}
+#     missing, unexpected = model.load_state_dict(cleaned, strict=False)
+#     allowed_missing = {
+#         "encoder_s1.fc.weight",
+#         "encoder_s1.fc.bias",
+#         "encoder_s2.fc.weight",
+#         "encoder_s2.fc.bias",
+#     }
+#     remaining_missing = {key for key in missing if key not in allowed_missing}
+#     if remaining_missing:
+#         _LOGGER.warning("Missing keys when loading %s: %s", checkpoint_path.name, sorted(remaining_missing))
+#     if unexpected:
+#         _LOGGER.warning("Unexpected keys when loading %s: %s", checkpoint_path.name, sorted(unexpected))
+#     model = model.to(device=device, dtype=input_dtype, non_blocking=True)
+#     if skip_final_fc:
+#         for encoder_name in ["encoder_s1", "encoder_s2"]:
+#             encoder = getattr(model, encoder_name, None)
+#             if encoder is not None and hasattr(encoder, "fc"):
+#                 setattr(encoder, "fc", nn.Identity())
+#     model.eval()
+#     return model
 
 
 def _unwrap_subset(dataset: torch.utils.data.Dataset) -> Tuple[torch.utils.data.Dataset, Sequence[int]]:
@@ -758,21 +758,21 @@ def run_single_epoch_diagnostics(args: argparse.Namespace) -> EpochDiagnostics:
     subset = _build_subset(dataset, args.subset_size, args.subset_seed)
     device_str = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     device = torch.device(device_str)
-    config.datamodule.device = device_str
-    input_dtype = resolve_input_dtype(str(config.model.precision))
-    if device.type != "cuda" and input_dtype in {torch.float16, torch.bfloat16}:
-        input_dtype = torch.float32
-    autocast_fn = get_autocast(config.model.precision)
-    if device.type != "cuda":
-        autocast_fn = contextlib.nullcontext
+    # config.datamodule.device = device_str
+    # input_dtype = resolve_input_dtype(str(config.model.precision))
+    # if device.type != "cuda" and input_dtype in {torch.float16, torch.bfloat16}:
+    #     input_dtype = torch.float32
+    # autocast_fn = get_autocast(config.model.precision)
+    # if device.type != "cuda":
+    #     autocast_fn = contextlib.nullcontext
     checkpoint_path = _discover_checkpoint(args.checkpoint_root, args.epoch)
-    model = load_model_from_checkpoint(
-        config,
-        checkpoint_path,
-        device=device,
-        input_dtype=input_dtype,
-        skip_final_fc=args.skip_final_fc,
-    )
+    # model = load_model_from_checkpoint(
+    #     config,
+    #     checkpoint_path,
+    #     device=device,
+    #     input_dtype=input_dtype,
+    #     skip_final_fc=args.skip_final_fc,
+    # )
     s1_embeddings, s2_embeddings, sample_ids = extract_embeddings_for_dataset(
         model,
         subset,

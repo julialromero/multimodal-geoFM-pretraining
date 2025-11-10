@@ -136,18 +136,18 @@ def _build_model(checkpoint: Path) -> Tuple[nn.Module, bool]:
     else:
         model = CIIP(**kwargs)
 
-    missing, unexpected = model.load_state_dict(cleaned, strict=False)
-    allowed_missing = {
-        "encoder_s1.fc.weight",
-        "encoder_s1.fc.bias",
-        "encoder_s2.fc.weight",
-        "encoder_s2.fc.bias",
-    }
-    remaining_missing = {key for key in missing if key not in allowed_missing}
-    if remaining_missing or unexpected:
-        raise RuntimeError(
-            f"Checkpoint incompatible with model (missing={remaining_missing}, unexpected={unexpected})"
-        )
+    missing, unexpected = model.load_state_dict(cleaned, strict=True)
+    # allowed_missing = {
+    #     "encoder_s1.fc.weight",
+    #     "encoder_s1.fc.bias",
+    #     "encoder_s2.fc.weight",
+    #     "encoder_s2.fc.bias",
+    # }
+    # remaining_missing = {key for key in missing if key not in allowed_missing}
+    # if remaining_missing or unexpected:
+    #     raise RuntimeError(
+    #         f"Checkpoint incompatible with model (missing={remaining_missing}, unexpected={unexpected})"
+    #     )
     model.eval()
     return model, is_lorentz
 
@@ -536,7 +536,7 @@ if __name__ == "__main__":
         checkpoint=Path(f"{checkpoint_root}/epoch_10.pt"),
         eurosat_root=Path("/local/ms-data/EuroSAT/"),
         neuco_root=Path("/local/ms-data/SSL4EO-S12-downstream/data"),
-        output_dir=Path("/home/juro4948/ciip/diagnostics/curv_init_1")
+        output_dir=Path("/home/juro4948/ciip/diagnostics/unified_eval/curv_init_1")
     )
     run_full_evaluation(cfg)
 
