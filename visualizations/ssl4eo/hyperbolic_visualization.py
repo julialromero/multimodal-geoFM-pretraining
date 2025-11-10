@@ -22,7 +22,8 @@ import torch
 import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
 
-from ciip.loss import CiipLoss
+from ciip import lorentz as L
+from ciip.model_ciip import LorentzCIIP
 from ciip.open_clip_train.data import SSL4EODataset
 from visualizations.ssl4eo.embedding_collapse_diagnostics import (
     ensure_hydra_original_cwd,
@@ -121,38 +122,6 @@ def load_hyperbolic_params(checkpoint: Dict[str, torch.Tensor], eps_default: flo
     }
 
 
-def build_loss(args: argparse.Namespace, device: torch.device) -> CiipLoss:
-    loss = CiipLoss(
-        hyperbolic=args.hyperbolic,
-        hyperbolic_normalize=not args.no_hyperbolic_normalize,
-        hyperbolic_curvature_init=args.curvature_init,
-        hyperbolic_eps=args.hyperbolic_eps,
-    )
-    return loss.to(device)
-
-
-def override_curvature(loss: CiipLoss, curvature: float, device: torch.device) -> None:
-    curvature = max(float(curvature), float(loss.hyperbolic_eps))
-    alpha = torch.log(
-        torch.expm1(torch.tensor(curvature, device=device, dtype=loss.curvature_alpha.dtype))
-    )
-    with torch.no_grad():
-        loss.curvature_alpha.copy_(alpha)
-
-
-def maybe_load_loss_state(loss: CiipLoss, checkpoint: Dict[str, torch.Tensor]) -> None:
-    if "loss_state_dict" in checkpoint:
-        loss.load_state_dict(checkpoint["loss_state_dict"], strict=False)
-        return
-    if "state_dict" in checkpoint:
-        prefix = "loss."
-        filtered = {k[len(prefix):]: v for k, v in checkpoint["state_dict"].items() if k.startswith(prefix)}
-        if filtered:
-            state = loss.state_dict()
-            state.update(filtered)
-            loss.load_state_dict(state, strict=False)
-
-
 def sample_indices(dataset: SSL4EODataset, num_locations: int, seed: int) -> Tuple[List[int], List[Dict[str, object]]]:
     rng = np.random.default_rng(seed)
     num_locations = min(num_locations, dataset.num_locations)
@@ -200,22 +169,54 @@ def _aperture_from_inner(inner_pos: torch.Tensor, eps: float, aperture_logk: Opt
     return torch.asin(inv_cosh)
 
 
+def _extract_curvature_from_state(
+    model: LorentzCIIP, device: torch.device, dtype: torch.dtype
+) -> torch.Tensor:
+    state = model.state_dict()
+    try:
+        curv_param = state["curv"]
+    except KeyError as exc:
+        raise KeyError("LorentzCIIP state dict does not contain curvature parameter 'curv'") from exc
+    curv_tensor = curv_param.to(device=device, dtype=dtype)
+    return torch.exp(curv_tensor)
+
+
 def compute_hyperbolic_context(
-    loss: CiipLoss,
+    model: LorentzCIIP,
     s1_feats: torch.Tensor,
     s2_feats: torch.Tensor,
     *,
     aperture_logk: Optional[float],
 ) -> Dict[str, torch.Tensor]:
     device = s1_feats.device
-    curvature = loss._get_curvature(dtype=s1_feats.dtype, device=device)
-    s1_points = loss._exp_map_lorentz(s1_feats, curvature)
-    s2_points = loss._exp_map_lorentz(s2_feats, curvature)
-    s1_dirs, s1_distances, s1_inner = loss._hyperbolic_directions(s1_points, curvature)
-    s2_dirs, s2_distances, s2_inner = loss._hyperbolic_directions(s2_points, curvature)
-    angles = loss._angle_matrix_from_dirs(s1_dirs, s2_dirs)
+    if not isinstance(model, LorentzCIIP):
+        raise TypeError("compute_hyperbolic_context requires a LorentzCIIP model instance")
+
+    curvature = _extract_curvature_from_state(model, device=device, dtype=s1_feats.dtype)
+    s1_points = s1_feats.to(device=device, dtype=s1_feats.dtype)
+    s2_points = s2_feats.to(device=device, dtype=s2_feats.dtype)
+
+    # `log_map0` returns tangent-space (Euclidean) vectors anchored at the origin of
+    # the model. We keep their magnitudes for radial diagnostics and normalise only
+    # for angular plots below.
+    s1_tangent = L.log_map0(s1_points, curvature)
+    s2_tangent = L.log_map0(s2_points, curvature)
+    s1_distances = torch.norm(s1_tangent, dim=-1)
+    s2_distances = torch.norm(s2_tangent, dim=-1)
+
+    def _unit_direction(tangent: torch.Tensor, distances: torch.Tensor) -> torch.Tensor:
+        safe_norm = torch.clamp(distances, min=1e-9).unsqueeze(-1)
+        return tangent / safe_norm
+
+    s1_dirs = _unit_direction(s1_tangent, s1_distances)
+    s2_dirs = _unit_direction(s2_tangent, s2_distances)
+
+    s1_inner = torch.sqrt(1 + curvature * torch.sum(s1_points**2, dim=-1))
+    s2_inner = torch.sqrt(1 + curvature * torch.sum(s2_points**2, dim=-1))
+
+    angles = L.pairwise_oxy_angle(s1_points, s2_points, curvature)
     positive_angles = torch.diagonal(angles)
-    eps = float(loss.hyperbolic_eps)
+    eps = float(getattr(model, "hyperbolic_eps", 1e-5))
     aperture_s1 = _aperture_from_inner(s1_inner, eps, aperture_logk)
     aperture_s2 = _aperture_from_inner(s2_inner, eps, aperture_logk)
     return {
@@ -373,21 +374,12 @@ def main() -> None:
         use_orthogonal_mapping=False,
     )
 
-    loss = build_loss(args, device)
-    if args.loss_checkpoint:
-        extra_checkpoint = load_checkpoint(args.loss_checkpoint, device)
-        maybe_load_loss_state(loss, extra_checkpoint)
-    else:
-        maybe_load_loss_state(loss, checkpoint)
-
     hyp_params = load_hyperbolic_params(checkpoint, args.hyperbolic_eps)
-    loss.hyperbolic_eps = float(hyp_params["eps"])
-    curvature = args.curvature if args.curvature is not None else hyp_params["c"]
-    override_curvature(loss, curvature, device)
-
-    if hyp_params["hyp_scale_raw"] is not None:
+    setattr(model, "hyperbolic_eps", float(hyp_params["eps"]))
+    if args.curvature is not None and isinstance(model, LorentzCIIP):
+        new_curv = max(float(args.curvature), 1e-8)
         with torch.no_grad():
-            loss.hyp_scale.copy_(loss.hyp_scale.new_tensor(hyp_params["hyp_scale_raw"]))
+            model.curv.copy_(model.curv.new_tensor(math.log(new_curv)))
 
     s1_feats, s2_feats = stack_features(model, dataset, indices, device)
     s1_feats_device = s1_feats.to(device)
@@ -396,7 +388,7 @@ def main() -> None:
 
     with torch.no_grad():
         context = compute_hyperbolic_context(
-            loss,
+            model,
             s1_feats_device,
             s2_feats_device,
             aperture_logk=aperture_logk,
@@ -409,9 +401,10 @@ def main() -> None:
     s1_distances = context["s1_distances"].cpu().numpy()
     s2_distances = context["s2_distances"].cpu().numpy()
 
+    curvature_tensor = context["curvature"].to(device)
     with torch.no_grad():
-        s1_prelift = loss._maybe_normalize(s1_feats_device)
-        s2_prelift = loss._maybe_normalize(s2_feats_device)
+        s1_prelift = L.log_map0(s1_feats_device, curvature_tensor)
+        s2_prelift = L.log_map0(s2_feats_device, curvature_tensor)
 
     s1_norms = s1_prelift.norm(dim=-1).cpu().numpy()
     s2_norms = s2_prelift.norm(dim=-1).cpu().numpy()
@@ -439,15 +432,14 @@ def main() -> None:
         )
     write_metadata_csv(records, output_dir / "hyperbolic_summary.csv")
 
-    used_curvature = loss._get_curvature(dtype=s1_feats.dtype, device=device).item()
-    hyp_scale = float(F.softplus(loss.hyp_scale.detach()).item())
+    used_curvature = float(curvature_tensor.item())
     aperture_scale = math.exp(aperture_logk) if aperture_logk is not None else float("nan")
     print(f"Saved plots to {output_dir.resolve()}")
     print(f"Effective curvature: {used_curvature:.6f}")
+    eps_value = getattr(model, "hyperbolic_eps", 1e-5)
     print(
-        "Hyperbolic params — eps: {eps:.2e}, hyp_scale: {scale:.6f}, aperture_scale: {ap:.6f} (logK={logk:.3f})".format(
-            eps=loss.hyperbolic_eps,
-            scale=hyp_scale,
+        "Hyperbolic params — eps: {eps:.2e}, aperture_scale: {ap:.6f} (logK={logk:.3f})".format(
+            eps=eps_value,
             ap=aperture_scale,
             logk=aperture_logk if aperture_logk is not None else float("nan"),
         )

@@ -450,13 +450,13 @@ def _run_hyperbolic_visualisations(
     post_features: torch.Tensor,
     *,
     output_dir: Path,
-    loss,
+    model: LorentzCIIP,
     aperture_logk: Optional[float],
     seed: int,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     context = compute_hyperbolic_context(
-        loss,
+        model,
         post_features,
         post_features,
         aperture_logk=aperture_logk,
@@ -514,15 +514,13 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
     )
 
     if is_lorentz:
-        from ciip.loss import CiipLoss  # Imported lazily to avoid extra dependency for CIIP
-
-        loss = CiipLoss(hyperbolic=True)
-        loss = loss.to(device)
+        if not isinstance(model, LorentzCIIP):
+            raise TypeError("Expected LorentzCIIP model when is_lorentz is True")
         post_feats = torch.from_numpy(eurosat_embeddings["train"].projected).to(device=device, dtype=torch.float32)
         _run_hyperbolic_visualisations(
             post_feats,
             output_dir=output_dir / "hyperbolic",
-            loss=loss,
+            model=model,
             aperture_logk=None,
             seed=config.random_seed,
         )
