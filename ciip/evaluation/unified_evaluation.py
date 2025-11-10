@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import contextlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -26,11 +27,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn.functional as F
+import torch.utils.data
 from sklearn.decomposition import PCA
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, f1_score
 from torch import nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
 from torchgeo.datasets import EuroSAT
@@ -52,9 +54,12 @@ from ciip.evaluation.export_neuco_embeddings import (  # type: ignore
     create_submission_from_dict,
 )
 from visualizations.ssl4eo.embedding_collapse_diagnostics import (  # type: ignore
+    DEFAULT_S2_BANDS,
     compute_linear_cka,
     compute_projection,
     compute_singular_values,
+    ensure_hydra_original_cwd,
+    extract_embeddings_for_dataset,
     plot_projection,
     preprocess_projection_data,
 )
@@ -65,6 +70,7 @@ from visualizations.ssl4eo.hyperbolic_visualization import (  # type: ignore
     plot_cone_polar,
     plot_radial_histogram,
 )
+from ciip.open_clip_train.data import SSL4EODataset
 
 @dataclass
 class ModelEvalConfig:
@@ -78,6 +84,12 @@ class ModelEvalConfig:
     tsne_samples: int = 1500
     pca_samples: int = 5000
     random_seed: int = 0
+    ssl4eo_root: Optional[Path] = None
+    ssl4eo_subset_size: int = 2048
+    ssl4eo_subset_seed: int = 0
+    ssl4eo_s2_tier: str = "s2c"
+    ssl4eo_s2_bands: Sequence[str] = DEFAULT_S2_BANDS
+    ssl4eo_image_dimension: int = 264
 
 
 @dataclass
@@ -297,6 +309,63 @@ def _build_neuco_loader(config: ModelEvalConfig) -> DataLoader:
     return loader
 
 
+def _build_ssl4eo_dataset(config: ModelEvalConfig) -> torch.utils.data.Dataset:
+    if config.ssl4eo_root is None:
+        raise RuntimeError("SSL4EO dataset root must be provided for diagnostics")
+
+    ensure_hydra_original_cwd()
+    dataset = SSL4EODataset(
+        root=str(config.ssl4eo_root.expanduser()),
+        s2_tier=str(config.ssl4eo_s2_tier),
+        s2_bands=list(config.ssl4eo_s2_bands),
+        transforms=None,
+        target_image_dimension=(config.ssl4eo_image_dimension, config.ssl4eo_image_dimension),
+    )
+
+    total = len(dataset)
+    subset_size = config.ssl4eo_subset_size
+    if subset_size > 0 and subset_size < total:
+        rng = np.random.default_rng(config.ssl4eo_subset_seed)
+        indices = sorted(rng.choice(total, size=subset_size, replace=False).tolist())
+        dataset = Subset(dataset, indices)
+    return dataset
+
+
+def _extract_ssl4eo_embeddings(
+    config: ModelEvalConfig,
+    model: nn.Module,
+    *,
+    device: torch.device,
+) -> EmbeddingBundle:
+    dataset = _build_ssl4eo_dataset(config)
+
+    autocast = (
+        (lambda: torch.cuda.amp.autocast(device_type="cuda"))
+        if device.type == "cuda"
+        else contextlib.nullcontext
+    )
+
+    input_dtype = getattr(model, "dtype_s2", torch.float32)
+    if device.type != "cuda" and input_dtype in {torch.float16, torch.bfloat16}:
+        input_dtype = torch.float32
+
+    s1_embeddings, s2_embeddings, sample_ids = extract_embeddings_for_dataset(
+        model,
+        dataset,
+        input_dtype=input_dtype,
+        device=device,
+        autocast=autocast,
+    )
+
+    bundle = EmbeddingBundle(
+        backbone=s2_embeddings.raw.cpu().numpy(),
+        projected=s2_embeddings.normalized.cpu().numpy(),
+        labels=None,
+        ids=sample_ids if sample_ids else None,
+    )
+    return bundle
+
+
 def _run_linear_probe(
     config: ModelEvalConfig,
     embeddings: Dict[str, EmbeddingBundle],
@@ -507,9 +576,15 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
     # )
     # _export_neuco(neuco_bundle, output_dir / "neuco_export", label="s2l1c")
 
+    ssl4eo_bundle = _extract_ssl4eo_embeddings(
+        config,
+        model,
+        device=device,
+    )
+
     _run_embedding_diagnostics(
         config,
-        eurosat_embeddings["train"],
+        ssl4eo_bundle,
         output_dir=output_dir / "embedding_diagnostics",
     )
 
@@ -518,7 +593,7 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
 
         loss = CiipLoss(hyperbolic=True)
         loss = loss.to(device)
-        post_feats = torch.from_numpy(eurosat_embeddings["train"].projected).to(device=device, dtype=torch.float32)
+        post_feats = torch.from_numpy(ssl4eo_bundle.projected).to(device=device, dtype=torch.float32)
         _run_hyperbolic_visualisations(
             post_feats,
             output_dir=output_dir / "hyperbolic",
@@ -545,7 +620,8 @@ if __name__ == "__main__":
         checkpoint=Path(f"{checkpoint_root}/epoch_10.pt"),
         eurosat_root=Path("/local/ms-data/EuroSAT/"),
         neuco_root=Path("/local/ms-data/SSL4EO-S12-downstream/data"),
-        output_dir=Path("/home/juro4948/ciip/diagnostics/curv_init_1")
+        output_dir=Path("/home/juro4948/ciip/diagnostics/curv_init_1"),
+        ssl4eo_root=Path("/local/ms-data/SSL4EO/"),
     )
     run_full_evaluation(cfg)
 
