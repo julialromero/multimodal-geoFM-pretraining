@@ -314,8 +314,21 @@ def main(args):
         include = lambda n, p: not exclude(n, p)
 
         named_parameters = list(model.named_parameters())
-        gain_or_bias_params = [p for n, p in named_parameters if exclude(n, p) and p.requires_grad]
-        rest_params = [p for n, p in named_parameters if include(n, p) and p.requires_grad]
+        gain_or_bias_params = []
+        rest_params = []
+        curvature_params = []
+
+        for name, param in named_parameters:
+            if not param.requires_grad:
+                continue
+            if name.endswith("curv"):
+                curvature_params.append(param)
+                continue
+            if exclude(name, param):
+                gain_or_bias_params.append(param)
+            else:
+                rest_params.append(param)
+
         loss_params = [p for p in loss.parameters() if p.requires_grad]
 
         param_groups = [
@@ -324,6 +337,32 @@ def main(args):
         ]
         if loss_params:
             param_groups.append({"params": loss_params, "weight_decay": 0.})
+
+        if curvature_params:
+            curvature_init = None
+            loss_cfg = getattr(args, "loss", None)
+            if loss_cfg is not None:
+                curvature_init = getattr(loss_cfg, "curvature_init", None)
+                if curvature_init is None:
+                    curvature_init = getattr(loss_cfg, "hyperbolic_curvature_init", None)
+            if curvature_init is None:
+                curvature_init = getattr(args, "hyperbolic_curvature_init", None)
+            if curvature_init is None:
+                curvature_init = 1.0
+            curvature_init = max(float(curvature_init), 1e-6)
+            curvature_lr = getattr(args, "curvature_lr", None)
+            if curvature_lr is None and loss_cfg is not None:
+                curvature_lr = getattr(loss_cfg, "curvature_lr", None)
+            if curvature_lr is None:
+                # Scale the curvature learning rate inversely with the initialization
+                # to encourage faster curvature updates while keeping stability.
+                curvature_lr = args.lr * (1.0 / curvature_init)
+            curvature_lr = max(float(curvature_lr), 0.0)
+            param_groups.append({
+                "params": curvature_params,
+                "weight_decay": 0.,
+                "lr": curvature_lr,
+            })
 
         optimizer = optim.AdamW(
             param_groups,
