@@ -22,8 +22,9 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 
-import unified_evaluation
-from utils import *
+from ciip.eval_utils import CustomTransform
+from ciip.evaluation.model_utils import build_model_from_checkpoint
+from ciip.evaluation.utils import plot_primary_over_epochs
 
 
 MEAN = {
@@ -690,8 +691,7 @@ def load_model(model_type, weights_path):
             # print first layer shape
             print(f"First layer shape: {model.conv1.weight.shape}")
     elif model_type == "ciip":
-        model, is_lorentz = unified_evaluation._build_model(weights_path)
-        # model = load_ciip_model_checkpoint(weights_path)
+        model, _ = build_model_from_checkpoint(Path(weights_path))
     else:
         raise ValueError(f"Unknown model type: {model_type}")
     return model

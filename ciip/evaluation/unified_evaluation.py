@@ -7,11 +7,10 @@ utilities that already exist across the codebase (``linearprobe_comparison``,
 ``export_neuco_embeddings`` and ``visualizations/ssl4eo``) instead of invoking
 their CLI entrypoints so that everything can be orchestrated from Python.
 
-The function expects a ``ModelEvalConfig`` describing the checkpoint, dataset
-locations and output directory.  The checkpoint is inspected to decide whether
-the CIIP or LorentzCIIP architecture should be instantiated and to infer the
-projection dimensionality so no manual knobs are required when switching
-between the two model families.
+The function expects a ``ModelEvalConfig`` describing the dataset locations,
+output directory and model source.  By default it consumes CIIP checkpoints,
+but users can also request TorchGeo ResNet50 encoders initialised with the
+Sentinel-2 DINO or MoCo weights.
 """
 
 from __future__ import annotations
@@ -26,7 +25,6 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import torch.nn.functional as F
 import torch.utils.data
 from sklearn.decomposition import PCA
 from sklearn.linear_model import LogisticRegression
@@ -39,7 +37,8 @@ from torchgeo.datasets import EuroSAT
 from torchvision import transforms
 
 from ciip.eval_utils import CustomTransform
-from ciip.model_ciip import CIIP, LorentzCIIP
+from ciip.evaluation.model_utils import EvaluationAdapter, build_evaluation_adapter
+from ciip.model_ciip import LorentzCIIP
 
 
 ## EUROSAT STANDARDIZATION VALUES
@@ -107,10 +106,14 @@ from ciip.open_clip_train.data import SSL4EODataset
 
 @dataclass
 class ModelEvalConfig:
-    checkpoint: Path
     eurosat_root: Path
     neuco_root: Path
     output_dir: Path
+    checkpoint: Optional[Path] = None
+    model_type: str = "ciip_checkpoint"
+    model_weights: Optional[str] = None
+    model_in_channels: int = 13
+    enable_ssl4eo: bool = True
     neuco_modalities: Sequence[str] = ("s2l1c",)
     neuco_resize: Optional[Tuple[int, int]] = None
     neuco_seasons: int = 1
@@ -127,109 +130,32 @@ class ModelEvalConfig:
 
 @dataclass
 class EmbeddingBundle:
-    post_head_raw: np.ndarray
-    post_head_proj: np.ndarray
+    backbone: Optional[np.ndarray]
+    posthead: np.ndarray
+    projected: np.ndarray
     labels: Optional[np.ndarray] = None
     ids: Optional[List[str]] = None
-
-
-def _clean_state_dict(raw_state: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-    return {
-        key.replace("module.", ""): value
-        for key, value in raw_state.items()
-    }
-
-
-def _infer_dims(state_dict: Dict[str, torch.Tensor]) -> Tuple[int, int]:
-    if "encoder_s2.proj.weight" in state_dict:
-        weight = state_dict["encoder_s2.proj.weight"]
-        return int(weight.shape[0]), int(weight.shape[1])
-    if "encoder_s2.fc.weight" in state_dict:
-        weight = state_dict["encoder_s2.fc.weight"]
-        return int(weight.shape[0]), int(weight.shape[0])
-    raise RuntimeError("Unable to infer embedding dimensions from checkpoint")
-
-
-def _build_model(checkpoint: Path) -> Tuple[nn.Module, bool]:
-    ckpt = torch.load(checkpoint, map_location="cpu")
-    if "state_dict" in ckpt:
-        state_dict = ckpt["state_dict"]
-    else:
-        state_dict = ckpt
-    cleaned = _clean_state_dict(state_dict)
-    embed_dim, pre_dim = _infer_dims(cleaned)
-    is_lorentz = any(key.startswith("curv") or "lorentz" in key for key in cleaned)
-
-    kwargs = dict(
-        embed_dim=embed_dim,
-        pre_projection_dim=pre_dim,
-        s1_resolution=224,
-        s1_layers=(3, 4, 6, 3),
-        s1_width=32,
-        s1_patch_size=16,
-        s1_bands=2,
-        s2_resolution=224,
-        s2_layers=(3, 4, 6, 3),
-        s2_width=32,
-        s2_patch_size=16,
-        s2_bands=13,
-        framework="resnet50",
-    )
-
-    if is_lorentz:
-        model: nn.Module = LorentzCIIP(**kwargs)
-    else:
-        model = CIIP(**kwargs)
-
-    missing, unexpected = model.load_state_dict(cleaned, strict=True)
-    # allowed_missing = {
-    #     "encoder_s1.fc.weight",
-    #     "encoder_s1.fc.bias",
-    #     "encoder_s2.fc.weight",
-    #     "encoder_s2.fc.bias",
-    # }
-    # remaining_missing = {key for key in missing if key not in allowed_missing}
-    # if remaining_missing or unexpected:
-    #     raise RuntimeError(
-    #         f"Checkpoint incompatible with model (missing={remaining_missing}, unexpected={unexpected})"
-    #     )
-    if missing or unexpected:
-        logging.warning(
-            f"Checkpoint loaded with missing={missing}, unexpected={unexpected}"
-        )
-        raise RuntimeError(
-            f"Checkpoint incompatible with model (missing={missing}, unexpected={unexpected})"
-        )
-    model.eval()
-    return model, is_lorentz
 
 
 def _to_numpy(tensor: torch.Tensor) -> np.ndarray:
     return tensor.detach().cpu().to(torch.float32).numpy()
 
 
-def _flatten_features(tensor: torch.Tensor) -> torch.Tensor:
-    if tensor.ndim > 2:
-        return tensor.flatten(start_dim=1)
-    return tensor
-
 ### FOR EUROSAT and NEUCOBENCH
 def _extract_embeddings(
-    model: nn.Module,
+    adapter: EvaluationAdapter,
     dataloader: DataLoader,
     *,
     device: torch.device,
-    is_lorentz: bool,
     require_ids: bool = False,
 ) -> EmbeddingBundle:
     backbone_vectors: List[np.ndarray] = []
+    posthead_vectors: List[np.ndarray] = []
     projected_vectors: List[np.ndarray] = []
     labels: List[int] = []
     ids: List[str] = []
 
     
-    model.eval()
-
     for batch in tqdm(dataloader, desc="Extracting embeddings"):
         if isinstance(batch, dict):
             image = batch.get("image") # or batch.get("data")
@@ -246,33 +172,34 @@ def _extract_embeddings(
         if image.ndim == 5:  # (B, T, C, H, W)
             image = image.mean(dim=1)
 
-        image = image.to(device=device, dtype=torch.float32, non_blocking=True)
+        input_dtype = adapter.dtype_s2
+        if device.type != "cuda" and input_dtype in {torch.float16, torch.bfloat16}:
+            input_dtype = torch.float32
+        image = image.to(device=device, dtype=input_dtype, non_blocking=True)
 
         with torch.no_grad():
-            pre = model.encoder_s2(image.type(model.dtype_s2))  
-            pre = _flatten_features(pre)
+            backbone = adapter.compute_backbone(image)
+            post = adapter.compute_posthead(image)
+            projected = adapter.compute_projected(image)
 
-            if is_lorentz:
-                post = model.encode_s2(image, lorentz=False)
-            else:
-                post = model.encode_s2(image, normalize=False)
-                # post = F.normalize(post, dim=-1)
-            post = _flatten_features(post)
-
-        # @codex: this projected is post-head features but unnormalized. Naming convention needs to be updated across scripts:
-        # backbone_X: pre-head features (not normalized)
-        # postproj_X: post-head features (not normalized)
-        # projected_X: post-head features (normalized -- L2 or hyperbolic)
-        backbone_vectors.append(_to_numpy(pre))
-        projected_vectors.append(_to_numpy(post))
+        backbone_vectors.append(_to_numpy(backbone))
+        posthead_vectors.append(_to_numpy(post))
+        projected_vectors.append(_to_numpy(projected))
 
         if batch_labels is not None:
             labels.extend(batch_labels.cpu().tolist())
         if require_ids and batch_ids is not None:
             ids.extend([str(item) for item in batch_ids])
 
+    backbone_array: Optional[np.ndarray]
+    if backbone_vectors:
+        backbone_array = np.concatenate(backbone_vectors, axis=0)
+    else:
+        backbone_array = None
+
     bundle = EmbeddingBundle(
-        backbone=np.concatenate(backbone_vectors, axis=0),
+        backbone=backbone_array,
+        posthead=np.concatenate(posthead_vectors, axis=0),
         projected=np.concatenate(projected_vectors, axis=0),
         labels=np.asarray(labels, dtype=np.int64) if labels else None,
         ids=ids if ids else None,
@@ -460,62 +387,70 @@ def _run_linear_probe(
     plots_dir = output_dir / "linear_probe"
     plots_dir.mkdir(parents=True, exist_ok=True)
 
-    for key, pretty in (("backbone", "backbone"), ("projected", "projected"),
-                         ('backbone', 'batch-norm'), ('projected', 'batch-norm')):
-        metrics = _evaluate(key, batch_norm=(pretty == 'batch-norm'))
-        with (plots_dir / f"{label}_{key}_metrics.json").open("w") as handle:
+    probe_specs = (
+        ("backbone", "backbone", False),
+        ("posthead", "posthead", False),
+        ("projected", "projected", False),
+        ("backbone", "backbone_batchnorm", True),
+        ("posthead", "posthead_batchnorm", True),
+        ("projected", "projected_batchnorm", True),
+    )
+
+    for feature_key, suffix, use_batch_norm in probe_specs:
+        metrics = _evaluate(feature_key, batch_norm=use_batch_norm)
+        with (plots_dir / f"{label}_{suffix}_metrics.json").open("w") as handle:
             json.dump(metrics, handle, indent=2)
 
-        # Create single combined plot
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    marker_map = {"backbone": "o", "posthead": "^", "projected": "s"}
 
-    # Plot accuracy on left subplot
-    for key, pretty in (("backbone", "backbone"), ("projected", "projected"),
-                        ('backbone', 'batch-norm'), ('projected', 'batch-norm')):
-        metrics_file = plots_dir / f"{label}_{key}_metrics.json"
-        with metrics_file.open("r") as handle:
+    for feature_key, suffix, use_batch_norm in probe_specs:
+        metrics_file = plots_dir / f"{label}_{suffix}_metrics.json"
+        with metrics_file.open("r", encoding="utf-8") as handle:
             metrics = json.load(handle)
-        
-        xs = sorted([float(x) for x in metrics.keys()])
+
+        if not metrics:
+            continue
+
+        xs = sorted(float(x) for x in metrics.keys())
         acc = [metrics[str(x)]["test_accuracy"] for x in xs]
-        
-        linestyle = '--' if 'batch-norm' in pretty else '-'
-        marker = 's' if 'projected' in key else 'o'
-        ax1.plot(xs, acc, marker=marker, linestyle=linestyle, label=f"{key} ({pretty})")
+        linestyle = "--" if use_batch_norm else "-"
+        marker = marker_map.get(feature_key, "o")
+        label_suffix = "batch-norm" if use_batch_norm else "raw"
+        ax1.plot(xs, acc, marker=marker, linestyle=linestyle, label=f"{feature_key} ({label_suffix})")
 
-    # Plot F1 on right subplot
-    for key, pretty in (("backbone", "backbone"), ("projected", "projected"),
-                        ('backbone', 'batch-norm'), ('projected', 'batch-norm')):
-        metrics_file = plots_dir / f"{label}_{key}_metrics.json"
-        with metrics_file.open("r") as handle:
+    for feature_key, suffix, use_batch_norm in probe_specs:
+        metrics_file = plots_dir / f"{label}_{suffix}_metrics.json"
+        with metrics_file.open("r", encoding="utf-8") as handle:
             metrics = json.load(handle)
-        
-        xs = sorted([float(x) for x in metrics.keys()])
+
+        if not metrics:
+            continue
+
+        xs = sorted(float(x) for x in metrics.keys())
         f1_vals = [metrics[str(x)]["test_f1"] for x in xs]
-        
-        linestyle = '--' if 'batch-norm' in pretty else '-'
-        marker = 's' if 'projected' in key else 'o'
-        ax2.plot(xs, f1_vals, marker=marker, linestyle=linestyle, label=f"{key} ({pretty})")
+        linestyle = "--" if use_batch_norm else "-"
+        marker = marker_map.get(feature_key, "o")
+        label_suffix = "batch-norm" if use_batch_norm else "raw"
+        ax2.plot(xs, f1_vals, marker=marker, linestyle=linestyle, label=f"{feature_key} ({label_suffix})")
 
-        # Configure subplots
-        ax1.set_xlabel("Training fraction")
-        ax1.set_ylabel("Test Accuracy")
-        ax1.set_title(f"Test Accuracy ({label})")
-        ax1.grid(alpha=0.3)
-        ax1.legend()
+    ax1.set_xlabel("Training fraction")
+    ax1.set_ylabel("Test Accuracy")
+    ax1.set_title(f"Test Accuracy ({label})")
+    ax1.grid(alpha=0.3)
+    ax1.legend()
 
-        ax2.set_xlabel("Training fraction") 
-        ax2.set_ylabel("Test F1")
-        ax2.set_title(f"Test F1 ({label})")
-        ax2.grid(alpha=0.3)
-        ax2.legend()
+    ax2.set_xlabel("Training fraction")
+    ax2.set_ylabel("Test F1")
+    ax2.set_title(f"Test F1 ({label})")
+    ax2.grid(alpha=0.3)
+    ax2.legend()
 
-        fig.tight_layout()
-        fig.savefig(plots_dir / f"{label}_combined_curves.png", dpi=200)
-        plt.close(fig)
+    fig.tight_layout()
+    fig.savefig(plots_dir / f"{label}_combined_curves.png", dpi=200)
+    plt.close(fig)
 
-        # print the save path
-        logging.info(f"Linear probe results saved to {plots_dir}")
+    logging.info("Linear probe results saved to %s", plots_dir)
 
     #     xs = sorted(metrics)
     #     acc = [metrics[x]["test_accuracy"] for x in xs]
@@ -552,7 +487,9 @@ def _export_neuco(
         df.to_csv(output_dir / f"neuco_{label}_{suffix}.csv", index=False)
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    _write(bundle.backbone, "backbone")
+    if bundle.backbone is not None:
+        _write(bundle.backbone, "backbone")
+    _write(bundle.posthead, "posthead")
     _write(bundle.projected, "projected")
 
 
@@ -565,68 +502,111 @@ def _run_embedding_diagnostics(
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    ## @codex Update below code to compute all for S1 and S2 embeddings
+    modality_tensors = {
+        "s1": {
+            "posthead": s1_bundle.raw.detach(),
+            "projected": s1_bundle.projected.detach(),
+            "layers": s1_bundle.layer_activations,
+        },
+        "s2": {
+            "posthead": s2_bundle.raw.detach(),
+            "projected": s2_bundle.projected.detach(),
+            "layers": s2_bundle.layer_activations,
+        },
+    }
 
-    torch_raw = torch.from_numpy(s1_bundle.raw) # raw is the post-head unnormalized features
-    torch_projected = torch.from_numpy(s1_bundle.projected) # projected is the post-head L2/hyperbolic features
-    # there are no 'backbone features' in SSL4EO extraction, only post-head features, please update the naming convention here
+    s1_layers, s1_within = compute_within_encoder_cka(modality_tensors["s1"]["layers"])
+    s2_layers, s2_within = compute_within_encoder_cka(modality_tensors["s2"]["layers"])
+    cross_s1_layers, cross_s2_layers, cross_matrix = compute_cross_encoder_cka(
+        modality_tensors["s1"]["layers"], modality_tensors["s2"]["layers"]
+    )
+    projected_cka = compute_linear_cka(
+        modality_tensors["s1"]["projected"], modality_tensors["s2"]["projected"]
+    )
 
-    
+    cka_payload = {
+        "s1": {
+            "layers": s1_layers,
+            "matrix": s1_within.tolist() if s1_within is not None else None,
+        },
+        "s2": {
+            "layers": s2_layers,
+            "matrix": s2_within.tolist() if s2_within is not None else None,
+        },
+        "cross": {
+            "s1_layers": cross_s1_layers,
+            "s2_layers": cross_s2_layers,
+            "matrix": cross_matrix.tolist() if cross_matrix is not None else None,
+        },
+        "projected_similarity": projected_cka,
+    }
 
-    # @codex cka should be computed for: within-S1 encoder, within-S2 encoder, and cross S1-S2 projected features
-    # access the layer features like below
-    layer_activations_s1 = s1_bundle.layer_activations  # Dict[str, np.ndarray]
-    layer_activations_s2 = s2_bundle.layer_activations  # Dict[str
+    with (output_dir / "cka.json").open("w", encoding="utf-8") as handle:
+        json.dump(cka_payload, handle, indent=2)
 
-    ## update below code
-    cka_value = compute_linear_cka(torch_backbone, torch_projected)
-    with (output_dir / "cka.json").open("w") as handle:
-        json.dump({"linear_cka": cka_value}, handle, indent=2)
+    spectra = [
+        ("s1", "posthead", compute_singular_values(modality_tensors["s1"]["posthead"])),
+        ("s1", "projected", compute_singular_values(modality_tensors["s1"]["projected"])),
+        ("s2", "posthead", compute_singular_values(modality_tensors["s2"]["posthead"])),
+        ("s2", "projected", compute_singular_values(modality_tensors["s2"]["projected"])),
+    ]
 
-    singular_backbone = compute_singular_values(torch_backbone)
-    singular_projected = compute_singular_values(torch_projected)
-
-    for spectrum, name in ((singular_backbone, "backbone"), (singular_projected, "projected")):
+    for modality, feature_name, spectrum in spectra:
+        if spectrum.size == 0:
+            continue
         fig, ax = plt.subplots(figsize=(6, 4))
         ax.plot(np.arange(len(spectrum)), spectrum, marker="o")
         ax.set_xlabel("Component")
         ax.set_ylabel("Singular value")
-        ax.set_title(f"Singular values ({name})")
+        ax.set_title(f"Singular values ({modality.upper()} {feature_name})")
         ax.grid(alpha=0.3)
         fig.tight_layout()
-        fig.savefig(output_dir / f"singular_values_{name}.png", dpi=200)
+        fig.savefig(output_dir / f"singular_values_{modality}_{feature_name}.png", dpi=200)
         plt.close(fig)
 
     rng = np.random.default_rng(config.random_seed)
 
-    def _sample(features: np.ndarray, labels: Optional[np.ndarray], maximum: int) -> Tuple[np.ndarray, np.ndarray]:
-        if labels is None:
-            labels = np.zeros(len(features), dtype=int)
-        maximum = min(maximum, len(features))
+    def _stack_features(feature_name: str) -> Tuple[np.ndarray, np.ndarray]:
+        s1_np = modality_tensors["s1"][feature_name].cpu().numpy()
+        s2_np = modality_tensors["s2"][feature_name].cpu().numpy()
+        labels = np.concatenate((np.repeat("S1", len(s1_np)), np.repeat("S2", len(s2_np))))
+        features = np.concatenate((s1_np, s2_np), axis=0)
+        return features, labels
+
+    def _sample(features: np.ndarray, labels: np.ndarray, maximum: int) -> Tuple[np.ndarray, np.ndarray]:
+        if maximum <= 0 or maximum >= len(features):
+            return features, labels
         indices = rng.choice(len(features), size=maximum, replace=False)
         return features[indices], labels[indices]
-    
 
-    # @codex plot the below 4 modes. Ensure that S1 and S2 are processed concurrently and combined for joint PCA/Tsne. When zscore is used, the S1 and S2 should be combnied and zscore is applied to the set of all embeddings. 
-    # S1 and S2 should be plotted on the same axes for each mode.
-    for features, label, mode in (
-        (bundle.backbone, "backbone", "none"),
-        (bundle.projected, "projected", "none"),
-        (bundle.backbone, "backbone", "zscore"),
-        (bundle.projected, "projected", "zscore"),
+    for feature_name in ("posthead", "projected"):
+        combined, modality_labels = _stack_features(feature_name)
+        if combined.size == 0:
+            continue
+        for mode in ("none", "zscore"):
+            subset, subset_labels = _sample(combined, modality_labels, config.tsne_samples)
+            processed = preprocess_projection_data(subset, mode=mode, random_state=config.random_seed)
+            coords = compute_projection(processed, method="tsne", random_state=config.random_seed)
+            if coords is not None:
+                suffix = "zscore" if mode == "zscore" else "raw"
+                plot_projection(
+                    coords,
+                    subset_labels,
+                    output_dir / f"tsne_{feature_name}_{suffix}.png",
+                    title=f"t-SNE ({feature_name}, {suffix})",
+                )
 
-    ):
-        subset, subset_labels = _sample(features, bundle.labels, config.tsne_samples)
-        processed = preprocess_projection_data(subset, mode=mode, random_state=config.random_seed)
-        coords = compute_projection(processed, method="tsne", random_state=config.random_seed)
-        if coords is not None:
-            plot_projection(coords, subset_labels, output_dir / f"tsne_{label}.png", title=f"t-SNE ({label})")
-
-        subset, subset_labels = _sample(features, bundle.labels, config.pca_samples)
-        processed = preprocess_projection_data(subset, mode=mode, random_state=config.random_seed)
-        if processed.shape[0] >= 2:
-            pca_coords = PCA(n_components=2, random_state=config.random_seed).fit_transform(processed)
-            plot_projection(pca_coords, subset_labels, output_dir / f"pca_{label}.png", title=f"PCA ({label})")
+            subset, subset_labels = _sample(combined, modality_labels, config.pca_samples)
+            processed = preprocess_projection_data(subset, mode=mode, random_state=config.random_seed)
+            if processed.shape[0] >= 2:
+                suffix = "zscore" if mode == "zscore" else "raw"
+                pca_coords = PCA(n_components=2, random_state=config.random_seed).fit_transform(processed)
+                plot_projection(
+                    pca_coords,
+                    subset_labels,
+                    output_dir / f"pca_{feature_name}_{suffix}.png",
+                    title=f"PCA ({feature_name}, {suffix})",
+                )
 
 
 def _run_hyperbolic_visualisations(
@@ -662,9 +642,17 @@ def _run_hyperbolic_visualisations(
 def run_full_evaluation(config: ModelEvalConfig) -> None:
     logging.basicConfig(level=logging.INFO)
 
-    model, is_lorentz = _build_model(config.checkpoint)
+    adapter = build_evaluation_adapter(
+        model_type=config.model_type,
+        checkpoint=config.checkpoint,
+        model_weights=config.model_weights,
+        in_chans=config.model_in_channels,
+    )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = model.to(device)
+    adapter = adapter.to(device)
+    adapter.eval()
+    base_model = getattr(adapter, "base_model", adapter)
+    is_lorentz = getattr(adapter, "is_lorentz", False)
 
     output_dir = config.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -675,48 +663,61 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
         # The backbone features are not normalized (pre-prof)
         # the post-head features are raw euclidean and not normalized
         eurosat_embeddings[split] = _extract_embeddings(
-            model,
+            adapter,
             loader,
             device=device,
-            is_lorentz=is_lorentz,
         )
 
     _run_linear_probe(config, eurosat_embeddings, output_dir=output_dir, label="eurosat")
 
     neuco_loader = _build_neuco_loader(config)
     neuco_bundle = _extract_embeddings(
-        model,
+        adapter,
         neuco_loader,
         device=device,
-        is_lorentz=is_lorentz,
         require_ids=True,
     )
     _export_neuco(neuco_bundle, output_dir / "neuco_export", label="s2l1c")
 
-    s1_ssl4eo, s2_ssl4eo = _extract_ssl4eo_embeddings(
-        config,
-        model,
-        device=device,
+    ssl4eo_available = (
+        config.enable_ssl4eo
+        and config.ssl4eo_root is not None
+        and getattr(adapter, "supports_ssl4eo", True)
     )
 
-    _run_embedding_diagnostics(
-        config,
-        s1_ssl4eo,
-        s2_ssl4eo,
-        output_dir=output_dir / "embedding_diagnostics",
-    )
+    s1_ssl4eo = s2_ssl4eo = None
+    if ssl4eo_available:
+        s1_ssl4eo, s2_ssl4eo = _extract_ssl4eo_embeddings(
+            config,
+            adapter,
+            device=device,
+        )
 
-    if is_lorentz:
-        if not isinstance(model, LorentzCIIP):
+        _run_embedding_diagnostics(
+            config,
+            s1_ssl4eo,
+            s2_ssl4eo,
+            output_dir=output_dir / "embedding_diagnostics",
+        )
+    else:
+        logging.info(
+            "Skipping SSL4EO diagnostics (enable_ssl4eo=%s, root=%s, supports_ssl4eo=%s)",
+            config.enable_ssl4eo,
+            config.ssl4eo_root,
+            getattr(adapter, "supports_ssl4eo", True),
+        )
+
+    if is_lorentz and s1_ssl4eo is not None and s2_ssl4eo is not None:
+        if not isinstance(base_model, LorentzCIIP):
             raise TypeError("Expected LorentzCIIP model when is_lorentz is True")
         # use SSL4EO post-head projected features for hyperbolic visualisations
-        s1_proj_feats = torch.from_numpy(s1_ssl4eo.projected).to(device=device, dtype=torch.float32)
-        s2_proj_feats = torch.from_numpy(s2_ssl4eo.projected).to(device=device, dtype=torch.float32)
+        s1_proj_feats = s1_ssl4eo.projected.to(device=device, dtype=torch.float32)
+        s2_proj_feats = s2_ssl4eo.projected.to(device=device, dtype=torch.float32)
         _run_hyperbolic_visualisations(
             s1_proj_feats,
             s2_proj_feats,
             output_dir=output_dir / "hyperbolic",
-            model=model,
+            model=base_model,
             aperture_logk=None,
             seed=config.random_seed,
         )
@@ -727,20 +728,48 @@ __all__ = ["ModelEvalConfig", "run_full_evaluation"]
 
 
 if __name__ == "__main__":
-    from pathlib import Path
-    from ciip.evaluation.unified_evaluation import ModelEvalConfig, run_full_evaluation
+    import argparse
 
-    model_root = '/local/ms-data/SSL4EO/model/'
-    model_path = '2025_11_05-21_04_44-model_resnet50-lr_0.001-b_128-j_6-p_amp/'
-    checkpoint_root = Path(model_root) / model_path / "checkpoints"
-    output_dir = Path("diagnostics/output")
+    parser = argparse.ArgumentParser(description="Run the unified CIIP evaluation pipeline.")
+    parser.add_argument("--model-type", default="ciip_checkpoint", choices=["ciip_checkpoint", "torchgeo_resnet50"], help="Model source to evaluate.")
+    parser.add_argument("--checkpoint", type=Path, help="Checkpoint path for CIIP/Lorentz models.")
+    parser.add_argument("--model-weights", choices=["dino", "moco"], help="TorchGeo ResNet50 weight selection.")
+    parser.add_argument("--model-in-channels", type=int, default=13, help="Number of input channels for TorchGeo ResNet models.")
+    parser.add_argument("--eurosat-root", type=Path, required=True, help="EuroSAT dataset root directory.")
+    parser.add_argument("--neuco-root", type=Path, required=True, help="NeuCo-Bench dataset root directory.")
+    parser.add_argument("--output-dir", type=Path, required=True, help="Directory to write evaluation artifacts.")
+    parser.add_argument("--ssl4eo-root", type=Path, help="SSL4EO dataset root for diagnostics.")
+    parser.add_argument("--disable-ssl4eo", action="store_true", help="Skip SSL4EO diagnostics even if a root is provided.")
+    parser.add_argument("--tsne-samples", type=int, default=1500, help="Samples used for t-SNE visualisations.")
+    parser.add_argument("--pca-samples", type=int, default=5000, help="Samples used for PCA visualisations.")
+    parser.add_argument("--ssl4eo-subset-size", type=int, default=2048, help="Subset size for SSL4EO embedding extraction.")
+    parser.add_argument("--ssl4eo-subset-seed", type=int, default=0, help="Subset seed for SSL4EO sampling.")
+    parser.add_argument("--neuco-modalities", nargs="*", default=["s2l1c"], help="NeuCo modalities to export.")
+    parser.add_argument("--neuco-seasons", type=int, default=1, help="Number of seasons for NeuCo extraction.")
+
+    args = parser.parse_args()
+
+    if args.model_type == "ciip_checkpoint" and args.checkpoint is None:
+        parser.error("--checkpoint is required when --model-type=ciip_checkpoint")
+    if args.model_type == "torchgeo_resnet50" and args.model_weights is None:
+        parser.error("--model-weights must be provided for torchgeo_resnet50 models")
 
     cfg = ModelEvalConfig(
-        checkpoint=Path(f"{checkpoint_root}/epoch_10.pt"),
-        eurosat_root=Path("/local/ms-data/EuroSAT/"),
-        neuco_root=Path("/local/ms-data/SSL4EO-S12-downstream/data"),
-        output_dir=Path("/home/juro4948/ciip/diagnostics/unified_eval/curv_init_1"),
-        ssl4eo_root=Path("/local/ms-data/SSL4EO/"),
+        eurosat_root=args.eurosat_root,
+        neuco_root=args.neuco_root,
+        output_dir=args.output_dir,
+        checkpoint=args.checkpoint,
+        model_type=args.model_type,
+        model_weights=args.model_weights,
+        model_in_channels=args.model_in_channels,
+        enable_ssl4eo=not args.disable_ssl4eo,
+        ssl4eo_root=args.ssl4eo_root,
+        tsne_samples=args.tsne_samples,
+        pca_samples=args.pca_samples,
+        ssl4eo_subset_size=args.ssl4eo_subset_size,
+        ssl4eo_subset_seed=args.ssl4eo_subset_seed,
+        neuco_modalities=tuple(args.neuco_modalities),
+        neuco_seasons=args.neuco_seasons,
     )
     run_full_evaluation(cfg)
 
