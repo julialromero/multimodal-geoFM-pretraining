@@ -81,8 +81,20 @@ def main(args: DictConfig, start_epoch=0):
   exclude = lambda n, p: p.ndim < 2 or "bn" in n or "ln" in n or "bias" in n or 'logit_scale' in n
   include = lambda n, p: not exclude(n, p)
   named_parameters = list(model.named_parameters())
-  gain_or_bias_params = [p for n, p in named_parameters if exclude(n, p) and p.requires_grad]
-  rest_params = [p for n, p in named_parameters if include(n, p) and p.requires_grad]
+  gain_or_bias_params = []
+  rest_params = []
+  curvature_params = []
+
+  for name, param in named_parameters:
+      if not param.requires_grad:
+          continue
+      if name.endswith("curv"):
+          curvature_params.append(param)
+          continue
+      if exclude(name, param):
+          gain_or_bias_params.append(param)
+      else:
+          rest_params.append(param)
 
   # define transforms
   #TODO: color jitter only works on 3-channel images right now; a custom function would likely be quite useful here
@@ -101,10 +113,33 @@ def main(args: DictConfig, start_epoch=0):
   # Testing with a small subset
   total_steps = (data["train"].dataloader.num_batches // args.train.accum_freq) * args.train.epochs
 
+  curvature_param_groups = []
+  if curvature_params:
+      loss_cfg = getattr(args, "loss", None)
+      curvature_init = getattr(loss_cfg, "curvature_init", None) if loss_cfg is not None else None
+      if curvature_init is None and loss_cfg is not None:
+          curvature_init = getattr(loss_cfg, "hyperbolic_curvature_init", None)
+      if curvature_init is None:
+          curvature_init = 1.0
+      curvature_init = max(float(curvature_init), 1e-6)
+      curvature_lr = getattr(args.train, "curvature_lr", None)
+      if curvature_lr is None and loss_cfg is not None:
+          curvature_lr = getattr(loss_cfg, "curvature_lr", None)
+      if curvature_lr is None:
+          # Use a larger learning rate for curvature based on its initialization.
+          curvature_lr = args.train.lr * (1.0 / curvature_init)
+      curvature_lr = max(float(curvature_lr), 0.0)
+      curvature_param_groups.append({
+          "params": curvature_params,
+          "weight_decay": 0.,
+          "lr": curvature_lr,
+      })
+
   optimizer= optim.AdamW(
     [
         {"params": gain_or_bias_params, "weight_decay": 0.},
         {"params": rest_params, "weight_decay": args.train.wd},
+        *curvature_param_groups,
     ],
     lr=args.train.lr,
     betas=(args.train.beta1, args.train.beta2),
