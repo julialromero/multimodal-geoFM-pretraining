@@ -41,11 +41,43 @@ from torchvision import transforms
 from ciip.eval_utils import CustomTransform
 from ciip.model_ciip import CIIP, LorentzCIIP
 
-from ciip.evaluation.linearprobe_comparison import (  # type: ignore
-    BANDS,
-    MEAN,
-    STD,
-)
+
+## EUROSAT STANDARDIZATION VALUES
+MEAN = {
+    'B01': 1354.40546513,
+    'B02': 1118.24399958,
+    'B03': 1042.92983953,
+    'B04': 947.62620298,
+    'B05': 1199.47283961,
+    'B06': 1999.79090914,
+    'B07': 2369.22292565,
+    'B08': 2296.82608323,
+    'B09': 732.08340178,
+    'B10': 12.11327804,
+    'B11': 1819.01027855,
+    'B12': 1118.92391149,
+    'B8A': 2594.14080798,
+}
+
+STD = {
+    'B01': 245.71762908,
+    'B02': 333.00778264,
+    'B03': 395.09249139,
+    'B04': 593.75055589,
+    'B05': 566.4170017,
+    'B06': 861.18399006,
+    'B07': 1086.63139075,
+    'B08': 1117.98170791,
+    'B09': 404.91978886,
+    'B10': 4.77584468,
+    'B11': 1002.58768311,
+    'B12': 761.30323499,
+    'B8A': 1231.58581042,
+}
+
+BANDS = ("B01", "B02", "B03", "B04", "B05", "B06", "B07", "B08", "B8A", "B09", "B10", "B11", "B12")
+##
+
 from ciip.evaluation.export_neuco_embeddings import (  # type: ignore
     E2SChallengeDataset,
     Normalize,
@@ -62,6 +94,7 @@ from visualizations.ssl4eo.embedding_collapse_diagnostics import (  # type: igno
     extract_embeddings_for_dataset,
     plot_projection,
     preprocess_projection_data,
+    ModalityEmbeddings
 )
 from visualizations.ssl4eo.hyperbolic_visualization import (  # type: ignore
     compute_hyperbolic_context,
@@ -180,8 +213,8 @@ def _flatten_features(tensor: torch.Tensor) -> torch.Tensor:
         return tensor.flatten(start_dim=1)
     return tensor
 
-### FOR EUROSAT
-def _extract_embeddings_eurosat(
+### FOR EUROSAT and NEUCOBENCH
+def _extract_embeddings(
     model: nn.Module,
     dataloader: DataLoader,
     *,
@@ -226,6 +259,10 @@ def _extract_embeddings_eurosat(
                 # post = F.normalize(post, dim=-1)
             post = _flatten_features(post)
 
+        # @codex: this projected is post-head features but unnormalized. Naming convention needs to be updated across scripts:
+        # backbone_X: pre-head features (not normalized)
+        # postproj_X: post-head features (not normalized)
+        # projected_X: post-head features (normalized -- L2 or hyperbolic)
         backbone_vectors.append(_to_numpy(pre))
         projected_vectors.append(_to_numpy(post))
 
@@ -353,13 +390,20 @@ def _extract_ssl4eo_embeddings(
         autocast=autocast,
     )
 
-    bundle = EmbeddingBundle(
-        backbone=s2_embeddings.raw.cpu().numpy(),
-        projected=s2_embeddings.normalized.cpu().numpy(),
-        labels=None,
-        ids=sample_ids if sample_ids else None,
-    )
-    return bundle
+    # s1_bundle = EmbeddingBundle(
+    #     backbone=s1_embeddings.raw.cpu().numpy(), # raw post-head
+    #     projected=s1_embeddings.normalized.cpu().numpy(), # L2/hyperbolic projection post-head
+    #     labels=None,
+    #     ids=sample_ids if sample_ids else None,
+    # )
+
+    # s2_bundle = EmbeddingBundle(
+    #     backbone=s2_embeddings.raw.cpu().numpy(), # raw post-head
+    #     projected=s2_embeddings.normalized.cpu().numpy(), # L2/hyperbolic projection post-head
+    #     labels=None,
+    #     ids=sample_ids if sample_ids else None,
+    # )
+    return s1_embeddings, s2_embeddings
 
 
 def _run_linear_probe(
@@ -514,15 +558,27 @@ def _export_neuco(
 
 def _run_embedding_diagnostics(
     config: ModelEvalConfig,
-    bundle: EmbeddingBundle,
+    s1_bundle: ModalityEmbeddings,
+    s2_bundle: ModalityEmbeddings,
     *,
     output_dir: Path,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    torch_backbone = torch.from_numpy(bundle.backbone)
-    torch_projected = torch.from_numpy(bundle.projected)
+    ## @codex Update below code to compute all for S1 and S2 embeddings
 
+    torch_raw = torch.from_numpy(s1_bundle.raw) # raw is the post-head unnormalized features
+    torch_projected = torch.from_numpy(s1_bundle.projected) # projected is the post-head L2/hyperbolic features
+    # there are no 'backbone features' in SSL4EO extraction, only post-head features, please update the naming convention here
+
+    
+
+    # @codex cka should be computed for: within-S1 encoder, within-S2 encoder, and cross S1-S2 projected features
+    # access the layer features like below
+    layer_activations_s1 = s1_bundle.layer_activations  # Dict[str, np.ndarray]
+    layer_activations_s2 = s2_bundle.layer_activations  # Dict[str
+
+    ## update below code
     cka_value = compute_linear_cka(torch_backbone, torch_projected)
     with (output_dir / "cka.json").open("w") as handle:
         json.dump({"linear_cka": cka_value}, handle, indent=2)
@@ -549,10 +605,16 @@ def _run_embedding_diagnostics(
         maximum = min(maximum, len(features))
         indices = rng.choice(len(features), size=maximum, replace=False)
         return features[indices], labels[indices]
+    
 
+    # @codex plot the below 4 modes. Ensure that S1 and S2 are processed concurrently and combined for joint PCA/Tsne. When zscore is used, the S1 and S2 should be combnied and zscore is applied to the set of all embeddings. 
+    # S1 and S2 should be plotted on the same axes for each mode.
     for features, label, mode in (
+        (bundle.backbone, "backbone", "none"),
+        (bundle.projected, "projected", "none"),
         (bundle.backbone, "backbone", "zscore"),
-        (bundle.projected, "projected", "l2"),
+        (bundle.projected, "projected", "zscore"),
+
     ):
         subset, subset_labels = _sample(features, bundle.labels, config.tsne_samples)
         processed = preprocess_projection_data(subset, mode=mode, random_state=config.random_seed)
@@ -568,7 +630,8 @@ def _run_embedding_diagnostics(
 
 
 def _run_hyperbolic_visualisations(
-    post_features: torch.Tensor,
+    s1_proj_features: torch.Tensor,
+    s2_proj_features: torch.Tensor,
     *,
     output_dir: Path,
     model: LorentzCIIP,
@@ -578,8 +641,8 @@ def _run_hyperbolic_visualisations(
     output_dir.mkdir(parents=True, exist_ok=True)
     context = compute_hyperbolic_context(
         model,
-        post_features,
-        post_features,
+        s1_proj_features,
+        s2_proj_features,
         aperture_logk=aperture_logk,
     )
     positive_angles = context["positive_angles"].cpu().numpy()
@@ -591,7 +654,7 @@ def _run_hyperbolic_visualisations(
     s2_distances = context["s2_distances"].cpu().numpy()
 
     plot_angle_aperture(positive_angles, aperture_s1, aperture_s2, output_dir / "angle_aperture.png")
-    plot_radial_histogram(np.linalg.norm(post_features.cpu().numpy(), axis=1), np.linalg.norm(post_features.cpu().numpy(), axis=1), output_dir / "radial_histogram.png")
+    plot_radial_histogram(np.linalg.norm(s1_proj_features.cpu().numpy(), axis=1), np.linalg.norm(s2_proj_features.cpu().numpy(), axis=1), output_dir / "radial_histogram.png")
     plot_angular_pca(s1_dirs, s2_dirs, s1_distances, s2_distances, output_dir / "angular_pca.png")
     plot_cone_polar(positive_angles, aperture_s1, aperture_s2, output_dir / "cone_polar.png", sample_size=256, seed=seed)
 
@@ -611,7 +674,7 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
     for split, loader in eurosat_loaders.items():
         # The backbone features are not normalized (pre-prof)
         # the post-head features are raw euclidean and not normalized
-        eurosat_embeddings[split] = _extract_embeddings_eurosat(
+        eurosat_embeddings[split] = _extract_embeddings(
             model,
             loader,
             device=device,
@@ -620,17 +683,17 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
 
     _run_linear_probe(config, eurosat_embeddings, output_dir=output_dir, label="eurosat")
 
-    # neuco_loader = _build_neuco_loader(config)
-    # neuco_bundle = _extract_embeddings(
-    #     model,
-    #     neuco_loader,
-    #     device=device,
-    #     is_lorentz=is_lorentz,
-    #     require_ids=True,
-    # )
-    # _export_neuco(neuco_bundle, output_dir / "neuco_export", label="s2l1c")
+    neuco_loader = _build_neuco_loader(config)
+    neuco_bundle = _extract_embeddings(
+        model,
+        neuco_loader,
+        device=device,
+        is_lorentz=is_lorentz,
+        require_ids=True,
+    )
+    _export_neuco(neuco_bundle, output_dir / "neuco_export", label="s2l1c")
 
-    ssl4eo_bundle = _extract_ssl4eo_embeddings(
+    s1_ssl4eo, s2_ssl4eo = _extract_ssl4eo_embeddings(
         config,
         model,
         device=device,
@@ -638,16 +701,20 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
 
     _run_embedding_diagnostics(
         config,
-        ssl4eo_bundle,
+        s1_ssl4eo,
+        s2_ssl4eo,
         output_dir=output_dir / "embedding_diagnostics",
     )
 
     if is_lorentz:
         if not isinstance(model, LorentzCIIP):
             raise TypeError("Expected LorentzCIIP model when is_lorentz is True")
-        post_feats = torch.from_numpy(eurosat_embeddings["train"].projected).to(device=device, dtype=torch.float32)
+        # use SSL4EO post-head projected features for hyperbolic visualisations
+        s1_proj_feats = torch.from_numpy(s1_ssl4eo.projected).to(device=device, dtype=torch.float32)
+        s2_proj_feats = torch.from_numpy(s2_ssl4eo.projected).to(device=device, dtype=torch.float32)
         _run_hyperbolic_visualisations(
-            post_feats,
+            s1_proj_feats,
+            s2_proj_feats,
             output_dir=output_dir / "hyperbolic",
             model=model,
             aperture_logk=None,

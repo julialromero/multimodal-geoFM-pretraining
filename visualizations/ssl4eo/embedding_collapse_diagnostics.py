@@ -49,7 +49,7 @@ class ModalityEmbeddings:
     """Embeddings and layer activations for one modality."""
 
     raw: torch.Tensor
-    normalized: torch.Tensor
+    projected: torch.Tensor
     layer_activations: Dict[str, torch.Tensor]
 
 
