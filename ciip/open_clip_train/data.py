@@ -88,7 +88,6 @@ class SSL4EODataset(Dataset):
         self.dataset_name = dataset_name
         self.transforms = transforms
         self.resize_transform = Resize(target_image_dimension)
-
         self.s1_dir = os.path.join(root, "S1GRD")
         self.s2_dir = os.path.join(root, "S2L2A")
 
@@ -176,11 +175,44 @@ class SSL4EODataset(Dataset):
 
         return s1_tensor, s2_tensor
 
+    def _get_data_array(self, ds: xr.Dataset, sample_path: str) -> xr.DataArray:
+        """Return the requested data array, with sensible fallbacks when names differ."""
+
+        if isinstance(self.dataset_name, str):
+            requested = self.dataset_name.strip()
+        else:
+            requested = str(self.dataset_name).strip()
+
+        if requested:
+            if requested in ds.data_vars:
+                return ds[requested]
+
+            requested_lower = requested.lower()
+            for name in ds.data_vars:
+                if name.lower() == requested_lower:
+                    return ds[name]
+
+        if ds.data_vars:
+            if len(ds.data_vars) == 1:
+                (name,) = ds.data_vars
+                logging.debug(
+                    "Using the only available dataset '%s' for %s", name, sample_path
+                )
+                return ds[name]
+
+            available = sorted(ds.data_vars)
+            raise KeyError(
+                f"Dataset '{self.dataset_name}' not found in {sample_path}. "
+                f"Available datasets: {available}"
+            )
+
+        raise KeyError(
+            f"Dataset '{self.dataset_name}' not found in {sample_path} and no data variables present"
+        )
+
     def _infer_num_seasons(self, sample_path: str) -> int:
         def _extract(ds: xr.Dataset) -> int:
-            if self.dataset_name not in ds:
-                raise KeyError(f"Dataset '{self.dataset_name}' not found in {sample_path}")
-            da = ds[self.dataset_name]
+            da = self._get_data_array(ds, sample_path)
             if "time" in da.dims:
                 return int(da.sizes["time"])
             return 1
@@ -200,7 +232,7 @@ class SSL4EODataset(Dataset):
 
     def _resolve_s2_band_selection(self, sample_path: str) -> Optional[Tuple[str, List[int]]]:
         def _compute(ds: xr.Dataset) -> Optional[Tuple[str, List[int]]]:
-            da = ds[self.dataset_name]
+            da = self._get_data_array(ds, sample_path)
             for candidate in ("band", "bands", "variable", "channels"):
                 if candidate in da.dims:
                     coord = da.coords.get(candidate)
@@ -237,9 +269,7 @@ class SSL4EODataset(Dataset):
         band_selection: Optional[Tuple[str, List[int]]] = None,
     ) -> np.ndarray:
         def _extract(ds: xr.Dataset) -> np.ndarray:
-            if self.dataset_name not in ds:
-                raise KeyError(f"Dataset '{self.dataset_name}' not found in {sample_path}")
-            da = ds[self.dataset_name]
+            da = self._get_data_array(ds, sample_path)
             if "time" in da.dims:
                 if season_idx >= da.sizes["time"]:
                     raise IndexError(
