@@ -70,7 +70,7 @@ def _transpose_spatial_first(da: xr.DataArray, band_dim: Optional[str]) -> xr.Da
     return da
 
 
-class SSL4EOV11Dataset(Dataset):
+class SSL4EODataset(Dataset):
     """Dataset for SSL4EO v1.1 .zarr.zip tiles (S1GRD + S2L2A)."""
 
     DEFAULT_S2_BANDS = ["1", "2", "3", "4", "5", "6", "7", "8", "8A", "9", "11", "12"]
@@ -303,7 +303,7 @@ class SSL4EOV11Dataset(Dataset):
 
 
 # ssl4eo
-class SSL4EODataset(Dataset):
+class SSL4EODatasetOld(Dataset):
     def __init__(self, root, s2_tier, s2_bands, transforms=None, target_image_dimension=(264, 264)):
         self.root = root
         self.num_locations = None
