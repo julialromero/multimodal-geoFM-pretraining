@@ -359,43 +359,43 @@ def create_ciip_model(embed_dim, pre_projection_dim=1024):
     )
     return model
 
-def load_ciip_model_checkpoint(checkpoint_path):
+# def load_ciip_model_checkpoint(checkpoint_path):
     
 
-    # print(f'Using embed {embed_dim} with pre-projection dim {pre_projection_dim}')
-    try:
-        embed_dim = 512
-        pre_projection_dim = 1024
-        model = create_ciip_model(embed_dim, pre_projection_dim=pre_projection_dim)
-        checkpoint = torch.load(checkpoint_path, weights_only=False, map_location='cpu') # , map_location='cuda'
-        state_dict = checkpoint["state_dict"]
-        new_state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
-        new_state_dict = {k: v for k, v in new_state_dict.items() if "fc" not in k}
-        missing_keys, unexpected_keys = model.load_state_dict(new_state_dict, strict=False)
+#     # print(f'Using embed {embed_dim} with pre-projection dim {pre_projection_dim}')
+#     try:
+#         embed_dim = 512
+#         pre_projection_dim = 1024
+#         model = create_ciip_model(embed_dim, pre_projection_dim=pre_projection_dim)
+#         checkpoint = torch.load(checkpoint_path, weights_only=False, map_location='cpu') # , map_location='cuda'
+#         state_dict = checkpoint["state_dict"]
+#         new_state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+#         new_state_dict = {k: v for k, v in new_state_dict.items() if "fc" not in k}
+#         missing_keys, unexpected_keys = model.load_state_dict(new_state_dict, strict=False)
 
-    except:
-        embed_dim = 1024
-        pre_projection_dim = 2048
-        model = create_ciip_model(embed_dim, pre_projection_dim=pre_projection_dim)
-        checkpoint = torch.load(checkpoint_path, weights_only=False, map_location='cpu') # , map_location='cuda'
-        state_dict = checkpoint["state_dict"]
-        new_state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
-        new_state_dict = {k: v for k, v in new_state_dict.items() if "fc" not in k}
-        missing_keys, unexpected_keys = model.load_state_dict(new_state_dict, strict=False)
+#     except:
+#         embed_dim = 1024
+#         pre_projection_dim = 2048
+#         model = create_ciip_model(embed_dim, pre_projection_dim=pre_projection_dim)
+#         checkpoint = torch.load(checkpoint_path, weights_only=False, map_location='cpu') # , map_location='cuda'
+#         state_dict = checkpoint["state_dict"]
+#         new_state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+#         new_state_dict = {k: v for k, v in new_state_dict.items() if "fc" not in k}
+#         missing_keys, unexpected_keys = model.load_state_dict(new_state_dict, strict=False)
     
-    if missing_keys:
-        print("Missing keys:", missing_keys)
-    if unexpected_keys:
-        print("Unexpected keys:", unexpected_keys)
-    assert set(missing_keys) <= {'encoder_s1.fc.weight', 'encoder_s1.fc.bias', 'encoder_s2.fc.weight', 'encoder_s2.fc.bias'}
-    assert not unexpected_keys
+#     if missing_keys:
+#         print("Missing keys:", missing_keys)
+#     if unexpected_keys:
+#         print("Unexpected keys:", unexpected_keys)
+#     assert set(missing_keys) <= {'encoder_s1.fc.weight', 'encoder_s1.fc.bias', 'encoder_s2.fc.weight', 'encoder_s2.fc.bias'}
+#     assert not unexpected_keys
 
 
-    print("Checkpoint loaded successfully, loaded S1 and S2 weights.")
+#     print("Checkpoint loaded successfully, loaded S1 and S2 weights.")
 
-    # num_params = sum(p.numel() for p in model.parameters())
-    # print(f"Total parameters: {num_params:,}")
-    # quit()
+#     # num_params = sum(p.numel() for p in model.parameters())
+#     # print(f"Total parameters: {num_params:,}")
+#     # quit()
 
 
-    return model
+#     return model

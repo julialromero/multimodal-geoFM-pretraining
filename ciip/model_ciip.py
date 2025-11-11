@@ -341,18 +341,24 @@ class CIIP(nn.Module):
         return self.encoder_s2.conv1.weight.dtype
 
   
-    def encode_s1(self, s1, normalize):
+    def encode_s1(self, s1, normalize, post_head: bool = True):
+        if not post_head and normalize:
+            raise ValueError("Cannot normalize before projection head. Set post_head=True when normalize=True.")
         features = self.encoder_s1(s1.type(self.dtype_s1))
-        proj_layer = getattr(self.encoder_s1, "proj", None)
-        if isinstance(proj_layer, nn.Module):
-            features = proj_layer(features)
+        if post_head:
+            proj_layer = getattr(self.encoder_s1, "proj", None)
+            if isinstance(proj_layer, nn.Module):
+                features = proj_layer(features)
         return F.normalize(features, dim=-1) if normalize else features
 
-    def encode_s2(self, s2, normalize):
+    def encode_s2(self, s2, normalize, post_head: bool = True):
+        if not post_head and normalize:
+            raise ValueError("Cannot normalize before projection head. Set post_head=True when normalize=True.")
         features = self.encoder_s2(s2.type(self.dtype_s2))
-        proj_layer = getattr(self.encoder_s2, "proj", None)
-        if isinstance(proj_layer, nn.Module):
-            features = proj_layer(features)
+        if post_head:
+            proj_layer = getattr(self.encoder_s2, "proj", None)
+            if isinstance(proj_layer, nn.Module):
+                features = proj_layer(features)
         return F.normalize(features, dim=-1) if normalize else features
     
     # def encode_text(self, text):
@@ -553,7 +559,7 @@ class LorentzCIIP(CIIP):
         self.s1_alpha = nn.Parameter(torch.tensor(embed_dim**-0.5).log())
 
 
-    def encode_s2(self, s2: torch.Tensor, lorentz: bool, normalize: bool = False):
+    def encode_s2(self, s2: torch.Tensor, lorentz: bool, normalize: bool = False, post_head: bool = True):
         """
         Args:
             project: Lift features from the encoder onto the Hyperboloid.
@@ -561,9 +567,11 @@ class LorentzCIIP(CIIP):
         """
         if normalize:
             print("Warning: normalize=True is ignored in LorentzCIIP.encode_s2")
+        if post_head is False and lorentz:
+            raise ValueError("Cannot project to Lorentzian space before projection head. Set post_head=True when lorentz=True.")
 
         # Get Euclidean features from the encoder (without L2 normalization).
-        s2_feats = super().encode_s2(s2, normalize=False) # get post-head un-norm euclidean feats
+        s2_feats = super().encode_s2(s2, normalize=False, post_head=post_head) # get post-head un-norm euclidean feats
 
         # These features are space components of embeddings in the tangent
         # space of the Hyperboloid origin (which is Euclidean). Apply projection.
@@ -574,12 +582,14 @@ class LorentzCIIP(CIIP):
 
         return s2_feats
 
-    def encode_s1(self, s1: list[torch.Tensor], lorentz: bool, normalize: bool = False):
+    def encode_s1(self, s1: list[torch.Tensor], lorentz: bool, normalize: bool = False, post_head: bool = True):
         if normalize:
             print("Warning: normalize=True is ignored in LorentzCIIP.encode_s2")
+        if post_head is False and lorentz:
+            raise ValueError("Cannot project to Lorentzian space before projection head. Set post_head=True when lorentz=True.")
             
         # Get Euclidean features from the encoder (without L2 normalization).
-        s1_feats = super().encode_s1(s1, normalize=False)
+        s1_feats = super().encode_s1(s1, normalize=False, post_head=post_head)
 
         if lorentz:
             s1_feats = s1_feats * self.s1_alpha.exp()

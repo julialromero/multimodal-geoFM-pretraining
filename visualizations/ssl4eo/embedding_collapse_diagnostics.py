@@ -471,15 +471,10 @@ def _run_encoder_method(
     normalize: bool,
 ) -> torch.Tensor:
     accepts_lorentz = _encoder_accepts_lorentz(method)
-    try:
-        if accepts_lorentz:
-            return method(tensor, lorentz=project_hyperbolic, normalize=normalize)
-        return method(tensor, normalize=normalize)
-    except TypeError:
-        # Some historical encoder signatures take positional arguments only.
-        if accepts_lorentz:
-            return method(tensor, project_hyperbolic, normalize)
-        return method(tensor, normalize)
+    if accepts_lorentz:
+        # normalize is not used in LorentzCIIP
+        return method(tensor, lorentz=project_hyperbolic, normalize=normalize)
+    return method(tensor, normalize=normalize)
 
 
 def extract_embeddings_for_dataset(
@@ -520,69 +515,59 @@ def extract_embeddings_for_dataset(
                 continue
             s1_tensor = _to_tensor(s1_img).unsqueeze(0).to(device=device, dtype=input_dtype)
             s2_tensor = _to_tensor(s2_img).unsqueeze(0).to(device=device, dtype=input_dtype)
-            with autocast():
-                output = model(s1_tensor, s2_tensor)
-            if isinstance(output, dict):
-                s1_raw = output.get("s1_features_vc")
-                s2_raw = output.get("s2_features_vc")
-                s1_norm = output.get("s1_features")
-                s2_norm = output.get("s2_features")
-            else:
-                s1_raw = s2_raw = None
-                s1_norm = s2_norm = None
+ 
 
             encode_s1 = getattr(model, "encode_s1", None)
             encode_s2 = getattr(model, "encode_s2", None)
-            if (s1_raw is None or s2_raw is None) and (encode_s1 is None or encode_s2 is None):
-                raise AttributeError("Model does not expose encode_s1/encode_s2 methods for embedding extraction")
-
-            if s1_raw is None and encode_s1 is not None:
-                with autocast():
-                    s1_raw = _run_encoder_method(
+        
+            with autocast():
+                s1_raw = _run_encoder_method(
+                    encode_s1,
+                    s1_tensor,
+                    project_hyperbolic=False,
+                    normalize=False,
+                    post_head=True
+                )
+                s2_raw = _run_encoder_method(
+                    encode_s2,
+                    s2_tensor,
+                    project_hyperbolic=False,
+                    normalize=False,
+                    post_head=True
+                    )
+                
+                # if lorentzciip model, project hyperbolic is true
+                if _encoder_accepts_lorentz(encode_s1):
+                    s1_norm = _run_encoder_method(
+                        encode_s1,
+                        s1_tensor,
+                        project_hyperbolic=True,
+                        post_head=True
+                    )
+                    s2_norm = _run_encoder_method(
+                        encode_s2,
+                        s2_tensor,
+                        project_hyperbolic=True,
+                        post_head=True
+                    )
+                # else take L2 norm
+                else:
+                    s1_norm = _run_encoder_method(
                         encode_s1,
                         s1_tensor,
                         project_hyperbolic=False,
-                        normalize=False,
+                        normalize=True,
+                        post_head=True
                     )
-            if s2_raw is None and encode_s2 is not None:
-                with autocast():
-                    s2_raw = _run_encoder_method(
+                    s2_norm = _run_encoder_method(
                         encode_s2,
                         s2_tensor,
                         project_hyperbolic=False,
-                        normalize=False,
+                        normalize=True,
+                        post_head=True
                     )
 
-            def _select_normalized(
-                raw_tensor: torch.Tensor,
-                encoder_method,
-                input_tensor: torch.Tensor,
-            ) -> torch.Tensor:
-                if encoder_method is None:
-                    return raw_tensor
-                try:
-                    with autocast():
-                        candidate = _run_encoder_method(
-                            encoder_method,
-                            input_tensor,
-                            project_hyperbolic=False,
-                            normalize=True,
-                        )
-                except Exception:  # pragma: no cover - encoder mismatch fallback
-                    candidate = None
-
-                if candidate is None:
-                    return raw_tensor
-
-                norms = candidate.flatten(start_dim=1).norm(dim=-1)
-                if torch.allclose(norms, torch.ones_like(norms), atol=1e-3, rtol=1e-3):
-                    return candidate
-                return raw_tensor
-
-            if s1_norm is None:
-                s1_norm = _select_normalized(s1_raw, encode_s1, s1_tensor)
-            if s2_norm is None:
-                s2_norm = _select_normalized(s2_raw, encode_s2, s2_tensor)
+            
             s1_vectors.append(s1_raw.squeeze(0).cpu().to(torch.float32))
             s2_vectors.append(s2_raw.squeeze(0).cpu().to(torch.float32))
             s1_norm_vectors.append(s1_norm.squeeze(0).cpu().to(torch.float32))

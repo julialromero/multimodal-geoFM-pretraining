@@ -22,6 +22,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 
+import unified_evaluation
 from utils import *
 
 
@@ -81,18 +82,21 @@ data_transforms = {
 train_transform = CustomTransform(data_transforms["train"])
 val_transform = CustomTransform(data_transforms["val"])
 
-def drop_last_linear_layer(model):
-    """Replace the model's final linear layer with an identity function."""
-    logger = logging.getLogger(__name__)
-    if hasattr(model, "encoder_s2") and hasattr(model.encoder_s2, "fc"):
-        logger.info("Dropping %s", model.encoder_s2.fc)
-        model.encoder_s2.fc = nn.Identity()
-    elif hasattr(model, "fc"):
-        logger.info("Dropping %s", model.fc)
-        model.fc = nn.Identity()
-    else:
-        logger.warning("No final linear layer found to drop")
-    return model
+# def drop_last_linear_layer(model):
+#     """Replace the model's final linear layer with an identity function."""
+#     logger = logging.getLogger(__name__)
+#     if hasattr(model, "encoder_s2") and hasattr(model.encoder_s2, "fc"):
+#         logger.info("Dropping %s", model.encoder_s2.fc)
+#         model.encoder_s2.fc = nn.Identity()
+#     # if hasattr(model, "encoder_s2") and hasattr(model.encoder_s2, "proj"):
+#     #     logger.info("Dropping %s", model.encoder_s2.proj)
+#     #     model.encoder_s2.proj = nn.Identity()
+#     elif hasattr(model, "fc"):
+#         logger.info("Dropping %s", model.fc)
+#         model.fc = nn.Identity()
+#     else:
+#         logger.warning("No final linear layer found to drop")
+#     return model
 
 
 def preprocess_class_indices(dataset):
@@ -134,7 +138,8 @@ class FewShotClassifierLightning(pl.LightningModule):
         features, labels = batch
         outputs = self(features)
         loss = self.criterion(outputs, labels)
-        self.log('train_loss', loss, on_step=False, on_epoch=True, prog_bar=False)
+        if self.current_epoch % 50 == 0 or self.current_epoch == 0:
+            self.log('train_loss', loss, on_step=False, on_epoch=True, prog_bar=False)
         # _logger.info(
         #     f"Epoch {self.current_epoch}, Step {self.global_step} - Train Loss: {loss.item():.4f}"
         # )
@@ -209,12 +214,13 @@ class FewShotClassifierLightning(pl.LightningModule):
         self.train_losses.append(avg_train_loss)
         self.val_losses.append(avg_val_loss)
 
-        _logger.info(
-            f"Epoch {self.current_epoch} End - "
-            f"Train Loss: {avg_train_loss:.4f}, "
-            f"Val Loss: {avg_val_loss:.4f}, "
-            f"Val Accuracy: {accuracy:.4f}, Val F1-Score: {f1:.4f}"
-        )
+        if self.current_epoch % 50 == 0 or self.current_epoch == 0:
+            _logger.info(
+                f"Epoch {self.current_epoch} End - "
+                f"Train Loss: {avg_train_loss:.4f}, "
+                f"Val Loss: {avg_val_loss:.4f}, "
+                f"Val Accuracy: {accuracy:.4f}, Val F1-Score: {f1:.4f}"
+            )
 
         # Log metrics
         self.log_dict({
@@ -438,10 +444,8 @@ def extract_features(model, dataloader, device, use_s2_only=False):
             # print(f"Image Tensor Shape Sent to Model: {images.shape}")  # Debugging
 
             if use_s2_only:
-                # Use only the S2 encoder for feature extraction
-                # print(f'Shape of images sent to S2 encoder: {images.shape}')
-                # features = model.encoder_s2(images)
-                features = model.encode_s2(s2=images, normalize=True)
+                features = model.encode_s2(s2=images, normalize=False)
+                print(f'Extracted features shape using S2 encoder: {features.shape}')
             else:
                 # Use the full model if required in other scenarios
                 features = model(images)
@@ -493,18 +497,18 @@ def few_shot_comparison_pipeline_optimized(data_path, percents, models, bands, b
         model.to(device).eval()
         current_model = copy.deepcopy(model)
         
-        if hasattr(model, 'encoder_s2') and hasattr(model.encoder_s2, 'fc'):
+        # uses backbone features
+        if hasattr(model, 'encoder_s2') and hasattr(model.encoder_s2, 'proj'):
             # Replace the fc layer of encoder_s2 with an identity mapping.
-            _logger.info(f'{model_name} has fc of {model.encoder_s2.fc}')
-        elif hasattr(model, 'fc'):
-            _logger.info(f'{model_name} has fc of {model.fc}')
+            _logger.info(f'{model_name} has proj of {model.encoder_s2.proj}')
+        elif hasattr(model, 'proj'):
+            _logger.info(f'{model_name} has proj of {model.proj}')
         else:
-            _logger.info(f'{model_name} has no fc.')
+            _logger.info(f'{model_name} has no proj.')
         if model_config.get('drop_last_layer'):
             current_model = drop_last_linear_layer(current_model)
-        # continue
             
-        # print(current_model)
+        print(current_model)
         current_model = current_model.to(device)
         current_model.eval()
 
@@ -540,9 +544,16 @@ def few_shot_comparison_pipeline_optimized(data_path, percents, models, bands, b
                 val_features, val_labels = extract_features(current_model, dataloader_val, device, use_s2_only=use_s2_only)
                 test_features, test_labels = extract_features(current_model, dataloader_test, device, use_s2_only=use_s2_only)
 
-                if NORMALIZE:
-                    train_features = train_features / (np.linalg.norm(train_features, axis=1, keepdims=True) + 1e-8)
-                    test_features = test_features / (np.linalg.norm(test_features, axis=1, keepdims=True) + 1e-8)
+                # if NORMALIZE:
+                #     train_features = train_features / (np.linalg.norm(train_features, axis=1, keepdims=True) + 1e-8)
+                #     test_features = test_features / (np.linalg.norm(test_features, axis=1, keepdims=True) + 1e-8)
+
+                # z score norm
+                mean = np.mean(train_features, axis=0)
+                std = np.std(train_features, axis=0) + 1e-8
+                train_features = (train_features - mean) / std
+                val_features = (val_features - mean) / std
+                test_features = (test_features - mean) / std
          
 
                 # train linear classifier
@@ -679,7 +690,8 @@ def load_model(model_type, weights_path):
             # print first layer shape
             print(f"First layer shape: {model.conv1.weight.shape}")
     elif model_type == "ciip":
-        model = load_ciip_model_checkpoint(weights_path)
+        model, is_lorentz = unified_evaluation._build_model(weights_path)
+        # model = load_ciip_model_checkpoint(weights_path)
     else:
         raise ValueError(f"Unknown model type: {model_type}")
     return model
@@ -813,18 +825,20 @@ if __name__ == "__main__":
     #     base_name="2025_09_05_MoCoInit-hal",
     #     epochs=epochs,
     # )
-    # ciip_root = f"/home/juro4948/ciip/logs/2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints"
-    ciip_root = '/local/ms-data/SSL4EO/model/2025_11_01-21_12_21-model_resnet50-lr_0.001-b_128-j_6-p_amp/checkpoints'
-    base_name="2025_11_01_RandomInit-hal-hyperbolic"
+    ciip_root = f"/home/juro4948/ciip/logs/2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints"
+    base_name="2025_09_11_RandomInit-hal-vanilla"
+    # ciip_root = '/local/ms-data/SSL4EO/model/2025_11_01-21_12_21-model_resnet50-lr_0.001-b_128-j_6-p_amp/checkpoints'
+    # base_name="2025_11_01_RandomInit-hal-hyperbolic"
     # '/local/ms-data/SSL4EO/model/2025_10_24-08_47_11-model_resnet50-lr_0.001-b_128-j_6-p_amp/checkpoints'
     # '/local/ms-data/SSL4EO/model/2025_10_24-08_47_11-model_resnet50-lr_0.001-b_128-j_6-p_amp/checkpoints'
 
-    epochs = discover_checkpoints(
-        ciip_root,
-        pattern=r"epoch",
-        include_init=True,
-    )
-
+    # epochs = discover_checkpoints(
+    #     ciip_root,
+    #     pattern=r"epoch",
+    #     include_init=True,
+    #     max_checkpoints=5,
+    # )
+    epochs = [5, 10, 20, 30]
 
     # '/home/juro4948/ciip/logs/2025_09_10-11_37_00-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints'
     # epochs = [1, 2, 3, 5, 10, 15, 20, 30]
@@ -870,7 +884,7 @@ if __name__ == "__main__":
 
 
     # add model dict to config
-    NORMALIZE = False
+    NORMALIZE = True
 
     models = []
     model_info = []
@@ -889,6 +903,9 @@ if __name__ == "__main__":
 
     CONFIG["models"] = model_info
     CONFIG['notes'] = ' ' 
+    # from huggingface_hub import snapshot_download
+    # snapshot_download(repo_id="embed2scale/SSL4EO-S12-v1.1", repo_type="dataset", local_dir="/local/ms-data/SSL4EOv1.1", allow_patterns=["*/S2L2A/**.zarr.zip"], max_workers=16, resume_download=True )
+                      
 
     ## Setup Logging and Output Directory ##
     timestamp = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")

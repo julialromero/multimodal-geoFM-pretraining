@@ -94,8 +94,8 @@ class ModelEvalConfig:
 
 @dataclass
 class EmbeddingBundle:
-    backbone: np.ndarray
-    projected: np.ndarray
+    post_head_raw: np.ndarray
+    post_head_proj: np.ndarray
     labels: Optional[np.ndarray] = None
     ids: Optional[List[str]] = None
 
@@ -160,6 +160,13 @@ def _build_model(checkpoint: Path) -> Tuple[nn.Module, bool]:
     #     raise RuntimeError(
     #         f"Checkpoint incompatible with model (missing={remaining_missing}, unexpected={unexpected})"
     #     )
+    if missing or unexpected:
+        logging.warning(
+            f"Checkpoint loaded with missing={missing}, unexpected={unexpected}"
+        )
+        raise RuntimeError(
+            f"Checkpoint incompatible with model (missing={missing}, unexpected={unexpected})"
+        )
     model.eval()
     return model, is_lorentz
 
@@ -173,8 +180,8 @@ def _flatten_features(tensor: torch.Tensor) -> torch.Tensor:
         return tensor.flatten(start_dim=1)
     return tensor
 
-
-def _extract_embeddings(
+### FOR EUROSAT
+def _extract_embeddings_eurosat(
     model: nn.Module,
     dataloader: DataLoader,
     *,
@@ -187,11 +194,11 @@ def _extract_embeddings(
     labels: List[int] = []
     ids: List[str] = []
 
+    
     model.eval()
 
     for batch in tqdm(dataloader, desc="Extracting embeddings"):
         if isinstance(batch, dict):
-            # print(batch)
             image = batch.get("image") # or batch.get("data")
             batch_labels = batch.get("label")
             batch_ids = batch.get("file_name")
@@ -199,8 +206,6 @@ def _extract_embeddings(
             image, batch_labels = batch
             batch_ids = None
 
-        if image is None:
-            continue
 
         if isinstance(image, dict):
             image = image[next(iter(image))]
@@ -211,14 +216,14 @@ def _extract_embeddings(
         image = image.to(device=device, dtype=torch.float32, non_blocking=True)
 
         with torch.no_grad():
-            pre = model.encoder_s2(image.type(model.dtype_s2))  # type: ignore[attr-defined]
+            pre = model.encoder_s2(image.type(model.dtype_s2))  
             pre = _flatten_features(pre)
 
             if is_lorentz:
-                post = model.encode_s2(image, lorentz=True)
+                post = model.encode_s2(image, lorentz=False)
             else:
                 post = model.encode_s2(image, normalize=False)
-                post = F.normalize(post, dim=-1)
+                # post = F.normalize(post, dim=-1)
             post = _flatten_features(post)
 
         backbone_vectors.append(_to_numpy(pre))
@@ -367,24 +372,28 @@ def _run_linear_probe(
     percents = (0.01, 0.05, 0.1, 0.25, 0.5, 1.0)
     rng = np.random.default_rng(config.random_seed)
 
-    def _evaluate(feature_key: str) -> Dict[float, Dict[str, float]]:
+    def _evaluate(feature_key: str, batch_norm) -> Dict[float, Dict[str, float]]:
         results: Dict[float, Dict[str, float]] = {}
         train = embeddings["train"]
         val = embeddings["val"]
         test = embeddings["test"]
 
-        if train.labels is None or val.labels is None or test.labels is None:
-            raise RuntimeError("Linear probe requires label annotations for all splits")
-
         train_feats = getattr(train, feature_key)
         val_feats = getattr(val, feature_key)
         test_feats = getattr(test, feature_key)
+
+        if batch_norm:
+            mean = train_feats.mean(axis=0, keepdims=True)
+            std = train_feats.std(axis=0, keepdims=True) + 1e-10
+            train_feats = (train_feats - mean) / std
+            val_feats = (val_feats - mean) / std
+            test_feats = (test_feats - mean) / std
 
         for pct in percents:
             n_samples = max(1, int(pct * len(train_feats)))
             indices = rng.choice(len(train_feats), size=n_samples, replace=False)
 
-            clf = LogisticRegression(max_iter=2000, multi_class="multinomial", solver="lbfgs")
+            clf = LogisticRegression(max_iter=4000, multi_class="multinomial", solver="lbfgs")
             clf.fit(train_feats[indices], train.labels[indices])
 
             val_pred = clf.predict(val_feats)
@@ -407,29 +416,81 @@ def _run_linear_probe(
     plots_dir = output_dir / "linear_probe"
     plots_dir.mkdir(parents=True, exist_ok=True)
 
-    for key, pretty in (("backbone", "backbone"), ("projected", "projected")):
-        metrics = _evaluate(key)
+    for key, pretty in (("backbone", "backbone"), ("projected", "projected"),
+                         ('backbone', 'batch-norm'), ('projected', 'batch-norm')):
+        metrics = _evaluate(key, batch_norm=(pretty == 'batch-norm'))
         with (plots_dir / f"{label}_{key}_metrics.json").open("w") as handle:
             json.dump(metrics, handle, indent=2)
 
-        xs = sorted(metrics)
-        acc = [metrics[x]["test_accuracy"] for x in xs]
-        f1_vals = [metrics[x]["test_f1"] for x in xs]
+        # Create single combined plot
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
 
-        fig, ax = plt.subplots(figsize=(6, 4))
-        ax.plot(xs, acc, marker="o", label="test accuracy")
-        ax.plot(xs, f1_vals, marker="s", label="test F1")
-        ax.set_xlabel("Training fraction")
-        ax.set_ylabel("Score")
-        ax.set_title(f"Linear probe ({label}, {pretty})")
-        ax.grid(alpha=0.3)
-        ax.legend()
+    # Plot accuracy on left subplot
+    for key, pretty in (("backbone", "backbone"), ("projected", "projected"),
+                        ('backbone', 'batch-norm'), ('projected', 'batch-norm')):
+        metrics_file = plots_dir / f"{label}_{key}_metrics.json"
+        with metrics_file.open("r") as handle:
+            metrics = json.load(handle)
+        
+        xs = sorted([float(x) for x in metrics.keys()])
+        acc = [metrics[str(x)]["test_accuracy"] for x in xs]
+        
+        linestyle = '--' if 'batch-norm' in pretty else '-'
+        marker = 's' if 'projected' in key else 'o'
+        ax1.plot(xs, acc, marker=marker, linestyle=linestyle, label=f"{key} ({pretty})")
+
+    # Plot F1 on right subplot
+    for key, pretty in (("backbone", "backbone"), ("projected", "projected"),
+                        ('backbone', 'batch-norm'), ('projected', 'batch-norm')):
+        metrics_file = plots_dir / f"{label}_{key}_metrics.json"
+        with metrics_file.open("r") as handle:
+            metrics = json.load(handle)
+        
+        xs = sorted([float(x) for x in metrics.keys()])
+        f1_vals = [metrics[str(x)]["test_f1"] for x in xs]
+        
+        linestyle = '--' if 'batch-norm' in pretty else '-'
+        marker = 's' if 'projected' in key else 'o'
+        ax2.plot(xs, f1_vals, marker=marker, linestyle=linestyle, label=f"{key} ({pretty})")
+
+        # Configure subplots
+        ax1.set_xlabel("Training fraction")
+        ax1.set_ylabel("Test Accuracy")
+        ax1.set_title(f"Test Accuracy ({label})")
+        ax1.grid(alpha=0.3)
+        ax1.legend()
+
+        ax2.set_xlabel("Training fraction") 
+        ax2.set_ylabel("Test F1")
+        ax2.set_title(f"Test F1 ({label})")
+        ax2.grid(alpha=0.3)
+        ax2.legend()
+
         fig.tight_layout()
-        fig.savefig(plots_dir / f"{label}_{key}_curves.png", dpi=200)
+        fig.savefig(plots_dir / f"{label}_combined_curves.png", dpi=200)
         plt.close(fig)
 
-    # print the save path
-    logging.info(f"Linear probe results saved to {plots_dir}")
+        # print the save path
+        logging.info(f"Linear probe results saved to {plots_dir}")
+
+    #     xs = sorted(metrics)
+    #     acc = [metrics[x]["test_accuracy"] for x in xs]
+    #     f1_vals = [metrics[x]["test_f1"] for x in xs]
+
+    #     fig, ax = plt.subplots(figsize=(6, 4))
+    #     ax.plot(xs, acc, marker="o", label="test accuracy")
+    #     ax.plot(xs, f1_vals, marker="s", label="test F1")
+    #     ax.set_xlabel("Training fraction")
+    #     ax.set_ylabel("Score")
+    #     ax.set_title(f"Linear probe ({label}, {pretty})")
+    #     ax.grid(alpha=0.3)
+    #     ax.legend()
+    #     fig.tight_layout()
+    #     fig.savefig(plots_dir / f"{label}_{key}_curves.png", dpi=200)
+    #     plt.close(fig)
+
+    # # print the save path
+    # logging.info(f"Linear probe results saved to {plots_dir}")
 
 
 def _export_neuco(
@@ -548,7 +609,9 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
     eurosat_loaders = _build_eurosat_loaders(config)
     eurosat_embeddings: Dict[str, EmbeddingBundle] = {}
     for split, loader in eurosat_loaders.items():
-        eurosat_embeddings[split] = _extract_embeddings(
+        # The backbone features are not normalized (pre-prof)
+        # the post-head features are raw euclidean and not normalized
+        eurosat_embeddings[split] = _extract_embeddings_eurosat(
             model,
             loader,
             device=device,

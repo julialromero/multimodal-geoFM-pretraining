@@ -576,7 +576,6 @@ class TemporalMean(nn.Module):
 
 import pandas as pd
 
-
 def create_submission_from_dict(emb_dict):
     """
     Assume dictionary has format:

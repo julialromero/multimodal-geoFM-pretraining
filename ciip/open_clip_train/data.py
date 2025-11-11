@@ -85,11 +85,12 @@ class SSL4EODataset(Dataset):
         s2_band_names: Optional[Sequence[str]] = None,
     ):
         self.root = root
-        self.dataset_name = dataset_name
+        self.dataset_name = 'bands' #dataset_name
         self.transforms = transforms
         self.resize_transform = Resize(target_image_dimension)
         self.s1_dir = os.path.join(root, "S1GRD")
         self.s2_dir = os.path.join(root, "S2L2A")
+        seasons = 4
 
         if not os.path.isdir(self.s1_dir):
             raise FileNotFoundError(f"S1GRD directory not found at {self.s1_dir}")
@@ -111,6 +112,7 @@ class SSL4EODataset(Dataset):
         self.num_locations = len(self.sample_names)
 
         self.available_seasons = self._infer_num_seasons(self.s2_paths[0])
+        # raise NotImplementedError("Fix seasons handling")   
         if seasons is None:
             self.seasons = self.available_seasons
         else:
@@ -314,9 +316,32 @@ class SSL4EODataset(Dataset):
             mean, std = s2_stats[band]
             means.append(mean)
             stds.append(std)
+
+        
+        
+        # 3 print dims
+        # print(x.shape)
+        # # print means dim
+        # print(len(means))
         mean_tensor = torch.tensor(means, dtype=x.dtype, device=x.device)[:, None, None]
         std_tensor = torch.tensor(stds, dtype=x.dtype, device=x.device)[:, None, None]
-        return (x - mean_tensor) / std_tensor
+
+        if x.shape[0] == 12:
+            # reshape stats to [C, 1, 1, ..., 1] with (x.ndim-1) ones
+            shape = (12,) + (1,) * (x.ndim - 1)
+            mean = mean_tensor.view(shape)
+            std  = std_tensor.view(shape)
+            return (x - mean) / std
+
+        # Channels-last case: [..., C] (e.g., [H,W,C] or [T,H,W,C])
+        if x.shape[-1] == 12:
+            shape = (1,) * (x.ndim - 1) + (12,)
+            mean = mean_tensor.view(shape)
+            std  = std_tensor.view(shape)
+            return (x - mean) / std
+    
+        # print(mean_tensor.shape)
+        # return (x - mean_tensor) / std_tensor
 
     def int_to_filepath(self, idx: int) -> Tuple[int, int]:
         if idx < 0 or idx >= self.length:
