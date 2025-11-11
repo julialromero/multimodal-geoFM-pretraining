@@ -270,17 +270,9 @@ class CiipLoss(nn.Module):
             gathered_s1_features = None
             gathered_s2_features = None
 
-            # Clamp temperature such that logits are not scaled more than 100x.
-            # ln(100) = ~4.6052 in the original ATMG implementation, which clamps
-            # the logarithmic parameter before exponentiating. Since we receive
-            # the exponentiated scale here, we clamp directly at 100 to achieve
-            # the same behaviour.
-            max_scale = math.exp(4.6052)
-            _scale = torch.clamp(logit_scale, max=max_scale)
-
             contrastive_loss = 0.5 * (
-                F.cross_entropy(_scale * s1_logits, targets)
-                + F.cross_entropy(_scale * s2_logits, targets)
+                F.cross_entropy(logit_scale * s1_logits, targets)
+                + F.cross_entropy(logit_scale * s2_logits, targets)
             )
         else:
             if gather_for_vc:

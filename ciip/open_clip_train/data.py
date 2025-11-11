@@ -1,9 +1,11 @@
 # import ast
 # import json
+import glob
 import logging
 import os
 from dataclasses import dataclass
 from multiprocessing import Value
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import hydra
 import numpy as np
@@ -12,6 +14,8 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torchvision.transforms import Resize
+import xarray as xr
+from zarr.storage import ZipStore
 
 
 ### band statistics: mean & std
@@ -24,6 +28,278 @@ S2A_STD = [1108.02887453, 1155.15170768, 1183.6292542, 1368.11351514, 1370.26503
 
 S2C_MEAN = [1605.57504906, 1390.78157673, 1314.8729939, 1363.52445545, 1549.44374991, 2091.74883118, 2371.7172463, 2299.90463006, 2560.29504086, 830.06605044, 22.10351321, 2177.07172323, 1524.06546312]
 S2C_STD = [786.78685367, 850.34818441, 875.06484736, 1138.84957046, 1122.17775652, 1161.59187054, 1274.39184232, 1248.42891965, 1345.52684884, 577.31607053, 51.15431158, 1336.09932639, 1136.53823676]
+S2L2A_MEAN = [1793.243, 1924.863, 2184.553, 2340.936, 2671.402, 3240.082, 3468.412, 3563.244, 3627.704, 3711.071, 3416.714, 2849.625]
+S2L2A_STD = [1160.144, 1201.092, 1219.943, 1397.225, 1400.035, 1373.136, 1429.17, 1485.025, 1447.836, 1652.703, 1471.002, 1365.307]
+
+
+def _open_zarr_dataset(source):
+    try:
+        return xr.open_zarr(source, consolidated=True)
+    except Exception:
+        return xr.open_zarr(source, consolidated=False)
+
+
+def _canonicalize_band_label(label: object) -> str:
+    text = str(label).strip()
+    text = text.upper()
+    if text.startswith("B"):
+        text = text[1:]
+    if text.endswith("A"):
+        core = text[:-1].lstrip("0")
+        return f"{core or '0'}A"
+    core = text.lstrip("0")
+    return core or "0"
+
+
+def _transpose_spatial_first(da: xr.DataArray, band_dim: Optional[str]) -> xr.DataArray:
+    dims = list(da.dims)
+    ordered: List[str] = []
+    if band_dim and band_dim in dims:
+        ordered.append(band_dim)
+    spatial_candidates = [
+        dim
+        for dim in ("y", "x", "latitude", "longitude", "lat", "lon", "row", "col")
+        if dim in dims and dim not in ordered
+    ]
+    for dim in dims:
+        if dim not in ordered and dim not in spatial_candidates:
+            ordered.append(dim)
+    ordered.extend([d for d in spatial_candidates if d not in ordered])
+    if ordered and ordered != dims:
+        da = da.transpose(*ordered)
+    return da
+
+
+class SSL4EOV11Dataset(Dataset):
+    """Dataset for SSL4EO v1.1 .zarr.zip tiles (S1GRD + S2L2A)."""
+
+    DEFAULT_S2_BANDS = ["1", "2", "3", "4", "5", "6", "7", "8", "8A", "9", "11", "12"]
+
+    def __init__(
+        self,
+        root: str,
+        dataset_name: str = "bands",
+        seasons: Optional[int] = None,
+        transforms=None,
+        target_image_dimension: Tuple[int, int] = (264, 264),
+        s2_band_names: Optional[Sequence[str]] = None,
+    ):
+        self.root = root
+        self.dataset_name = dataset_name
+        self.transforms = transforms
+        self.resize_transform = Resize(target_image_dimension)
+
+        self.s1_dir = os.path.join(root, "S1GRD")
+        self.s2_dir = os.path.join(root, "S2L2A")
+
+        if not os.path.isdir(self.s1_dir):
+            raise FileNotFoundError(f"S1GRD directory not found at {self.s1_dir}")
+        if not os.path.isdir(self.s2_dir):
+            raise FileNotFoundError(f"S2L2A directory not found at {self.s2_dir}")
+
+        s1_tiles = {os.path.basename(p): p for p in glob.glob(os.path.join(self.s1_dir, "*.zarr"))}
+        s1_tiles.update({os.path.basename(p): p for p in glob.glob(os.path.join(self.s1_dir, "*.zarr.zip"))})
+        s2_tiles = {os.path.basename(p): p for p in glob.glob(os.path.join(self.s2_dir, "*.zarr"))}
+        s2_tiles.update({os.path.basename(p): p for p in glob.glob(os.path.join(self.s2_dir, "*.zarr.zip"))})
+
+        common_tiles = sorted(set(s1_tiles) & set(s2_tiles))
+        if not common_tiles:
+            raise RuntimeError(f"No matching S1/S2 tiles found under {root}")
+
+        self.sample_names = common_tiles
+        self.s1_paths = [s1_tiles[name] for name in common_tiles]
+        self.s2_paths = [s2_tiles[name] for name in common_tiles]
+        self.num_locations = len(self.sample_names)
+
+        self.available_seasons = self._infer_num_seasons(self.s2_paths[0])
+        if seasons is None:
+            self.seasons = self.available_seasons
+        else:
+            if seasons > self.available_seasons:
+                raise ValueError(
+                    f"Requested {seasons} seasons but tiles only provide {self.available_seasons}"
+                )
+            self.seasons = seasons
+
+        self.length = self.num_locations * self.seasons
+
+        self.s2_band_names = [
+            _canonicalize_band_label(b)
+            for b in (s2_band_names if s2_band_names is not None else self.DEFAULT_S2_BANDS)
+        ]
+        if len(self.s2_band_names) != len(S2L2A_MEAN):
+            raise ValueError("Unexpected number of S2 band names for provided statistics")
+
+        self.s2_stats: Dict[str, Tuple[float, float]] = {
+            band: (mean, std)
+            for band, mean, std in zip(self.s2_band_names, S2L2A_MEAN, S2L2A_STD)
+        }
+
+        self._s2_band_selection: Optional[Tuple[str, List[int]]] = None
+        self._s2_band_selection = self._resolve_s2_band_selection(self.s2_paths[0])
+
+        logging.debug(
+            "Loaded SSL4EO v1.1 dataset with %d tiles and %d seasons",
+            self.num_locations,
+            self.seasons,
+        )
+
+    def __len__(self) -> int:
+        return self.length
+
+    def __getitem__(self, idx: int):
+        if idx < 0 or idx >= self.length:
+            raise IndexError("Index out of range")
+
+        location_idx = idx // self.seasons
+        season_idx = idx % self.seasons
+
+        s1_array = self._load_zarr_slice(self.s1_paths[location_idx], season_idx)
+        s2_array = self._load_zarr_slice(
+            self.s2_paths[location_idx],
+            season_idx,
+            band_selection=self._s2_band_selection,
+        )
+
+        s1_tensor = torch.from_numpy(s1_array).float()
+        s2_tensor = torch.from_numpy(s2_array).float()
+
+        s1_tensor = self.resize_transform(s1_tensor)
+        s2_tensor = self.resize_transform(s2_tensor)
+
+        if self.transforms is not None:
+            s1_tensor = self.transforms(s1_tensor)
+            s2_tensor = self.transforms(s2_tensor)
+
+        s1_tensor = self.normalize_s1(s1_tensor)
+        s2_tensor = self.normalize_s2(s2_tensor, self.s2_stats, self.s2_band_names)
+
+        return s1_tensor, s2_tensor
+
+    def _infer_num_seasons(self, sample_path: str) -> int:
+        def _extract(ds: xr.Dataset) -> int:
+            if self.dataset_name not in ds:
+                raise KeyError(f"Dataset '{self.dataset_name}' not found in {sample_path}")
+            da = ds[self.dataset_name]
+            if "time" in da.dims:
+                return int(da.sizes["time"])
+            return 1
+
+        if sample_path.endswith(".zarr.zip"):
+            with ZipStore(sample_path, mode="r") as store:
+                ds = _open_zarr_dataset(store)
+                try:
+                    return _extract(ds)
+                finally:
+                    ds.close()
+        ds = _open_zarr_dataset(sample_path)
+        try:
+            return _extract(ds)
+        finally:
+            ds.close()
+
+    def _resolve_s2_band_selection(self, sample_path: str) -> Optional[Tuple[str, List[int]]]:
+        def _compute(ds: xr.Dataset) -> Optional[Tuple[str, List[int]]]:
+            da = ds[self.dataset_name]
+            for candidate in ("band", "bands", "variable", "channels"):
+                if candidate in da.dims:
+                    coord = da.coords.get(candidate)
+                    if coord is None:
+                        continue
+                    available = [_canonicalize_band_label(v) for v in coord.values]
+                    indices: List[int] = []
+                    for desired in self.s2_band_names:
+                        if desired not in available:
+                            raise ValueError(
+                                f"Band '{desired}' not found in tile ({available})"
+                            )
+                        indices.append(available.index(desired))
+                    return candidate, indices
+            return None
+
+        if sample_path.endswith(".zarr.zip"):
+            with ZipStore(sample_path, mode="r") as store:
+                ds = _open_zarr_dataset(store)
+                try:
+                    return _compute(ds)
+                finally:
+                    ds.close()
+        ds = _open_zarr_dataset(sample_path)
+        try:
+            return _compute(ds)
+        finally:
+            ds.close()
+
+    def _load_zarr_slice(
+        self,
+        sample_path: str,
+        season_idx: int,
+        band_selection: Optional[Tuple[str, List[int]]] = None,
+    ) -> np.ndarray:
+        def _extract(ds: xr.Dataset) -> np.ndarray:
+            if self.dataset_name not in ds:
+                raise KeyError(f"Dataset '{self.dataset_name}' not found in {sample_path}")
+            da = ds[self.dataset_name]
+            if "time" in da.dims:
+                if season_idx >= da.sizes["time"]:
+                    raise IndexError(
+                        f"Requested season {season_idx} but tile only has {da.sizes['time']}"
+                    )
+                da = da.isel(time=season_idx)
+            if band_selection is not None:
+                band_dim, indices = band_selection
+                if band_dim in da.dims:
+                    da = da.isel({band_dim: indices})
+            band_dim = band_selection[0] if band_selection is not None else None
+            da = _transpose_spatial_first(da, band_dim)
+            array = np.ascontiguousarray(da.values, dtype=np.float32)
+            return array
+
+        if sample_path.endswith(".zarr.zip"):
+            with ZipStore(sample_path, mode="r") as store:
+                ds = _open_zarr_dataset(store)
+                try:
+                    return _extract(ds)
+                finally:
+                    ds.close()
+        ds = _open_zarr_dataset(sample_path)
+        try:
+            return _extract(ds)
+        finally:
+            ds.close()
+
+    def normalize_s1(self, x: torch.Tensor) -> torch.Tensor:
+        mean = torch.tensor(S1_MEAN, dtype=x.dtype, device=x.device)[:, None, None]
+        std = torch.tensor(S1_STD, dtype=x.dtype, device=x.device)[:, None, None]
+        return (x - mean) / std
+
+    def normalize_s2(
+        self,
+        x: torch.Tensor,
+        s2_stats: Dict[str, Tuple[float, float]],
+        s2_bands: Sequence[str],
+    ) -> torch.Tensor:
+        means, stds = [], []
+        for band in s2_bands:
+            mean, std = s2_stats[band]
+            means.append(mean)
+            stds.append(std)
+        mean_tensor = torch.tensor(means, dtype=x.dtype, device=x.device)[:, None, None]
+        std_tensor = torch.tensor(stds, dtype=x.dtype, device=x.device)[:, None, None]
+        return (x - mean_tensor) / std_tensor
+
+    def int_to_filepath(self, idx: int) -> Tuple[int, int]:
+        if idx < 0 or idx >= self.length:
+            raise ValueError("Integer idx must be in range [0, n)")
+        location_idx = idx // self.seasons
+        season_idx = idx % self.seasons
+        return location_idx, season_idx
+
+    def get_sample_uid(self, idx: int) -> Tuple[str, str]:
+        location_idx, season_idx = self.int_to_filepath(idx)
+        name = self.sample_names[location_idx]
+        uid = f"{name}_season{season_idx}"
+        return uid, self.s1_paths[location_idx]
 
 
 # ssl4eo

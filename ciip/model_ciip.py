@@ -632,8 +632,6 @@ class LorentzCIIP(CIIP):
         s2_feats = self.encode_s2(s2, lorentz=True)
         s1_feats = self.encode_s1(s1, lorentz=True)
 
-        # Clamp logit scale to prevent extreme scaling (ln(100) ≈ 4.6052)
-        self.logit_scale.data = torch.clamp(self.logit_scale.data, max=4.6052)
         logit_scale = self.logit_scale.exp()
 
         # Return dictionary similar to base CIIP class

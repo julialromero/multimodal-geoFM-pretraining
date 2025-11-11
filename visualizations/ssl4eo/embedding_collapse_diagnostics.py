@@ -9,7 +9,6 @@ producing diagnostics for a single checkpoint epoch.
 
 from __future__ import annotations
 
-import argparse
 import contextlib
 import inspect
 import json
@@ -17,19 +16,21 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 
-from ciip.open_clip_train.data import get_data
+from ciip.open_clip_train.data import SSL4EODataset
 from ciip.open_clip_train.precision import get_autocast
-from ciip.open_clip_train.utils import create_model
+
+if TYPE_CHECKING:  # pragma: no cover - imported for type checking only
+    from ciip.evaluation.unified_evaluation import ModelEvalConfig
 
 try:  # optional dependency
     import umap  # type: ignore
@@ -70,6 +71,28 @@ class EpochDiagnostics:
     cross_cka: Optional[np.ndarray]
     cross_s1_layers: List[str]
     cross_s2_layers: List[str]
+
+
+# ---------------------------------------------------------------------------
+# Runtime configuration
+# ---------------------------------------------------------------------------
+
+
+DEFAULT_S2_BANDS: Sequence[str] = (
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+    "7",
+    "8",
+    "8A",
+    "9",
+    "10",
+    "11",
+    "12",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -311,27 +334,21 @@ def compute_cross_encoder_cka(
     return names_1, names_2, matrix
 
 
-# ---------------------------------------------------------------------------
-# Model and data helpers
-# ---------------------------------------------------------------------------
-
-
-def _resolve_config(args: argparse.Namespace) -> DictConfig:
-    repo_root = Path(__file__).resolve().parents[2]
-    default_config_dir = repo_root / "ciip" / "open_clip_train" / "configs"
-    config_dir = args.config_path or default_config_dir
-    config_file = (Path(config_dir) / f"{args.config_name}.yaml").resolve()
-    if not config_file.is_file():
-        raise FileNotFoundError(f"Could not find config file '{config_file}'")
-    config = OmegaConf.load(config_file)
-    OmegaConf.set_struct(config, False)
-    if args.dataset_root is not None:
-        config.dataset.root = str(args.dataset_root)
-    config.io.checkpoint_path = str(args.checkpoint_root)
-    config.datamodule.distributed = False
-    if "horovod" in config.datamodule:
-        config.datamodule.horovod = False
-    return config
+def _build_ssl4eo_dataset(
+    dataset_root: Path,
+    *,
+    s2_tier: str,
+    s2_bands: Sequence[str],
+    image_dimension: int,
+) -> SSL4EODataset:
+    ensure_hydra_original_cwd()
+    return SSL4EODataset(
+        root=str(dataset_root),
+        s2_tier=str(s2_tier),
+        s2_bands=list(s2_bands),
+        transforms=None,
+        target_image_dimension=(image_dimension, image_dimension),
+    )
 
 
 # def load_model_from_checkpoint(
@@ -593,22 +610,6 @@ def extract_embeddings_for_dataset(
 # ---------------------------------------------------------------------------
 
 
-def _discover_checkpoint(checkpoint_root: Path, epoch: int) -> Path:
-    patterns = [
-        f"epoch_{epoch}.pt",
-        f"epoch_{epoch:02d}.pt",
-        f"epoch_{epoch:03d}.pt",
-    ]
-    for pattern in patterns:
-        candidate = checkpoint_root / pattern
-        if candidate.exists():
-            return candidate
-    matches = sorted(checkpoint_root.glob(f"*{epoch}*.pt"))
-    if not matches:
-        raise FileNotFoundError(f"No checkpoint for epoch {epoch} under {checkpoint_root}")
-    return matches[0]
-
-
 def _compute_epoch_diagnostics(
     label: str,
     epoch: int,
@@ -720,26 +721,6 @@ def plot_epoch_diagnostics(epoch_diag: EpochDiagnostics, output_dir: Path) -> Pa
     return output_path
 
 
-# ---------------------------------------------------------------------------
-# CLI entry point
-# ---------------------------------------------------------------------------
-
-
-def _build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Single-epoch embedding diagnostics")
-    parser.add_argument("--checkpoint-root", type=Path, required=True, help="Directory containing checkpoint files")
-    parser.add_argument("--epoch", type=int, default=20, help="Epoch number to analyse")
-    parser.add_argument("--output-dir", type=Path, required=True, help="Directory for diagnostics outputs")
-    parser.add_argument("--config-name", type=str, default="ssl4eo_clip", help="Name of the training config to load")
-    parser.add_argument("--config-path", type=Path, default=None, help="Optional directory that stores config files")
-    parser.add_argument("--dataset-root", type=Path, default=None, help="Override dataset root from config")
-    parser.add_argument("--subset-size", type=int, default=2048, help="Number of samples to evaluate (0 = full dataset)")
-    parser.add_argument("--subset-seed", type=int, default=0, help="Random seed for subset sampling")
-    parser.add_argument("--device", type=str, default=None, help="Torch device (default: cuda if available else cpu)")
-    parser.add_argument("--skip-final-fc", action="store_true", help="Replace encoder FC layers with identity")
-    return parser
-
-
 def _build_subset(dataset: torch.utils.data.Dataset, subset_size: int, seed: int) -> torch.utils.data.Dataset:
     total = len(dataset)
     if subset_size <= 0 or subset_size >= total:
@@ -777,14 +758,25 @@ def run_single_epoch_diagnostics(args: argparse.Namespace) -> EpochDiagnostics:
         model,
         subset,
         input_dtype=input_dtype,
-        device=device,
+        device=device_obj,
         autocast=autocast_fn,
     )
+
     label = checkpoint_path.stem
-    epoch_diag = _compute_epoch_diagnostics(label, args.epoch, s1_embeddings, s2_embeddings, sample_ids)
-    epoch_dir = args.output_dir / f"epoch_{args.epoch:04d}"
+    resolved_epoch = epoch if epoch is not None else _infer_epoch_from_checkpoint(checkpoint_path)
+    diagnostics_epoch = resolved_epoch if resolved_epoch is not None else -1
+
+    epoch_diag = _compute_epoch_diagnostics(label, diagnostics_epoch, s1_embeddings, s2_embeddings, sample_ids)
+
+    output_dir = config.output_dir.expanduser()
+    if resolved_epoch is not None and resolved_epoch >= 0:
+        epoch_dir = output_dir / f"epoch_{resolved_epoch:04d}"
+    else:
+        epoch_dir = output_dir / label
     epoch_dir.mkdir(parents=True, exist_ok=True)
+
     plot_epoch_diagnostics(epoch_diag, epoch_dir)
+
     metrics_path = epoch_dir / "metrics.json"
     metrics_payload = {
         "label": epoch_diag.label,
@@ -797,15 +789,27 @@ def run_single_epoch_diagnostics(args: argparse.Namespace) -> EpochDiagnostics:
     }
     with metrics_path.open("w", encoding="utf-8") as handle:
         json.dump(metrics_payload, handle, indent=2)
+
     return epoch_diag
 
 
-def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-    parser = _build_arg_parser()
-    args = parser.parse_args()
-    run_single_epoch_diagnostics(args)
+__all__ = ["EpochDiagnostics", "run_single_epoch_diagnostics"]
 
 
 if __name__ == "__main__":  # pragma: no cover
-    main()
+    from pathlib import Path
+    from ciip.evaluation.unified_evaluation import ModelEvalConfig, run_full_evaluation
+
+    model_root = '/local/ms-data/SSL4EO/model/'
+    model_path = '2025_11_05-21_04_44-model_resnet50-lr_0.001-b_128-j_6-p_amp/'
+    checkpoint_root = Path(model_root) / model_path / "checkpoints"
+    output_dir = Path("diagnostics/output")
+
+    cfg = ModelEvalConfig(
+        checkpoint=Path(f"{checkpoint_root}/epoch_10.pt"),
+        eurosat_root=Path("/local/ms-data/EuroSAT/"),
+        neuco_root=Path("/local/ms-data/SSL4EO-S12-downstream/data"),
+        output_dir=Path("/home/juro4948/ciip/diagnostics/unified_eval/curv_init_1")
+    )
+
+    run_single_epoch_diagnostics(cfg, epoch=10)

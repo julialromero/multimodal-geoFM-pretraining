@@ -98,6 +98,7 @@ train:
   val_frac: 0.0
   epochs: 200
   lr: 0.001
+  curvature_lr: 0.01
   wd: 0.02 #0.2
   warmup: 5000
   beta1: 0.9
