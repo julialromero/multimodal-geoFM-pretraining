@@ -343,7 +343,7 @@ def _run_linear_probe(
     percents = (0.01, 0.05, 0.1, 0.25, 0.5, 1.0)
     rng = np.random.default_rng(config.random_seed)
 
-    def _evaluate(feature_key: str, batch_norm) -> Dict[float, Dict[str, float]]:
+    def _evaluate(feature_key: str, zscore_norm: bool) -> Dict[float, Dict[str, float]]:
         results: Dict[float, Dict[str, float]] = {}
         train = embeddings["train"]
         val = embeddings["val"]
@@ -353,7 +353,7 @@ def _run_linear_probe(
         val_feats = getattr(val, feature_key)
         test_feats = getattr(test, feature_key)
 
-        if batch_norm:
+        if zscore_norm:
             mean = train_feats.mean(axis=0, keepdims=True)
             std = train_feats.std(axis=0, keepdims=True) + 1e-10
             train_feats = (train_feats - mean) / std
@@ -391,20 +391,20 @@ def _run_linear_probe(
         ("backbone", "backbone", False),
         ("posthead", "posthead", False),
         ("projected", "projected", False),
-        ("backbone", "backbone_batchnorm", True),
-        ("posthead", "posthead_batchnorm", True),
-        ("projected", "projected_batchnorm", True),
+        ("backbone", "backbone_zscore_norm", True),
+        ("posthead", "posthead_zscore_norm", True),
+        ("projected", "projected_zscore_norm", True),
     )
 
-    for feature_key, suffix, use_batch_norm in probe_specs:
-        metrics = _evaluate(feature_key, batch_norm=use_batch_norm)
+    for feature_key, suffix, use_zscore_norm in probe_specs:
+        metrics = _evaluate(feature_key, zscore_norm=use_zscore_norm)
         with (plots_dir / f"{label}_{suffix}_metrics.json").open("w") as handle:
             json.dump(metrics, handle, indent=2)
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
     marker_map = {"backbone": "o", "posthead": "^", "projected": "s"}
 
-    for feature_key, suffix, use_batch_norm in probe_specs:
+    for feature_key, suffix, use_zscore_norm in probe_specs:
         metrics_file = plots_dir / f"{label}_{suffix}_metrics.json"
         with metrics_file.open("r", encoding="utf-8") as handle:
             metrics = json.load(handle)
@@ -414,12 +414,12 @@ def _run_linear_probe(
 
         xs = sorted(float(x) for x in metrics.keys())
         acc = [metrics[str(x)]["test_accuracy"] for x in xs]
-        linestyle = "--" if use_batch_norm else "-"
+        linestyle = "--" if use_zscore_norm else "-"
         marker = marker_map.get(feature_key, "o")
-        label_suffix = "batch-norm" if use_batch_norm else "raw"
+        label_suffix = "z-score" if use_zscore_norm else "raw"
         ax1.plot(xs, acc, marker=marker, linestyle=linestyle, label=f"{feature_key} ({label_suffix})")
 
-    for feature_key, suffix, use_batch_norm in probe_specs:
+    for feature_key, suffix, use_zscore_norm in probe_specs:
         metrics_file = plots_dir / f"{label}_{suffix}_metrics.json"
         with metrics_file.open("r", encoding="utf-8") as handle:
             metrics = json.load(handle)
@@ -429,9 +429,9 @@ def _run_linear_probe(
 
         xs = sorted(float(x) for x in metrics.keys())
         f1_vals = [metrics[str(x)]["test_f1"] for x in xs]
-        linestyle = "--" if use_batch_norm else "-"
+        linestyle = "--" if use_zscore_norm else "-"
         marker = marker_map.get(feature_key, "o")
-        label_suffix = "batch-norm" if use_batch_norm else "raw"
+        label_suffix = "z-score" if use_zscore_norm else "raw"
         ax2.plot(xs, f1_vals, marker=marker, linestyle=linestyle, label=f"{feature_key} ({label_suffix})")
 
     ax1.set_xlabel("Training fraction")
