@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import contextlib
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -86,14 +87,18 @@ from ciip.evaluation.export_neuco_embeddings import (  # type: ignore
 )
 from visualizations.ssl4eo.embedding_collapse_diagnostics import (  # type: ignore
     DEFAULT_S2_BANDS,
+    EpochDiagnostics,
+    ModalityEmbeddings,
+    compute_cross_encoder_cka,
     compute_linear_cka,
     compute_projection,
     compute_singular_values,
+    compute_within_encoder_cka,
     ensure_hydra_original_cwd,
     extract_embeddings_for_dataset,
+    plot_epoch_diagnostics,
     plot_projection,
     preprocess_projection_data,
-    ModalityEmbeddings
 )
 from visualizations.ssl4eo.hyperbolic_visualization import (  # type: ignore
     compute_hyperbolic_context,
@@ -308,7 +313,7 @@ def _extract_ssl4eo_embeddings(
     model: nn.Module,
     *,
     device: torch.device,
-) -> EmbeddingBundle:
+) -> Tuple[ModalityEmbeddings, ModalityEmbeddings, List[str]]:
     dataset = _build_ssl4eo_dataset(config)
 
     autocast = (
@@ -342,7 +347,7 @@ def _extract_ssl4eo_embeddings(
     #     labels=None,
     #     ids=sample_ids if sample_ids else None,
     # )
-    return s1_embeddings, s2_embeddings
+    return s1_embeddings, s2_embeddings, sample_ids
 
 
 def _run_linear_probe(
@@ -510,6 +515,7 @@ def _run_embedding_diagnostics(
     s1_bundle: ModalityEmbeddings,
     s2_bundle: ModalityEmbeddings,
     *,
+    sample_ids: Optional[Sequence[str]] = None,
     output_dir: Path,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -536,6 +542,11 @@ def _run_embedding_diagnostics(
         modality_tensors["s1"]["projected"], modality_tensors["s2"]["projected"]
     )
 
+    s1_posthead_singular = compute_singular_values(modality_tensors["s1"]["posthead"])
+    s1_projected_singular = compute_singular_values(modality_tensors["s1"]["projected"])
+    s2_posthead_singular = compute_singular_values(modality_tensors["s2"]["posthead"])
+    s2_projected_singular = compute_singular_values(modality_tensors["s2"]["projected"])
+
     cka_payload = {
         "s1": {
             "layers": s1_layers,
@@ -556,11 +567,47 @@ def _run_embedding_diagnostics(
     with (output_dir / "cka.json").open("w", encoding="utf-8") as handle:
         json.dump(cka_payload, handle, indent=2)
 
+    label_source = (
+        (config.checkpoint.stem if config.checkpoint is not None else None)
+        or config.model_weights
+        or config.model_type
+    )
+    epoch_source = (
+        (config.checkpoint.stem if config.checkpoint is not None else "")
+        or (config.model_weights or "")
+    )
+    epoch_match = re.search(r"epoch[_=-]?(\d+)", epoch_source)
+    epoch_value = int(epoch_match.group(1)) if epoch_match else 0
+    sample_count = int(s1_bundle.raw.shape[0]) if s1_bundle.raw.ndim > 0 else 0
+    diagnostic_ids = (
+        [str(item) for item in sample_ids]
+        if sample_ids is not None and len(sample_ids) > 0
+        else [str(index) for index in range(sample_count)]
+    )
+
+    epoch_diagnostics = EpochDiagnostics(
+        label=label_source,
+        epoch=epoch_value,
+        ids=diagnostic_ids,
+        s1=s1_bundle,
+        s2=s2_bundle,
+        s1_singular_values=s1_posthead_singular,
+        s2_singular_values=s2_posthead_singular,
+        s1_layers=s1_layers,
+        s2_layers=s2_layers,
+        s1_within_cka=s1_within,
+        s2_within_cka=s2_within,
+        cross_cka=cross_matrix,
+        cross_s1_layers=cross_s1_layers,
+        cross_s2_layers=cross_s2_layers,
+    )
+    plot_epoch_diagnostics(epoch_diagnostics, output_dir)
+
     spectra = [
-        ("s1", "posthead", compute_singular_values(modality_tensors["s1"]["posthead"])),
-        ("s1", "projected", compute_singular_values(modality_tensors["s1"]["projected"])),
-        ("s2", "posthead", compute_singular_values(modality_tensors["s2"]["posthead"])),
-        ("s2", "projected", compute_singular_values(modality_tensors["s2"]["projected"])),
+        ("s1", "posthead", s1_posthead_singular),
+        ("s1", "projected", s1_projected_singular),
+        ("s2", "posthead", s2_posthead_singular),
+        ("s2", "projected", s2_projected_singular),
     ]
 
     for modality, feature_name, spectrum in spectra:
@@ -700,7 +747,7 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
 
     s1_ssl4eo = s2_ssl4eo = None
     if ssl4eo_available:
-        s1_ssl4eo, s2_ssl4eo = _extract_ssl4eo_embeddings(
+        s1_ssl4eo, s2_ssl4eo, ssl4eo_ids = _extract_ssl4eo_embeddings(
             config,
             adapter,
             device=device,
@@ -710,6 +757,7 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
             config,
             s1_ssl4eo,
             s2_ssl4eo,
+            sample_ids=ssl4eo_ids,
             output_dir=output_dir / "embedding_diagnostics",
         )
         logging.info("Completed SSL4EO diagnostics")
