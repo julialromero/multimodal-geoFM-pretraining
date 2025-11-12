@@ -40,6 +40,26 @@ except ImportError:  # pragma: no cover - optional in CI
 
 _LOGGER = logging.getLogger("embedding_collapse")
 
+
+class _LayerCaptureController:
+    """Control whether forward hooks capture activations."""
+
+    def __init__(self) -> None:
+        self._enabled: bool = True
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    @contextlib.contextmanager
+    def suspend(self):
+        previous = self._enabled
+        self._enabled = False
+        try:
+            yield
+        finally:
+            self._enabled = previous
+
 # ---------------------------------------------------------------------------
 # Dataclasses
 # ---------------------------------------------------------------------------
@@ -394,14 +414,19 @@ def _unwrap_subset(dataset: torch.utils.data.Dataset) -> Tuple[torch.utils.data.
     return dataset, range(len(dataset))
 
 
-def _register_layer_hooks(model: nn.Module) -> Tuple[Dict[str, Dict[str, List[torch.Tensor]]], List]:
+def _register_layer_hooks(
+    model: nn.Module,
+) -> Tuple[Dict[str, Dict[str, List[torch.Tensor]]], List, _LayerCaptureController]:
     layer_caches: Dict[str, Dict[str, List[torch.Tensor]]] = {"s1": {}, "s2": {}}
     handles: List = []
+    controller = _LayerCaptureController()
 
     def _make_layer_hook(key: str, name: str):
         cache = layer_caches[key].setdefault(name, [])
 
         def hook(module: nn.Module, inputs, output):  # type: ignore[override]
+            if not controller.enabled:
+                return
             tensor = output[0] if isinstance(output, (list, tuple)) else output
             if not isinstance(tensor, torch.Tensor):
                 return
@@ -453,7 +478,7 @@ def _register_layer_hooks(model: nn.Module) -> Tuple[Dict[str, Dict[str, List[to
                 break
         _attach_layers(encoder_s2, "s2")
 
-    return layer_caches, handles
+    return layer_caches, handles, controller
 
 
 def _encoder_accepts_lorentz(method) -> bool:
@@ -495,7 +520,7 @@ def extract_embeddings_for_dataset(
     autocast,
 ) -> Tuple[ModalityEmbeddings, ModalityEmbeddings, List[str]]:
     base_dataset, indices = _unwrap_subset(dataset)
-    layer_cache, handles = _register_layer_hooks(model)
+    layer_cache, handles, capture_controller = _register_layer_hooks(model)
     s1_vectors: List[torch.Tensor] = []
     s2_vectors: List[torch.Tensor] = []
     s1_norm_vectors: List[torch.Tensor] = []
@@ -544,37 +569,38 @@ def extract_embeddings_for_dataset(
                     normalize=False,
                     # post_head=True
                     )
-                
-                # if lorentzciip model, project hyperbolic is true
-                if _encoder_accepts_lorentz(encode_s1):
-                    s1_norm = _run_encoder_method(
-                        encode_s1,
-                        s1_tensor,
-                        project_hyperbolic=True,
-                        # post_head=True
-                    )
-                    s2_norm = _run_encoder_method(
-                        encode_s2,
-                        s2_tensor,
-                        project_hyperbolic=True,
-                        # post_head=True
-                    )
-                # else take L2 norm
-                else:
-                    s1_norm = _run_encoder_method(
-                        encode_s1,
-                        s1_tensor,
-                        project_hyperbolic=False,
-                        normalize=True,
-                        # post_head=True
-                    )
-                    s2_norm = _run_encoder_method(
-                        encode_s2,
-                        s2_tensor,
-                        project_hyperbolic=False,
-                        normalize=True,
-                        # post_head=True
-                    )
+
+                with capture_controller.suspend():
+                    # if lorentzciip model, project hyperbolic is true
+                    if _encoder_accepts_lorentz(encode_s1):
+                        s1_norm = _run_encoder_method(
+                            encode_s1,
+                            s1_tensor,
+                            project_hyperbolic=True,
+                            # post_head=True
+                        )
+                        s2_norm = _run_encoder_method(
+                            encode_s2,
+                            s2_tensor,
+                            project_hyperbolic=True,
+                            # post_head=True
+                        )
+                    # else take L2 norm
+                    else:
+                        s1_norm = _run_encoder_method(
+                            encode_s1,
+                            s1_tensor,
+                            project_hyperbolic=False,
+                            normalize=True,
+                            # post_head=True
+                        )
+                        s2_norm = _run_encoder_method(
+                            encode_s2,
+                            s2_tensor,
+                            project_hyperbolic=False,
+                            normalize=True,
+                            # post_head=True
+                        )
 
             
             s1_vectors.append(s1_raw.squeeze(0).cpu().to(torch.float32))
