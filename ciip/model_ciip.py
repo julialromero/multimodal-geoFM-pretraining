@@ -589,6 +589,7 @@ class LorentzCIIP(CIIP):
             raise ValueError("Cannot project to Lorentzian space before projection head. Set post_head=True when lorentz=True.")
             
         # Get Euclidean features from the encoder (without L2 normalization).
+
         s1_feats = super().encode_s1(s1, normalize=False, post_head=post_head)
 
         if lorentz:

@@ -469,8 +469,6 @@ class E2SChallengeDataset(Dataset):
         self.concat = concat
         self.output_file_name = output_file_name
         self.shift_s2_channels = shift_s2_channels
-
-        modalities[0] = modalities[0].upper()
         
         print(os.path.join(data_path, modalities[0], '*', '*.zarr.zip'))
         self.samples = glob.glob(os.path.join(data_path, modalities[0], '*', '*.zarr.zip'))
@@ -501,7 +499,7 @@ class E2SChallengeDataset(Dataset):
             data[modality] = _open_xr_zarr_any(sample_path).isel(time=season_index)[self.dataset_name].values
 
             # Add shift to align S2 channels with SSL4EO-S12 v1.1
-            if self.shift_s2_channels and (modality in ['s2l1c', 's2l2a']):
+            if self.shift_s2_channels and (modality in ['s2l1c', 's2l2a'] or modality in ['S2L1C', 'S2L2A']):
                 data[modality] += 1000
 
         n_bands_per_modality = {m: d.shape[-3] for m, d in data.items()}

@@ -39,7 +39,7 @@ from torchvision import transforms
 from ciip.eval_utils import CustomTransform
 from ciip.evaluation.model_utils import EvaluationAdapter, build_evaluation_adapter
 from ciip.model_ciip import LorentzCIIP
-
+import os
 
 ## EUROSAT STANDARDIZATION VALUES
 MEAN = {
@@ -125,7 +125,7 @@ class ModelEvalConfig:
     ssl4eo_subset_seed: int = 0
     ssl4eo_s2_tier: str = "s2c"
     ssl4eo_s2_bands: Sequence[str] = DEFAULT_S2_BANDS
-    ssl4eo_image_dimension: int = 264
+    ssl4eo_image_dimension: int = 224
 
 
 @dataclass
@@ -158,7 +158,11 @@ def _extract_embeddings(
     
     for batch in tqdm(dataloader, desc="Extracting embeddings"):
         if isinstance(batch, dict):
-            image = batch.get("image") # or batch.get("data")
+            # print(batch)
+            # print(batch.keys())
+            # print(batch['data'])
+            # image = batch.get("image") # or 
+            image = batch.get("data")
             batch_labels = batch.get("label")
             batch_ids = batch.get("file_name")
         else:
@@ -182,6 +186,8 @@ def _extract_embeddings(
             post = adapter.compute_posthead(image)
             projected = adapter.compute_projected(image)
 
+        # print shape
+        # print(f"Backbone shape: {backbone.shape}, Posthead shape: {post.shape}, Projected shape: {projected.shape}")
         backbone_vectors.append(_to_numpy(backbone))
         posthead_vectors.append(_to_numpy(post))
         projected_vectors.append(_to_numpy(projected))
@@ -259,6 +265,11 @@ def _build_neuco_loader(config: ModelEvalConfig) -> DataLoader:
         output_file_name=True,
         transform=transform,
     )
+
+    # check size of datset
+    print(f"NeuCo dataset size: {len(dataset)} samples")
+    assert len(dataset) > 0, "NeuCo dataset is empty!"
+
     loader = DataLoader(
         dataset,
         batch_size=16,
@@ -276,10 +287,11 @@ def _build_ssl4eo_dataset(config: ModelEvalConfig) -> torch.utils.data.Dataset:
     ensure_hydra_original_cwd()
     dataset = SSL4EODataset(
         root=str(config.ssl4eo_root.expanduser()),
-        s2_tier=str(config.ssl4eo_s2_tier),
-        s2_bands=list(config.ssl4eo_s2_bands),
+        # s2_tier=str(config.ssl4eo_s2_tier),
+        # s2_bands=list(config.ssl4eo_s2_bands),
         transforms=None,
         target_image_dimension=(config.ssl4eo_image_dimension, config.ssl4eo_image_dimension),
+        s2_tier="s2l1c"
     )
 
     total = len(dataset)
@@ -300,7 +312,7 @@ def _extract_ssl4eo_embeddings(
     dataset = _build_ssl4eo_dataset(config)
 
     autocast = (
-        (lambda: torch.cuda.amp.autocast(device_type="cuda"))
+        (lambda: torch.cuda.amp.autocast())
         if device.type == "cuda"
         else contextlib.nullcontext
     )
@@ -655,29 +667,30 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
     is_lorentz = getattr(adapter, "is_lorentz", False)
 
     output_dir = config.output_dir
-    output_dir.mkdir(parents=True, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
 
-    eurosat_loaders = _build_eurosat_loaders(config)
-    eurosat_embeddings: Dict[str, EmbeddingBundle] = {}
-    for split, loader in eurosat_loaders.items():
-        # The backbone features are not normalized (pre-prof)
-        # the post-head features are raw euclidean and not normalized
-        eurosat_embeddings[split] = _extract_embeddings(
-            adapter,
-            loader,
-            device=device,
-        )
+    # eurosat_loaders = _build_eurosat_loaders(config)
+    # eurosat_embeddings: Dict[str, EmbeddingBundle] = {}
+    # for split, loader in eurosat_loaders.items():
+    #     # The backbone features are not normalized (pre-prof)
+    #     # the post-head features are raw euclidean and not normalized
+    #     eurosat_embeddings[split] = _extract_embeddings(
+    #         adapter,
+    #         loader,
+    #         device=device,
+    #     )
 
-    _run_linear_probe(config, eurosat_embeddings, output_dir=output_dir, label="eurosat")
+    # _run_linear_probe(config, eurosat_embeddings, output_dir=output_dir, label="eurosat")
 
-    neuco_loader = _build_neuco_loader(config)
-    neuco_bundle = _extract_embeddings(
-        adapter,
-        neuco_loader,
-        device=device,
-        require_ids=True,
-    )
-    _export_neuco(neuco_bundle, output_dir / "neuco_export", label="s2l1c")
+    # neuco_loader = _build_neuco_loader(config)
+    # neuco_bundle = _extract_embeddings(
+    #     adapter,
+    #     neuco_loader,
+    #     device=device,
+    #     require_ids=True,
+    # )
+    # _export_neuco(neuco_bundle, output_dir / "neuco_export", label="s2l1c")
+    # print('Saved NeuCo embeddings to ', output_dir / "neuco_export")
 
     ssl4eo_available = (
         config.enable_ssl4eo
@@ -699,6 +712,7 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
             s2_ssl4eo,
             output_dir=output_dir / "embedding_diagnostics",
         )
+        logging.info("Completed SSL4EO diagnostics")
     else:
         logging.info(
             "Skipping SSL4EO diagnostics (enable_ssl4eo=%s, root=%s, supports_ssl4eo=%s)",
@@ -732,27 +746,42 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Run the unified CIIP evaluation pipeline.")
     parser.add_argument("--model-type", default="ciip_checkpoint", choices=["ciip_checkpoint", "torchgeo_resnet50"], help="Model source to evaluate.")
-    parser.add_argument("--checkpoint", type=Path, help="Checkpoint path for CIIP/Lorentz models.")
+    # parser.add_argument("--checkpoint", type=Path, help="Checkpoint path for CIIP/Lorentz models.")
     parser.add_argument("--model-weights", choices=["dino", "moco"], help="TorchGeo ResNet50 weight selection.")
     parser.add_argument("--model-in-channels", type=int, default=13, help="Number of input channels for TorchGeo ResNet models.")
-    parser.add_argument("--eurosat-root", type=Path, required=True, help="EuroSAT dataset root directory.")
-    parser.add_argument("--neuco-root", type=Path, required=True, help="NeuCo-Bench dataset root directory.")
-    parser.add_argument("--output-dir", type=Path, required=True, help="Directory to write evaluation artifacts.")
-    parser.add_argument("--ssl4eo-root", type=Path, help="SSL4EO dataset root for diagnostics.")
+    # parser.add_argument("--eurosat-root", type=Path, required=True, help="EuroSAT dataset root directory.")
+    # parser.add_argument("--neuco-root", type=Path, required=True, help="NeuCo-Bench dataset root directory.")
+    # parser.add_argument("--output-dir", type=Path, required=True, help="Directory to write evaluation artifacts.")
+    # parser.add_argument("--ssl4eo-root", type=Path, help="SSL4EO dataset root for diagnostics.")
     parser.add_argument("--disable-ssl4eo", action="store_true", help="Skip SSL4EO diagnostics even if a root is provided.")
     parser.add_argument("--tsne-samples", type=int, default=1500, help="Samples used for t-SNE visualisations.")
     parser.add_argument("--pca-samples", type=int, default=5000, help="Samples used for PCA visualisations.")
     parser.add_argument("--ssl4eo-subset-size", type=int, default=2048, help="Subset size for SSL4EO embedding extraction.")
     parser.add_argument("--ssl4eo-subset-seed", type=int, default=0, help="Subset seed for SSL4EO sampling.")
     parser.add_argument("--neuco-modalities", nargs="*", default=["s2l1c"], help="NeuCo modalities to export.")
-    parser.add_argument("--neuco-seasons", type=int, default=1, help="Number of seasons for NeuCo extraction.")
+    parser.add_argument("--neuco-seasons", type=int, default=4, help="Number of seasons for NeuCo extraction.")
 
     args = parser.parse_args()
+
+    
+
+    args.model_root = '/local/ms-data/SSL4EO/model/'
+    args.model_path = '2025_11_05-21_04_44-model_resnet50-lr_0.001-b_128-j_6-p_amp/'
+    checkpoint_root = Path(args.model_root) / args.model_path / "checkpoints"
+    # args.output_dir = Path("diagnostics/output")
+
+    args.checkpoint=Path(f"{checkpoint_root}/epoch_10.pt")
+    args.eurosat_root=Path("/local/ms-data/EuroSAT/")
+    args.neuco_root=Path("/local/ms-data/SSL4EO-S12-downstream/data")
+    args.output_dir=Path("/home/juro4948/ciip/diagnostics/unified_eval/curv_init_1")
+    args.ssl4eo_root=Path("/local/ms-data/SSL4EOv1.1/train")
+
 
     if args.model_type == "ciip_checkpoint" and args.checkpoint is None:
         parser.error("--checkpoint is required when --model-type=ciip_checkpoint")
     if args.model_type == "torchgeo_resnet50" and args.model_weights is None:
         parser.error("--model-weights must be provided for torchgeo_resnet50 models")
+    
 
     cfg = ModelEvalConfig(
         eurosat_root=args.eurosat_root,

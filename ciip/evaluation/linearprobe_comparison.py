@@ -838,7 +838,7 @@ if __name__ == "__main__":
     #     include_init=True,
     #     max_checkpoints=5,
     # )
-    epochs = [5, 10, 20, 30]
+    epochs = [ 80]
 
     # '/home/juro4948/ciip/logs/2025_09_10-11_37_00-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints'
     # epochs = [1, 2, 3, 5, 10, 15, 20, 30]

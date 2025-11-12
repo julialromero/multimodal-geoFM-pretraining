@@ -163,7 +163,6 @@ def _infer_projection_dims(state_dict: Dict[str, torch.Tensor]) -> Tuple[int, in
 
 def build_model_from_checkpoint(checkpoint: Path) -> Tuple[nn.Module, bool]:
     """Instantiate a CIIP or LorentzCIIP model from a checkpoint path."""
-
     ckpt = torch.load(checkpoint, map_location="cpu")
     state_dict = ckpt["state_dict"] if "state_dict" in ckpt else ckpt
     cleaned = _clean_state_dict(state_dict)

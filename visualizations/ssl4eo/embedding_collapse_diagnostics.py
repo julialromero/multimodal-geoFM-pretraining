@@ -28,6 +28,7 @@ from sklearn.manifold import TSNE
 
 from ciip.open_clip_train.data import SSL4EODataset
 from ciip.open_clip_train.precision import get_autocast
+import torch.nn.functional as F
 
 if TYPE_CHECKING:  # pragma: no cover - imported for type checking only
     from ciip.evaluation.unified_evaluation import ModelEvalConfig
@@ -471,10 +472,18 @@ def _run_encoder_method(
     normalize: bool,
 ) -> torch.Tensor:
     accepts_lorentz = _encoder_accepts_lorentz(method)
+    # # print model class
+    # print("Running encoder method:", method)
+
+    # squeeze tensor if it has 5 dim
+    tensor = tensor.squeeze(0) if tensor.dim() == 5 else tensor
+
     if accepts_lorentz:
         # normalize is not used in LorentzCIIP
         return method(tensor, lorentz=project_hyperbolic, normalize=normalize)
-    return method(tensor, normalize=normalize)
+    
+    return method(tensor, lorentz=project_hyperbolic, normalize=normalize)
+    # return method(tensor, normalize=normalize)
 
 
 def extract_embeddings_for_dataset(
@@ -526,14 +535,14 @@ def extract_embeddings_for_dataset(
                     s1_tensor,
                     project_hyperbolic=False,
                     normalize=False,
-                    post_head=True
+                    # post_head=True
                 )
                 s2_raw = _run_encoder_method(
                     encode_s2,
                     s2_tensor,
                     project_hyperbolic=False,
                     normalize=False,
-                    post_head=True
+                    # post_head=True
                     )
                 
                 # if lorentzciip model, project hyperbolic is true
@@ -542,13 +551,13 @@ def extract_embeddings_for_dataset(
                         encode_s1,
                         s1_tensor,
                         project_hyperbolic=True,
-                        post_head=True
+                        # post_head=True
                     )
                     s2_norm = _run_encoder_method(
                         encode_s2,
                         s2_tensor,
                         project_hyperbolic=True,
-                        post_head=True
+                        # post_head=True
                     )
                 # else take L2 norm
                 else:
@@ -557,14 +566,14 @@ def extract_embeddings_for_dataset(
                         s1_tensor,
                         project_hyperbolic=False,
                         normalize=True,
-                        post_head=True
+                        # post_head=True
                     )
                     s2_norm = _run_encoder_method(
                         encode_s2,
                         s2_tensor,
                         project_hyperbolic=False,
                         normalize=True,
-                        post_head=True
+                        # post_head=True
                     )
 
             
@@ -739,6 +748,7 @@ def run_single_epoch_diagnostics(args: argparse.Namespace) -> EpochDiagnostics:
     #     input_dtype=input_dtype,
     #     skip_final_fc=args.skip_final_fc,
     # )
+    autocast_fn = (lambda: torch.autocast("cuda"))
     s1_embeddings, s2_embeddings, sample_ids = extract_embeddings_for_dataset(
         model,
         subset,
