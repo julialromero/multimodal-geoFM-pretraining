@@ -10,11 +10,11 @@ io:
   log_every_n_steps: 1
   wandb: False
   comet_ml: True
-  resume: 
+  resume: /home/juro4948/ciip/logs/2025_11_11-21_53_50-model_resnet50-lr_0.001-b_2-j_6-p_amp/checkpoints/epoch_2.pt
   # /local/ms-data/SSL4EO/model/2025_10_24-08_47_11-model_resnet50-lr_0.001-b_128-j_6-p_amp/checkpoints/epoch_16.pt
 
 comet: #personal
-  api_key: 
+  api_key: 3g8Rfgff8N5UNWQ1CdGvgEO9n
   project_name: general
   workspace:
 
@@ -35,7 +35,7 @@ model:
   s1_resolution: 224
   s2_resolution: 224
   s1_bands: [1, 2]
-  s2_bands: [1, 2, 3, 4, 5, 6, 7, 8, 8A, 9, 10, 11, 12] # if using sentinel-2 s2a tier, band 10 is no longer present
+  s2_bands: [1, 2, 3, 4, 5, 6, 7, 8, 8A, 9, 11, 12] # if using sentinel-2 s2a tier, band 10 is no longer present
   #TODO we should use mixed prevision
   precision: 'amp' #
   grad_clip_norm: 1 #set to 1 when training with amp
@@ -60,13 +60,13 @@ loss:
   vc_gamma: 1.0
   vc_covariance_weights: [1.0, 1.0]
   
-  hyperbolic: False
+  hyperbolic: True
   curvature_init: 0.1
   learn_curv: True
   entail_weight: 0.0
 
 datamodule:
-  batch_size: 128 # batch size per GPU
+  batch_size: 2 #128 # batch size per GPU
   world_size:
   rank: 
   horovod: False
@@ -87,7 +87,7 @@ dataset:
   # train_data is true for training and false for validation
   train_data: True
   dimension: 224
-  root: /local/ms-data/SSL4EO/ #TODO: documentation about proper directory to run from
+  root: /local/ms-data/SSL4EOv1.1/train #/local/ms-data/SSL4EO/ #TODO: documentation about proper directory to run from
   s2_tier: s2c # TOA data from Sentinel-2 tier 1C; s2a for BOA corrections
   use_transforms: False
   
@@ -98,7 +98,7 @@ train:
   val_frac: 0.0
   epochs: 200
   lr: 0.001
-  curvature_lr: 0.01
+  curvature_lr: 0.1
   wd: 0.02 #0.2
   warmup: 5000
   beta1: 0.9

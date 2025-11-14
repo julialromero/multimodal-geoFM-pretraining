@@ -42,34 +42,78 @@ class EvaluationAdapter(nn.Module):
 class CiipEvaluationAdapter(EvaluationAdapter):
     """Adapter around CIIP/LorentzCIIP checkpoints."""
 
-    def __init__(self, model: nn.Module, *, is_lorentz: bool) -> None:
+    def __init__(
+        self,
+        model: nn.Module,
+        *,
+        is_lorentz: bool,
+    ) -> None:
         super().__init__()
         self.base_model = model
-        self.encoder_s2 = model.encoder_s2  # type: ignore[attr-defined]
+        self.encoder_s1 = getattr(model, "encoder_s1", None)
+        self.encoder_s2 = getattr(model, "encoder_s2", None)
+        self.dtype_s1 = getattr(model, "dtype_s1", torch.float32)
         self.dtype_s2 = getattr(model, "dtype_s2", torch.float32)
         self.is_lorentz = is_lorentz
         self.supports_hyperbolic = bool(is_lorentz)
 
+    def _default_stream(self) -> Tuple[nn.Module, torch.dtype, str]:
+        if self.encoder_s2 is not None:
+            return self.encoder_s2, self.dtype_s2, "s2"
+        if self.encoder_s1 is not None:
+            return self.encoder_s1, self.dtype_s1, "s1"
+        raise RuntimeError("CIIP adapter does not expose any encoders")
+
+    def _encode_projected(self, images: torch.Tensor, *, project: bool) -> torch.Tensor:
+        _, dtype, stream = self._default_stream()
+        tensor = images.type(dtype)
+
+        if stream == "s1":
+            encode_fn = self.base_model.encode_s1
+        else:
+            encode_fn = self.base_model.encode_s2
+
+        if self.is_lorentz:
+            return encode_fn(tensor, lorentz=project, normalize=False)
+
+        if project:
+            return encode_fn(tensor, normalize=True)
+        return encode_fn(tensor, normalize=False)
+
     def compute_backbone(self, images: torch.Tensor) -> torch.Tensor:
-        features = self.encoder_s2(images.type(self.dtype_s2))
+        print("Using compute_backbone")
+        encoder, dtype, _ = self._default_stream()
+        #print encoder
+        # print(encoder)
+        # if fc layer, replace with identity
+        if hasattr(encoder, 'fc'):
+            encoder.fc = nn.Identity()
+        # same with proj layer
+        if hasattr(encoder, 'proj'):
+            encoder.proj = nn.Identity()
+
+        features = encoder(images.type(dtype))
+        if isinstance(features, (tuple, list)):
+            features = features[0]
         if features.ndim > 2:
             features = features.flatten(start_dim=1)
+        # print 
+        # print("Features shape:", features.shape)
+        # raise NotImplementedError("compute_backbone is not implemented yet")
         return features
 
     def compute_posthead(self, images: torch.Tensor) -> torch.Tensor:
-        if self.is_lorentz:
-            post = self.base_model.encode_s2(images, lorentz=False, normalize=False)
-        else:
-            post = self.base_model.encode_s2(images, normalize=False)
+        post = self._encode_projected(images, project=False)
+        if isinstance(post, (tuple, list)):
+            post = post[0]
         if post.ndim > 2:
             post = post.flatten(start_dim=1)
         return post
 
     def compute_projected(self, images: torch.Tensor) -> torch.Tensor:
-        if self.is_lorentz:
-            projected = self.base_model.encode_s2(images, lorentz=True)
-        else:
-            projected = self.base_model.encode_s2(images, normalize=True)
+        projected = self._encode_projected(images, project=True)
+        if isinstance(projected, (tuple, list)):
+            projected = projected[0]
         if projected.ndim > 2:
             projected = projected.flatten(start_dim=1)
         return projected
@@ -85,19 +129,26 @@ class CiipEvaluationAdapter(EvaluationAdapter):
 class TorchGeoResNetAdapter(EvaluationAdapter):
     """Adapter for TorchGeo ResNet50 checkpoints (Sentinel-2 SSL weights)."""
 
-    supports_ssl4eo = False
+    supports_ssl4eo = True
 
-    def __init__(self, *, weights: Optional[ResNet50_Weights], in_chans: int = 13) -> None:
+    def __init__(self,
+            *,
+            weights: Optional[ResNet50_Weights],
+            in_chans: int = 13,
+            in_chans_s1: int = 2,
+            dtype_s1: torch.dtype = torch.float32,
+        ) -> None:
         super().__init__()
         backbone = resnet50(weights=None, in_chans=in_chans)
-        if weights is not None:
-            state_dict = weights.get_state_dict(progress=True)
+        s1_weights = weights[0]
+        s2_weights = weights[1]
+        if s2_weights is not None:
+            state_dict = s2_weights.get_state_dict(progress=True)
             missing, unexpected = backbone.load_state_dict(state_dict, strict=False)
             if missing or unexpected:
                 logging.warning(
                     "Loaded ResNet50 weights with missing=%s, unexpected=%s", missing, unexpected
                 )
-
         # TorchGeo exposes the classification head via ``fc``. Preserve it as a
         # projection module if available, otherwise fall back to identity.
         projection = getattr(backbone, "fc", None)
@@ -109,8 +160,40 @@ class TorchGeoResNetAdapter(EvaluationAdapter):
         self.encoder_s2 = backbone
         self.dtype_s2 = torch.float32
 
+
+        # set up s2 encoder:
+        self.encoder_s1: Optional[nn.Module] = None
+        self.projection_head_s1: Optional[nn.Module] = None
+        self.dtype_s1: torch.dtype = dtype_s1
+        if s1_weights is not None:
+            s1_backbone = resnet50(weights=None, in_chans=in_chans_s1)
+            s1_state = s1_weights.get_state_dict(progress=True)
+            s1_missing, s1_unexpected = s1_backbone.load_state_dict(s1_state, strict=False)
+            if s1_missing or s1_unexpected:
+                logging.warning(
+                    "Loaded ResNet50 S1 weights with missing=%s, unexpected=%s",
+                    s1_missing,
+                    s1_unexpected,
+                )
+
+            s1_projection = getattr(s1_backbone, "fc", None)
+            if isinstance(s1_projection, nn.Module):
+                self.projection_head_s1 = s1_projection
+                s1_backbone.fc = nn.Identity()
+
+            self.encoder_s1 = s1_backbone
+
+    def _default_stream(self) -> Tuple[nn.Module, torch.dtype, str]:
+        if self.encoder_s2 is not None:
+            return self.encoder_s2, self.dtype_s2, "s2"
+        if self.encoder_s1 is not None:
+            return self.encoder_s1, self.dtype_s1, "s1"
+        raise RuntimeError("TorchGeoResNet adapter does not expose any encoders")
+        
+
     def compute_backbone(self, images: torch.Tensor) -> torch.Tensor:
-        features = self.encoder_s2(images)
+        encoder, dtype, _ = self._default_stream()
+        features = encoder(images)
         if isinstance(features, (tuple, list)):
             features = features[0]
         if features.ndim > 2:
@@ -118,13 +201,10 @@ class TorchGeoResNetAdapter(EvaluationAdapter):
         return features
 
     def compute_posthead(self, images: torch.Tensor) -> torch.Tensor:
-        features = self.compute_backbone(images)
-        if self.projection_head is not None:
-            features = self.projection_head(features)
-        return features
+        return None
 
     def compute_projected(self, images: torch.Tensor) -> torch.Tensor:
-        return F.normalize(self.compute_posthead(images), dim=1)
+        return None
 
     def encode_s2(  # pragma: no cover - compatibility wrapper
         self,
@@ -137,7 +217,27 @@ class TorchGeoResNetAdapter(EvaluationAdapter):
     ) -> torch.Tensor:
         if lorentz:
             raise ValueError("Lorentz projection is not supported for ResNet adapters")
-        features = self.compute_posthead(tensor) if post_head else self.compute_backbone(tensor)
+        features = self.encoder_s2(tensor)
+        if normalize or project_hyperbolic:
+            features = F.normalize(features, dim=1)
+        return features
+    
+    def encode_s1(  # pragma: no cover - compatibility wrapper
+        self,
+        tensor: torch.Tensor,
+        *,
+        normalize: bool = False,
+        lorentz: bool = False,
+        project_hyperbolic: bool = False,
+        post_head: bool = True,
+    ) -> torch.Tensor:
+        if self.encoder_s1 is None:
+            return None
+            # raise RuntimeError("encoder_s1 is not initialized.")
+        if lorentz:
+            raise ValueError("Lorentz projection is not supported for ResNet adapters")
+
+        features = self.encoder_s1(tensor)
         if normalize or project_hyperbolic:
             features = F.normalize(features, dim=1)
         return features
@@ -207,9 +307,9 @@ def _resolve_resnet_weights(name: Optional[str]) -> Optional[ResNet50_Weights]:
         return None
     normalized = name.lower()
     if normalized == "dino":
-        return ResNet50_Weights.SENTINEL2_ALL_DINO
+        return None, ResNet50_Weights.SENTINEL2_ALL_DINO
     if normalized == "moco":
-        return ResNet50_Weights.SENTINEL2_ALL_MOCO
+        return ResNet50_Weights.SENTINEL1_GRD_MOCO, ResNet50_Weights.SENTINEL2_ALL_MOCO
     raise ValueError(f"Unsupported ResNet50 weights '{name}'. Expected 'dino' or 'moco'.")
 
 

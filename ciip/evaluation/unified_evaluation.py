@@ -34,6 +34,8 @@ from torch import nn
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
+# from ciip.evaluation.ssl4eo_retrieval import compute_cross_modal_retrieval
+
 from torchgeo.datasets import EuroSAT
 from torchvision import transforms
 
@@ -43,7 +45,7 @@ from ciip.model_ciip import LorentzCIIP
 import os
 
 ## EUROSAT STANDARDIZATION VALUES
-MEAN = {
+EUROSATMEAN = {
     'B01': 1354.40546513,
     'B02': 1118.24399958,
     'B03': 1042.92983953,
@@ -59,7 +61,7 @@ MEAN = {
     'B8A': 2594.14080798,
 }
 
-STD = {
+EUROSATSTD = {
     'B01': 245.71762908,
     'B02': 333.00778264,
     'B03': 395.09249139,
@@ -75,7 +77,7 @@ STD = {
     'B8A': 1231.58581042,
 }
 
-BANDS = ("B01", "B02", "B03", "B04", "B05", "B06", "B07", "B08", "B8A", "B09", "B10", "B11", "B12")
+EUROSATBANDS = ("B01", "B02", "B03", "B04", "B05", "B06", "B07", "B08", "B8A", "B09", "B10", "B11", "B12")
 ##
 
 from ciip.evaluation.export_neuco_embeddings import (  # type: ignore
@@ -97,8 +99,12 @@ from visualizations.ssl4eo.embedding_collapse_diagnostics import (  # type: igno
     ensure_hydra_original_cwd,
     extract_embeddings_for_dataset,
     plot_epoch_diagnostics,
+    plot_epoch_diagnostics_s2only,
     plot_projection,
     preprocess_projection_data,
+    ModalityEmbeddings,
+    compute_within_encoder_cka,
+    compute_cross_encoder_cka
 )
 from visualizations.ssl4eo.hyperbolic_visualization import (  # type: ignore
     compute_hyperbolic_context,
@@ -106,7 +112,9 @@ from visualizations.ssl4eo.hyperbolic_visualization import (  # type: ignore
     plot_angular_pca,
     plot_cone_polar,
     plot_radial_histogram,
+    _extract_curvature_from_state
 )
+from visualizations.ssl4eo.hyperbolic_retrieval import compute_cross_modal_retrieval
 from ciip.open_clip_train.data import SSL4EODataset
 
 @dataclass
@@ -164,10 +172,13 @@ def _extract_embeddings(
     for batch in tqdm(dataloader, desc="Extracting embeddings"):
         if isinstance(batch, dict):
             # print(batch)
+            # print(batch)
             # print(batch.keys())
             # print(batch['data'])
             # image = batch.get("image") # or 
-            image = batch.get("data")
+            # get image if key 'image' exists else 'data'
+            image = batch.get("image") if "image" in batch else batch.get("data")
+            # image = batch.get("data")
             batch_labels = batch.get("label")
             batch_ids = batch.get("file_name")
         else:
@@ -178,6 +189,8 @@ def _extract_embeddings(
         if isinstance(image, dict):
             image = image[next(iter(image))]
 
+        # print(image)
+
         if image.ndim == 5:  # (B, T, C, H, W)
             image = image.mean(dim=1)
 
@@ -187,15 +200,31 @@ def _extract_embeddings(
         image = image.to(device=device, dtype=input_dtype, non_blocking=True)
 
         with torch.no_grad():
+            #defaults to s2
             backbone = adapter.compute_backbone(image)
-            post = adapter.compute_posthead(image)
-            projected = adapter.compute_projected(image)
+            assert backbone is not None, "Backbone embeddings cannot be None"
+            # if basemodel is torchgeo resnet50 
+            # print(adapter.__class__.__name__)
+            # if adapter class is TorchGeoResNetAdapter
+            if adapter.__class__.__name__ == "TorchGeoResNetAdapter":
+
+                post = None
+                projected = None
+            else:
+                post = adapter.compute_posthead(image)
+                projected = adapter.compute_projected(image)
 
         # print shape
         # print(f"Backbone shape: {backbone.shape}, Posthead shape: {post.shape}, Projected shape: {projected.shape}")
         backbone_vectors.append(_to_numpy(backbone))
-        posthead_vectors.append(_to_numpy(post))
-        projected_vectors.append(_to_numpy(projected))
+        if adapter.__class__.__name__ == "TorchGeoResNetAdapter":
+            # for torchgeo resnet50, only return posthead and projected as None
+            posthead_vectors.append(np.zeros((backbone.shape[0], 0), dtype=np.float32))
+            projected_vectors.append(np.zeros((backbone.shape[0], 0), dtype=np.float32))
+
+        else:
+            posthead_vectors.append(_to_numpy(post))
+            projected_vectors.append(_to_numpy(projected))
 
         if batch_labels is not None:
             labels.extend(batch_labels.cpu().tolist())
@@ -219,8 +248,8 @@ def _extract_embeddings(
 
 
 def _build_eurosat_loaders(config: ModelEvalConfig) -> Dict[str, DataLoader]:
-    mean = [MEAN[b] for b in BANDS]
-    std = [STD[b] for b in BANDS]
+    mean = [EUROSATMEAN[b] for b in EUROSATBANDS]
+    std = [EUROSATSTD[b] for b in EUROSATBANDS]
 
     data_transforms = {
         "train": transforms.Compose(
@@ -246,7 +275,7 @@ def _build_eurosat_loaders(config: ModelEvalConfig) -> Dict[str, DataLoader]:
         split: EuroSAT(
             root=str(config.eurosat_root),
             split=split,
-            bands=BANDS,
+            bands=EUROSATBANDS,
             transforms=train_transform if split == "train" else eval_transform,
             download=True,
         )
@@ -257,6 +286,10 @@ def _build_eurosat_loaders(config: ModelEvalConfig) -> Dict[str, DataLoader]:
         split: DataLoader(dataset, batch_size=64, shuffle=False, num_workers=4)
         for split, dataset in datasets.items()
     }
+    # print each split
+    for split, dataset in datasets.items():
+        print(f"EuroSAT {split} dataset size: {len(dataset)} samples")
+        assert len(dataset) > 0, f"EuroSAT {split} dataset is empty!"
     return loaders
 
 
@@ -296,7 +329,7 @@ def _build_ssl4eo_dataset(config: ModelEvalConfig) -> torch.utils.data.Dataset:
         # s2_bands=list(config.ssl4eo_s2_bands),
         transforms=None,
         target_image_dimension=(config.ssl4eo_image_dimension, config.ssl4eo_image_dimension),
-        s2_tier="s2l1c"
+        s2_tier=config.neuco_modalities[0],  # use first modality as tier
     )
 
     total = len(dataset)
@@ -334,19 +367,7 @@ def _extract_ssl4eo_embeddings(
         autocast=autocast,
     )
 
-    # s1_bundle = EmbeddingBundle(
-    #     backbone=s1_embeddings.raw.cpu().numpy(), # raw post-head
-    #     projected=s1_embeddings.normalized.cpu().numpy(), # L2/hyperbolic projection post-head
-    #     labels=None,
-    #     ids=sample_ids if sample_ids else None,
-    # )
-
-    # s2_bundle = EmbeddingBundle(
-    #     backbone=s2_embeddings.raw.cpu().numpy(), # raw post-head
-    #     projected=s2_embeddings.normalized.cpu().numpy(), # L2/hyperbolic projection post-head
-    #     labels=None,
-    #     ids=sample_ids if sample_ids else None,
-    # )
+    assert s2_embeddings is not None, "S2 embeddings should not be None"
     return s1_embeddings, s2_embeddings, sample_ids
 
 
@@ -362,9 +383,12 @@ def _run_linear_probe(
 
     def _evaluate(feature_key: str, batch_norm) -> Dict[float, Dict[str, float]]:
         results: Dict[float, Dict[str, float]] = {}
+        # print(embeddings)
         train = embeddings["train"]
         val = embeddings["val"]
         test = embeddings["test"]
+
+        # raise NotImplementedError("Debugging embeddings extraction")
 
         train_feats = getattr(train, feature_key)
         val_feats = getattr(val, feature_key)
@@ -401,25 +425,37 @@ def _run_linear_probe(
 
         return results
 
+    
+    
+    if embeddings["train"].posthead.sum() == 0:
+        probe_specs = (
+            ("backbone", "backbone", False),
+            ("backbone", "backbone_batchnorm", True),
+        )
+        marker_map = {"backbone": "o"}
+
+    else:
+        probe_specs = (
+            ("backbone", "backbone", False),
+            ("posthead", "posthead", False),
+            ("projected", "projected", False),
+            ("backbone", "backbone_batchnorm", True),
+            ("posthead", "posthead_batchnorm", True),
+            ("projected", "projected_batchnorm", True),
+        )
+        marker_map = {"backbone": "o", "posthead": "^", "projected": "s"}
+
+
     plots_dir = output_dir / "linear_probe"
     plots_dir.mkdir(parents=True, exist_ok=True)
-
-    probe_specs = (
-        ("backbone", "backbone", False),
-        ("posthead", "posthead", False),
-        ("projected", "projected", False),
-        ("backbone", "backbone_batchnorm", True),
-        ("posthead", "posthead_batchnorm", True),
-        ("projected", "projected_batchnorm", True),
-    )
-
     for feature_key, suffix, use_batch_norm in probe_specs:
         metrics = _evaluate(feature_key, batch_norm=use_batch_norm)
         with (plots_dir / f"{label}_{suffix}_metrics.json").open("w") as handle:
             json.dump(metrics, handle, indent=2)
 
+
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
-    marker_map = {"backbone": "o", "posthead": "^", "projected": "s"}
+    
 
     for feature_key, suffix, use_batch_norm in probe_specs:
         metrics_file = plots_dir / f"{label}_{suffix}_metrics.json"
@@ -520,49 +556,110 @@ def _run_embedding_diagnostics(
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    modality_tensors = {
-        "s1": {
-            "posthead": s1_bundle.raw.detach(),
-            "projected": s1_bundle.projected.detach(),
-            "layers": s1_bundle.layer_activations,
-        },
-        "s2": {
-            "posthead": s2_bundle.raw.detach(),
-            "projected": s2_bundle.projected.detach(),
-            "layers": s2_bundle.layer_activations,
-        },
-    }
+    # print(s1_bundle.layer_activations)
+    # if empty s1_bundle riase error
+    if s1_bundle is not None:
+        if not s1_bundle.layer_activations or not s2_bundle.layer_activations:
+            raise ValueError("Layer activations are empty, cannot compute CKA diagnostics")
+        modality_tensors = {
+            "s1": {
+                "backbone": s1_bundle.backbone.detach() if s1_bundle.backbone is not None else None,
+                "posthead": s1_bundle.raw.detach(),
+                "projected": s1_bundle.projected.detach(),
+                "layers": s1_bundle.layer_activations,
+            },
+            "s2": {
+                "backbone": s2_bundle.backbone.detach() if s2_bundle.backbone is not None else None,
+                "posthead": s2_bundle.raw.detach(),
+                "projected": s2_bundle.projected.detach(),
+                "layers": s2_bundle.layer_activations,
+            },
+        }
+        assert modality_tensors["s1"]["layers"], "No S1 layer activations for CKA"
+        assert modality_tensors["s2"]["layers"], "No S2 layer activations for CKA"
+    
+        s1_layers, s1_within = compute_within_encoder_cka(modality_tensors["s1"]["layers"])
+        cross_s1_layers, cross_s2_layers, cross_matrix = compute_cross_encoder_cka(modality_tensors["s1"]["layers"], modality_tensors["s2"]["layers"])
+        projected_cka = compute_linear_cka(modality_tensors["s1"]["projected"], modality_tensors["s2"]["projected"])
+        s1_posthead_singular = compute_singular_values(modality_tensors["s1"]["posthead"])
+        s1_projected_singular = compute_singular_values(modality_tensors["s1"]["projected"])
+        s1_backbone_singular = compute_singular_values(modality_tensors["s1"]["backbone"])
+        s2_layers, s2_within = compute_within_encoder_cka(modality_tensors["s2"]["layers"])
+        s2_posthead_singular = compute_singular_values(modality_tensors["s2"]["posthead"])
+        s2_projected_singular = compute_singular_values(modality_tensors["s2"]["projected"])
+        s2_backbone_singular = compute_singular_values(modality_tensors["s2"]["backbone"])
+        cka_payload = {
+            "s1": {
+                "layers": s1_layers,
+                "matrix": s1_within.tolist() if s1_within is not None else None,
+            },
+            "s2": {
+                "layers": s2_layers,
+                "matrix": s2_within.tolist() if s2_within is not None else None,
+            },
+            "cross": {
+                "s1_layers": cross_s1_layers,
+                "s2_layers": cross_s2_layers,
+                "matrix": cross_matrix.tolist() if cross_matrix is not None else None,
+            },
+            "projected_similarity": projected_cka,
+        }
 
-    s1_layers, s1_within = compute_within_encoder_cka(modality_tensors["s1"]["layers"])
-    s2_layers, s2_within = compute_within_encoder_cka(modality_tensors["s2"]["layers"])
-    cross_s1_layers, cross_s2_layers, cross_matrix = compute_cross_encoder_cka(
-        modality_tensors["s1"]["layers"], modality_tensors["s2"]["layers"]
-    )
-    projected_cka = compute_linear_cka(
-        modality_tensors["s1"]["projected"], modality_tensors["s2"]["projected"]
-    )
+        spectra = [
+            ("s1", "posthead", s1_posthead_singular),
+            ("s1", "projected", s1_projected_singular),
+            ("s2", "posthead", s2_posthead_singular),
+            ("s2", "projected", s2_projected_singular),
+            ("s1", 'backbone', s1_backbone_singular),
+            ("s2", 'backbone', s2_backbone_singular),
 
-    s1_posthead_singular = compute_singular_values(modality_tensors["s1"]["posthead"])
-    s1_projected_singular = compute_singular_values(modality_tensors["s1"]["projected"])
-    s2_posthead_singular = compute_singular_values(modality_tensors["s2"]["posthead"])
-    s2_projected_singular = compute_singular_values(modality_tensors["s2"]["projected"])
+        ]
+    
 
-    cka_payload = {
-        "s1": {
-            "layers": s1_layers,
-            "matrix": s1_within.tolist() if s1_within is not None else None,
-        },
-        "s2": {
-            "layers": s2_layers,
-            "matrix": s2_within.tolist() if s2_within is not None else None,
-        },
-        "cross": {
-            "s1_layers": cross_s1_layers,
-            "s2_layers": cross_s2_layers,
-            "matrix": cross_matrix.tolist() if cross_matrix is not None else None,
-        },
-        "projected_similarity": projected_cka,
-    }
+    else:
+        if not s2_bundle.layer_activations:
+            raise ValueError("Layer activations are empty, cannot compute CKA diagnostics")
+
+        modality_tensors = {
+            "s2": {
+                "posthead": s2_bundle.raw.detach(),
+                "projected": s2_bundle.projected.detach(),
+                "layers": s2_bundle.layer_activations,
+            },
+            "s1": None
+        }
+        
+        # print(modality_tensors["s2"]["layers"])
+        assert modality_tensors["s2"]["layers"], "No S2 layer activations for CKA"
+        s2_layers, s2_within = compute_within_encoder_cka(modality_tensors["s2"]["layers"])
+        s2_posthead_singular = compute_singular_values(modality_tensors["s2"]["posthead"])
+        s2_projected_singular = compute_singular_values(modality_tensors["s2"]["projected"])
+        s2_backbone_singular = compute_singular_values(modality_tensors["s2"]["backbone"])
+        cka_payload = {
+            "s2": {
+                "layers": s2_layers,
+                "matrix": s2_within.tolist() if s2_within is not None else None,
+            },
+        }
+        spectra = [
+            ("s2", "posthead", s2_posthead_singular),
+            ("s2", "projected", s2_projected_singular),
+            ("s2", 'backbone', s2_backbone_singular),
+        ]
+        # assert that dims match
+        
+
+        s1_posthead_singular = None
+        s1_projected_singular = None
+        s1_layers = None
+        s1_within = None
+        cross_s1_layers = None
+        cross_matrix = None
+        cross_s2_layers = None
+
+    if s2_posthead_singular.shape != s2_projected_singular.shape:
+            raise ValueError("S2 posthead and projected singular values have different dimensions")
+
 
     with (output_dir / "cka.json").open("w", encoding="utf-8") as handle:
         json.dump(cka_payload, handle, indent=2)
@@ -572,13 +669,21 @@ def _run_embedding_diagnostics(
         or config.model_weights
         or config.model_type
     )
+    
     epoch_source = (
         (config.checkpoint.stem if config.checkpoint is not None else "")
         or (config.model_weights or "")
     )
     epoch_match = re.search(r"epoch[_=-]?(\d+)", epoch_source)
     epoch_value = int(epoch_match.group(1)) if epoch_match else 0
-    sample_count = int(s1_bundle.raw.shape[0]) if s1_bundle.raw.ndim > 0 else 0
+
+    # if torchgeo then set epoch value to None
+    if config.model_type == "torchgeo_resnet50":
+        epoch_value = None
+        label_source = config.model_weights
+        
+
+    sample_count = int(s2_bundle.raw.shape[0]) if s2_bundle.raw.ndim > 0 else 0
     diagnostic_ids = (
         [str(item) for item in sample_ids]
         if sample_ids is not None and len(sample_ids) > 0
@@ -601,35 +706,78 @@ def _run_embedding_diagnostics(
         cross_s1_layers=cross_s1_layers,
         cross_s2_layers=cross_s2_layers,
     )
-    plot_epoch_diagnostics(epoch_diagnostics, output_dir)
+    if s1_bundle is not None:
+        if config.model_type == "torchgeo_resnet50":
+            plot_epoch_diagnostics_s2only(epoch_diagnostics, output_dir, label='backbone_raw')
+        plot_epoch_diagnostics(epoch_diagnostics, output_dir, label='posthead_raw')
+    else:
+        if config.model_type == "torchgeo_resnet50":
+            plot_epoch_diagnostics_s2only(epoch_diagnostics, output_dir, label='s2_backbone_raw')
+        else:
+            raise ValueError("Model type not supported for S1 missing case")
 
-    spectra = [
-        ("s1", "posthead", s1_posthead_singular),
-        ("s1", "projected", s1_projected_singular),
-        ("s2", "posthead", s2_posthead_singular),
-        ("s2", "projected", s2_projected_singular),
-    ]
+    
 
-    for modality, feature_name, spectrum in spectra:
-        if spectrum.size == 0:
-            continue
-        fig, ax = plt.subplots(figsize=(6, 4))
-        ax.plot(np.arange(len(spectrum)), spectrum, marker="o")
+    n=len(spectra)
+    ncols = min(3, n)  # up to 3 columns
+    nrows = int(np.ceil(n / ncols))
+    fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(6 * ncols, 4 * nrows))
+    axes = np.atleast_1d(axes).ravel()  # flatten in case of single subplot
+
+    for ax, (modality, feature_name, spectrum) in zip(axes, spectra):
+        ax.plot(np.arange(len(spectrum)), spectrum, marker=".")
         ax.set_xlabel("Component")
         ax.set_ylabel("Singular value")
-        ax.set_title(f"Singular values ({modality.upper()} {feature_name})")
+        ax.set_title(f"{modality.upper()} {feature_name}")
         ax.grid(alpha=0.3)
-        fig.tight_layout()
-        fig.savefig(output_dir / f"singular_values_{modality}_{feature_name}.png", dpi=200)
-        plt.close(fig)
+        ax.set_xlim(0, 100)
+
+    # Hide any unused subplots
+    for ax in axes[len(spectra):]:
+        ax.axis("off")
+
+    fig.suptitle("Singular Values per Modality / Feature", fontsize=14)
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    fig.savefig(output_dir / "singular_values_all.png", dpi=200)
+    plt.close(fig)
+
+
+        # if spectrum.size == 0:
+        #     continue
+        # fig, ax = plt.subplots(figsize=(6, 4))
+        # ax.plot(np.arange(len(spectrum)), spectrum, marker=".")
+        # ax.set_xlabel("Component")
+        # ax.set_ylabel("Singular value")
+        # ax.set_title(f"Singular values ({modality.upper()} {feature_name})")
+        # ax.grid(alpha=0.3)
+        # ax.set_xlim(0,100)
+        # fig.tight_layout()
+        # fig.savefig(output_dir / f"singular_values_{modality}_{feature_name}.png", dpi=200)
+        # plt.close(fig)
 
     rng = np.random.default_rng(config.random_seed)
 
+    # def _stack_features(feature_name: str) -> Tuple[np.ndarray, np.ndarray]:
+
+    #     s1_np = modality_tensors["s1"][feature_name].cpu().numpy()
+    #     s2_np = modality_tensors["s2"][feature_name].cpu().numpy()
+    #     labels = np.concatenate((np.repeat("S1", len(s1_np)), np.repeat("S2", len(s2_np))))
+    #     features = np.concatenate((s1_np, s2_np), axis=0)
+    #     return features, labels
+
+
     def _stack_features(feature_name: str) -> Tuple[np.ndarray, np.ndarray]:
-        s1_np = modality_tensors["s1"][feature_name].cpu().numpy()
-        s2_np = modality_tensors["s2"][feature_name].cpu().numpy()
-        labels = np.concatenate((np.repeat("S1", len(s1_np)), np.repeat("S2", len(s2_np))))
-        features = np.concatenate((s1_np, s2_np), axis=0)
+        if modality_tensors["s1"] is None:
+            s2_np = modality_tensors["s2"][feature_name].cpu().numpy()
+            labels = np.repeat("S2", len(s2_np))
+            features = s2_np
+        else:
+            s1_np = modality_tensors["s1"][feature_name].cpu().numpy()
+            s2_np = modality_tensors["s2"][feature_name].cpu().numpy()
+            #assert shapes match
+            assert s1_np.shape[0] == s2_np.shape[0], "S1 and S2 feature counts do not match for stacking shapes are {} and {}".format(s1_np.shape, s2_np.shape)
+            labels = np.concatenate((np.repeat("S1", len(s1_np)), np.repeat("S2", len(s2_np))))
+            features = np.concatenate((s1_np, s2_np), axis=0)
         return features, labels
 
     def _sample(features: np.ndarray, labels: np.ndarray, maximum: int) -> Tuple[np.ndarray, np.ndarray]:
@@ -638,7 +786,7 @@ def _run_embedding_diagnostics(
         indices = rng.choice(len(features), size=maximum, replace=False)
         return features[indices], labels[indices]
 
-    for feature_name in ("posthead", "projected"):
+    for feature_name in ("posthead", "projected", 'backbone'):
         combined, modality_labels = _stack_features(feature_name)
         if combined.size == 0:
             continue
@@ -693,7 +841,7 @@ def _run_hyperbolic_visualisations(
     s2_distances = context["s2_distances"].cpu().numpy()
 
     plot_angle_aperture(positive_angles, aperture_s1, aperture_s2, output_dir / "angle_aperture.png")
-    plot_radial_histogram(np.linalg.norm(s1_proj_features.cpu().numpy(), axis=1), np.linalg.norm(s2_proj_features.cpu().numpy(), axis=1), output_dir / "radial_histogram.png")
+    plot_radial_histogram(s1_distances, s2_distances, output_dir / "radial_histogram.png")
     plot_angular_pca(s1_dirs, s2_dirs, s1_distances, s2_distances, output_dir / "angular_pca.png")
     plot_cone_polar(positive_angles, aperture_s1, aperture_s2, output_dir / "cone_polar.png", sample_size=256, seed=seed)
 
@@ -716,34 +864,124 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
     output_dir = config.output_dir
     os.makedirs(output_dir, exist_ok=True)
 
-    # eurosat_loaders = _build_eurosat_loaders(config)
-    # eurosat_embeddings: Dict[str, EmbeddingBundle] = {}
-    # for split, loader in eurosat_loaders.items():
-    #     # The backbone features are not normalized (pre-prof)
-    #     # the post-head features are raw euclidean and not normalized
-    #     eurosat_embeddings[split] = _extract_embeddings(
-    #         adapter,
-    #         loader,
-    #         device=device,
-    #     )
+    # check if dir exists
+    eurosat_output_dir = output_dir / "linear_probe"
+    if True: #not eurosat_output_dir.exists():
+        eurosat_loaders = _build_eurosat_loaders(config)
+        eurosat_embeddings: Dict[str, EmbeddingBundle] = {}
+        for split, loader in eurosat_loaders.items():
+            # The backbone features are not normalized (pre-prof)
+            # the post-head features are raw euclidean and not normalized
+            eurosat_embeddings[split] = _extract_embeddings(
+                adapter,
+                loader,
+                device=device,
+            )
+        _run_linear_probe(config, eurosat_embeddings, output_dir=output_dir, label="eurosat")
 
-    # _run_linear_probe(config, eurosat_embeddings, output_dir=output_dir, label="eurosat")
 
-    # neuco_loader = _build_neuco_loader(config)
-    # neuco_bundle = _extract_embeddings(
-    #     adapter,
-    #     neuco_loader,
-    #     device=device,
-    #     require_ids=True,
-    # )
-    # _export_neuco(neuco_bundle, output_dir / "neuco_export", label="s2l1c")
-    # print('Saved NeuCo embeddings to ', output_dir / "neuco_export")
+
+    # first check if the output csvs already exist
+    neuco_output_dir = output_dir / "neuco"
+    if len(config.neuco_modalities) > 1:
+        print('Only useing 1st modality for neuco benchmark')
+    modality = config.neuco_modalities[0]
+    csv_out_backbone = neuco_output_dir / "neuco_export" / f"neuco_{modality}_backbone.csv"
+    csv_out_posthead = neuco_output_dir / "neuco_export" / f"neuco_{modality}_posthead.csv"
+    csv_out_projected = neuco_output_dir / "neuco_export" /f"neuco_{modality}_projected.csv"
+    
+    if csv_out_backbone.exists() and csv_out_posthead.exists() and csv_out_projected.exists():
+        print("NeuCo embeddings already exist, skipping extraction.")
+    
+ 
+    # else:
+    if True:
+        print("csvs at {}, {}, {} do not exist, extracting NeuCo embeddings.".format(csv_out_backbone, csv_out_posthead, csv_out_projected))
+        neuco_output_dir.mkdir(parents=True, exist_ok=True)
+        neuco_loader = _build_neuco_loader(config)
+        neuco_bundle = _extract_embeddings(
+            adapter,
+            neuco_loader,
+            device=device,
+            require_ids=True,
+        )
+    
+        _export_neuco(neuco_bundle, neuco_output_dir / "neuco_export", label=modality)
+        print('Saved NeuCo embeddings to ', neuco_output_dir / "neuco_export")
+
+    
+    # launch eval
+    import subprocess
+    # get size of embedings
+    try:
+        embedding_dim_backbone = str(neuco_bundle.backbone.shape[1])
+        embedding_dim_posthead = str(neuco_bundle.posthead.shape[1])
+    except:
+        embedding_dim_backbone = "2048"  # default to 512 if extraction failed
+        embedding_dim_posthead = "1024"
+    # if model type ois torchgeo resnet
+    if config.model_type == "torchgeo_resnet50":
+        embedding_dim_backbone = "2048"
+        embedding_dim_posthead = "2048"
+
+    print(f"NeuCo embedding dimension: {embedding_dim_backbone}")
+
+
+    cmd = [
+        "python", "/local/ms-data/NeuCo-Bench/benchmark/main.py",
+        "--annotation_path", "/local/ms-data/SSL4EO-S12-downstream/labels",
+        "--output_dir", neuco_output_dir,
+        "--config", "/local/ms-data/NeuCo-Bench/benchmark/config.yaml",
+        "--method_name", "backbone",
+        "--phase", "testing",
+        "--submission_file", csv_out_backbone,
+        "--embedding_dim", embedding_dim_backbone
+    ]
+
+# python /local/ms-data/NeuCo-Bench/benchmark/main.py \
+#   --annotation_path /local/ms-data/SSL4EO-S12-downstream/labels \
+#   --output_dir /home/juro4948/ciip/diagnostics/unified_eval/curv_init_1/neuco_export \
+#   --config /local/ms-data/NeuCo-Bench/benchmark/config.yaml \
+#   --method_name backbone \
+#   --phase testing \
+#   --submission_file /home/juro4948/ciip/diagnostics/unified_eval/curv_init_1/neuco_export/neuco_s2l1c_backbone.csv
+    
+    cmd1 = [
+        "python", "/local/ms-data/NeuCo-Bench/benchmark/main.py",
+        "--annotation_path", "/local/ms-data/SSL4EO-S12-downstream/labels",
+        "--output_dir", neuco_output_dir,
+        "--config", "/local/ms-data/NeuCo-Bench/benchmark/config.yaml",
+        "--method_name", "posthead",
+        "--phase", "testing",
+        "--submission_file", csv_out_posthead,
+        "--embedding_dim", embedding_dim_posthead
+    ]
+    cmd2 = [
+        "python", "/local/ms-data/NeuCo-Bench/benchmark/main.py",
+        "--annotation_path", "/local/ms-data/SSL4EO-S12-downstream/labels",
+        "--output_dir", neuco_output_dir,
+        "--config", "/local/ms-data/NeuCo-Bench/benchmark/config.yaml",
+        "--method_name", "projected",
+        "--phase", "testing",
+        "--submission_file", csv_out_projected,
+        "--embedding_dim", embedding_dim_posthead
+    ]
+    env = os.environ.copy()
+    env["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+    subprocess.run(cmd, check=True, env=env)
+    if config.model_type != "torchgeo_resnet50":
+        subprocess.run(cmd1, check=True, env=env)
+        subprocess.run(cmd2, check=True, env=env)
+
+
 
     ssl4eo_available = (
         config.enable_ssl4eo
         and config.ssl4eo_root is not None
         and getattr(adapter, "supports_ssl4eo", True)
     )
+
+    assert ssl4eo_available or not config.enable_ssl4eo, "SSL4EO diagnostics requested but not available"
 
     s1_ssl4eo = s2_ssl4eo = None
     if ssl4eo_available:
@@ -753,22 +991,24 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
             device=device,
         )
 
-        _run_embedding_diagnostics(
-            config,
-            s1_ssl4eo,
-            s2_ssl4eo,
-            sample_ids=ssl4eo_ids,
-            output_dir=output_dir / "embedding_diagnostics",
-        )
-        logging.info("Completed SSL4EO diagnostics")
-    else:
-        logging.info(
-            "Skipping SSL4EO diagnostics (enable_ssl4eo=%s, root=%s, supports_ssl4eo=%s)",
-            config.enable_ssl4eo,
-            config.ssl4eo_root,
-            getattr(adapter, "supports_ssl4eo", True),
-        )
-
+    #     _run_embedding_diagnostics(
+    #         config,
+    #         s1_ssl4eo,
+    #         s2_ssl4eo,
+    #         sample_ids=ssl4eo_ids,
+    #         output_dir=output_dir / "embedding_diagnostics",
+    #     )
+    #     logging.info("Completed SSL4EO diagnostics")
+    #     # print output dir
+    #     print("SSL4EO diagnostics saved to ", output_dir)
+    # else:
+    #     logging.info(
+    #         "Skipping SSL4EO diagnostics (enable_ssl4eo=%s, root=%s, supports_ssl4eo=%s)",
+    #         config.enable_ssl4eo,
+    #         config.ssl4eo_root,
+    #         getattr(adapter, "supports_ssl4eo", True),
+    #     )
+    curvature = None
     if is_lorentz and s1_ssl4eo is not None and s2_ssl4eo is not None:
         if not isinstance(base_model, LorentzCIIP):
             raise TypeError("Expected LorentzCIIP model when is_lorentz is True")
@@ -783,6 +1023,14 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
             aperture_logk=None,
             seed=config.random_seed,
         )
+
+        curvature = _extract_curvature_from_state(base_model, device=device, dtype=s1_proj_feats.dtype)
+        
+    # compute retrieval metrics
+    retrieval_metrics = compute_cross_modal_retrieval(s1_ssl4eo, s2_ssl4eo, curvature=curvature)
+    retrieval_path = output_dir / "ssl4eo_retrieval.json"
+    retrieval_path.write_text(json.dumps(retrieval_metrics, indent=2, sort_keys=True))
+    logging.info("SSL4EO cross-modal retrieval metrics: %s", retrieval_metrics)
 
 
 __all__ = ["ModelEvalConfig", "run_full_evaluation"]
@@ -804,24 +1052,38 @@ if __name__ == "__main__":
     parser.add_argument("--disable-ssl4eo", action="store_true", help="Skip SSL4EO diagnostics even if a root is provided.")
     parser.add_argument("--tsne-samples", type=int, default=1500, help="Samples used for t-SNE visualisations.")
     parser.add_argument("--pca-samples", type=int, default=5000, help="Samples used for PCA visualisations.")
-    parser.add_argument("--ssl4eo-subset-size", type=int, default=2048, help="Subset size for SSL4EO embedding extraction.")
+    parser.add_argument("--ssl4eo-subset-size", type=int, default=20, help="Subset size for SSL4EO embedding extraction.")
     parser.add_argument("--ssl4eo-subset-seed", type=int, default=0, help="Subset seed for SSL4EO sampling.")
     parser.add_argument("--neuco-modalities", nargs="*", default=["s2l1c"], help="NeuCo modalities to export.")
     parser.add_argument("--neuco-seasons", type=int, default=4, help="Number of seasons for NeuCo extraction.")
 
     args = parser.parse_args()
 
+
+# trained on old SSL4EO, 13 bands
+## vanilla
+    # '2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp': epochs 5, 10 up to 85
+## hyperbolic
+    # '2025_11_05-21_04_44-model_resnet50-lr_0.001-b_128-j_6-p_amp/': 'curv_init_1', epochs 0-24
+    # '2025_11_06-19_39_33-model_resnet50-lr_0.001-b_128-j_6-p_amp': 'curv_init_0.5', epochs 0-14
+    # '2025_11_07-09_24_18-model_resnet50-lr_0.001-b_128-j_6-p_amp': 'curv_init_0.1', epochs 0-16
     
+# trained on v1.1, 12 bands
+    # '2025_11_12-12_28_55-model_resnet50-lr_0.001-b_2-j_6-p_amp': 'curv_init_0.1', epochs ..., increased lr for curvature param
+
 
     args.model_root = '/local/ms-data/SSL4EO/model/'
     args.model_path = '2025_11_05-21_04_44-model_resnet50-lr_0.001-b_128-j_6-p_amp/'
+    # '2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp'
+    # '2025_11_07-09_24_18-model_resnet50-lr_0.001-b_128-j_6-p_amp'
+    # '2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp'
     checkpoint_root = Path(args.model_root) / args.model_path / "checkpoints"
     # args.output_dir = Path("diagnostics/output")
 
     args.checkpoint=Path(f"{checkpoint_root}/epoch_10.pt")
     args.eurosat_root=Path("/local/ms-data/EuroSAT/")
     args.neuco_root=Path("/local/ms-data/SSL4EO-S12-downstream/data")
-    args.output_dir=Path("/home/juro4948/ciip/diagnostics/unified_eval/curv_init_1")
+    args.output_dir=Path("/home/juro4948/ciip/diagnostics/unified_eval/curv_init_1_epoch10/") #dino_13bands/") #curv_init_1_epoch10/
     args.ssl4eo_root=Path("/local/ms-data/SSL4EOv1.1/train")
 
 

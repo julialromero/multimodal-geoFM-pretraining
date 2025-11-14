@@ -72,6 +72,8 @@ class ModalityEmbeddings:
     raw: torch.Tensor
     projected: torch.Tensor
     layer_activations: Dict[str, torch.Tensor]
+    # add optional field for backbone embeddings
+    backbone: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -188,6 +190,8 @@ def preprocess_projection_data(
         norms = np.linalg.norm(data, axis=1, keepdims=True)
         norms = np.maximum(norms, 1e-12)
         data = data / norms
+    elif mode == "none":
+        pass
     else:
         raise ValueError(f"Unknown preprocessing mode: {mode}")
 
@@ -245,9 +249,19 @@ def plot_projection(
     """Plot a scatter projection."""
 
     fig, ax = plt.subplots(figsize=(6, 5))
-    for label in np.unique(labels):
+    unique_labels = list(np.unique(labels))
+    if "S1" in unique_labels and "S2" in unique_labels:
+        unique_labels = [lbl for lbl in unique_labels if lbl != "S1"] + ["S1"]
+    for label in unique_labels:
         mask = labels == label
-        ax.scatter(coords[mask, 0], coords[mask, 1], label=str(label), alpha=0.7, s=18)
+        ax.scatter(
+            coords[mask, 0],
+            coords[mask, 1],
+            label=str(label),
+            alpha=0.7,
+            s=18,
+            zorder=3 if label == "S1" else 2,
+        )
     ax.set_xlabel("Component 1")
     ax.set_ylabel("Component 2")
     ax.set_title(title)
@@ -265,12 +279,15 @@ def plot_projection(
 
 
 def _prepare_cka_tensor(tensor: torch.Tensor, take: Optional[int] = None) -> Optional[torch.Tensor]:
+    # print dim before
+    # print("Preparing CKA tensor with shape:", tensor.shape)
     if tensor.dim() != 2:
         tensor = tensor.flatten(start_dim=1)
     if tensor.shape[0] < 2:
         return None
     if take is not None and take > 0:
         tensor = tensor[:take]
+    # print("Prepared CKA tensor with shape:", tensor.shape)
     return tensor.to(dtype=torch.float64)
 
 
@@ -280,6 +297,11 @@ def compute_linear_cka(
     eps: float = 1e-12,
 ) -> Optional[float]:
     """Compute linear CKA similarity between two activation matrices."""
+
+    # print shape of x and y
+    # print("Computing CKA between shapes:", x.shape, y.shape)
+    # if there are 3 dims:
+
 
     count = min(x.shape[0], y.shape[0])
     if count < 2:
@@ -304,12 +326,12 @@ def _layer_sort_key(name: str) -> Tuple[int, int, str]:
     return (numbers[0], numbers[1] if len(numbers) > 1 else 0, name)
 
 
-def _order_layers(layer_dict: Dict[str, torch.Tensor]) -> List[str]:
-    return sorted(layer_dict.keys(), key=_layer_sort_key)
+# def _order_layers(layer_dict: Dict[str, torch.Tensor]) -> List[str]:
+#     return sorted(layer_dict.keys(), key=_layer_sort_key)
 
 
 def compute_within_encoder_cka(layer_features: Dict[str, torch.Tensor]) -> Tuple[List[str], Optional[np.ndarray]]:
-    ordered = _order_layers(layer_features)
+    ordered = layer_features #_order_layers(layer_features)
     prepared: Dict[str, torch.Tensor] = {}
     for name in ordered:
         tensor = _prepare_cka_tensor(layer_features[name])
@@ -335,8 +357,8 @@ def compute_cross_encoder_cka(
     s1_layers: Dict[str, torch.Tensor],
     s2_layers: Dict[str, torch.Tensor],
 ) -> Tuple[List[str], List[str], Optional[np.ndarray]]:
-    names_s1 = _order_layers(s1_layers)
-    names_s2 = _order_layers(s2_layers)
+    names_s1 = s1_layers #_order_layers(s1_layers)
+    names_s2 = s2_layers #_order_layers(s2_layers)
     prepared_s1 = {name: _prepare_cka_tensor(s1_layers[name]) for name in names_s1}
     prepared_s1 = {k: v for k, v in prepared_s1.items() if v is not None}
     prepared_s2 = {name: _prepare_cka_tensor(s2_layers[name]) for name in names_s2}
@@ -421,6 +443,8 @@ def _register_layer_hooks(
     handles: List = []
     controller = _LayerCaptureController()
 
+    print('REGISTERING LAYER HOOKS')
+
     def _make_layer_hook(key: str, name: str):
         cache = layer_caches[key].setdefault(name, [])
 
@@ -438,67 +462,116 @@ def _register_layer_hooks(
 
         return hook
 
+    # def _attach_layers(encoder: Optional[nn.Module], key: str) -> None:
+    #     if encoder is None:
+    #         return
+    #     layer_names = [
+    #         "conv1",
+    #         "bn1",
+    #         "relu",
+    #         "maxpool",
+    #         "layer1",
+    #         "layer2",
+    #         "layer3",
+    #         "layer4",
+    #         "avgpool",
+    #         "fc",
+    #     ]
+    #     for name in layer_names:
+    #         module = getattr(encoder, name, None)
+    #         if not isinstance(module, nn.Module):
+    #             continue
+    #         # try:
+    #         handles.append(module.register_forward_hook(_make_layer_hook(key, name)))
+    #         # except Exception:
+    #         #     continue
+
     def _attach_layers(encoder: Optional[nn.Module], key: str) -> None:
         if encoder is None:
             return
-        layer_names = [
-            "conv1",
-            "bn1",
-            "relu",
-            "maxpool",
-            "layer1",
-            "layer2",
-            "layer3",
-            "layer4",
-            "avgpool",
-            "fc",
-        ]
-        for name in layer_names:
-            module = getattr(encoder, name, None)
-            if not isinstance(module, nn.Module):
+
+        # Pick which kinds of modules you want to capture.
+        # This covers all useful points: conv/bn/relu/pools/linear + block activations.
+        WHITELIST = (
+            nn.Conv2d,
+            nn.BatchNorm2d,
+            nn.ReLU,
+            nn.MaxPool2d,
+            nn.AdaptiveAvgPool2d,
+            nn.AvgPool2d,
+            nn.Linear,
+        )
+
+        for name, module in encoder.named_modules():
+            # skip the top-level module itself (empty name)
+            if not name:
                 continue
-            try:
+
+            # Option A: capture every whitelisted submodule (includes block relus like layer3.5.relu)
+            if isinstance(module, WHITELIST):
                 handles.append(module.register_forward_hook(_make_layer_hook(key, name)))
-            except Exception:
-                continue
+    
+    # if ciip model
+    if hasattr(model, "encoder_s1") and hasattr(model, "encoder_s2") and model.encoder_s1 is not None:
+        encoder_s1 = getattr(model, "encoder_s1", None)
+        assert encoder_s1 is not None, f"Model must have an S1 encoder: {model}"
+        if encoder_s1 is not None:
+            for attr in ("proj", "projection_head", "fc"):
+                module = getattr(encoder_s1, attr, None)
+                if isinstance(module, nn.Module):
+                    break
+            # print("Attaching layers for S1 encoder")
+            # print(encoder_s1)
+            _attach_layers(encoder_s1, "s1")
 
-    encoder_s1 = getattr(model, "encoder_s1", None)
-    if encoder_s1 is not None:
-        for attr in ("proj", "projection_head", "fc"):
-            module = getattr(encoder_s1, attr, None)
-            if isinstance(module, nn.Module):
-                break
-        _attach_layers(encoder_s1, "s1")
+        encoder_s2 = getattr(model, "encoder_s2", None)
+        assert encoder_s2 is not None, f"Model must have an S2 encoder: {model}"
+        if encoder_s2 is not None:
+            for attr in ("proj", "projection_head", "fc"):
+                module = getattr(encoder_s2, attr, None)
+                if isinstance(module, nn.Module):
+                    break
+            _attach_layers(encoder_s2, "s2")
 
-    encoder_s2 = getattr(model, "encoder_s2", None)
-    if encoder_s2 is not None:
-        for attr in ("proj", "projection_head", "fc"):
-            module = getattr(encoder_s2, attr, None)
-            if isinstance(module, nn.Module):
-                break
-        _attach_layers(encoder_s2, "s2")
+    # if model is torchgeo resnet, attach layers differently
+    elif model.__class__.__name__.lower() == "torchgeoresnetadapter":
+        # print("Attaching layers for TorchGeoResNetAdapter")
+        encoder = getattr(model, "encoder_s2", None)
+        _attach_layers(encoder, "s2")
+
+    # print("Registered layer hooks for embedding extraction.")
+    # print("Layers for S1 encoder:", list(layer_caches["s1"].keys()))
+    # print("Layers for S2 encoder:", list(layer_caches["s2"].keys()))
+    # print("Total hooks registered:", len(handles))
+    # print("Hook handles:", handles)
 
     return layer_caches, handles, controller
 
 
 def _encoder_accepts_lorentz(method) -> bool:
-    try:
-        signature = inspect.signature(method)
-    except (TypeError, ValueError):  # pragma: no cover - defensive
-        return False
-    return "lorentz" in signature.parameters
+    # print(type(method))
+    inst = getattr(method, "__self__", None)   # -> CiipEvaluationAdapter instance
+    # print is lorent
+    # print(f'is lorentz={getattr(inst, "is_lorentz", False)}')
+    return getattr(inst, "is_lorentz", False)
+    
+
+
+
+    # # if model class of method is LorentzCIIP, return true
+    # model_class = method.__self__.__class__.__name__
+    # print("Encoder model class:", model_class)
+    # return model_class.lower() == "lorentzciip"
 
 
 def _run_encoder_method(
     method,
     tensor: torch.Tensor,
     *,
-    project_hyperbolic: bool,
-    normalize: bool,
+    project_hyperbolic: Optional[bool] = None,
+    normalize: Optional[bool] = None,
 ) -> torch.Tensor:
     accepts_lorentz = _encoder_accepts_lorentz(method)
-    # # print model class
-    # print("Running encoder method:", method)
 
     # squeeze tensor if it has 5 dim
     tensor = tensor.squeeze(0) if tensor.dim() == 5 else tensor
@@ -507,8 +580,14 @@ def _run_encoder_method(
         # normalize is not used in LorentzCIIP
         return method(tensor, lorentz=project_hyperbolic, normalize=normalize)
     
-    return method(tensor, lorentz=project_hyperbolic, normalize=normalize)
-    # return method(tensor, normalize=normalize)
+    # if method does not have noramlize or lorentz arguments, just call it with tensor
+    sig = inspect.signature(method)
+    print(sig.parameters)
+    if "normalize" not in sig.parameters:
+        return method(tensor)
+    
+    # return method(tensor, lorentz=project_hyperbolic, normalize=normalize)
+    return method(tensor, normalize=normalize)
 
 
 def extract_embeddings_for_dataset(
@@ -525,6 +604,8 @@ def extract_embeddings_for_dataset(
     s2_vectors: List[torch.Tensor] = []
     s1_norm_vectors: List[torch.Tensor] = []
     s2_norm_vectors: List[torch.Tensor] = []
+    s1_backbone_vectors: List[torch.Tensor] = []
+    s2_backbone_vectors: List[torch.Tensor] = []
     sample_ids: List[str] = []
 
     def _to_tensor(array) -> torch.Tensor:
@@ -535,6 +616,8 @@ def extract_embeddings_for_dataset(
             return tensor.squeeze(0)
         raise ValueError("Unsupported sample shape for embedding extraction")
 
+    # print len of dataset
+    print("Extracting embeddings for num files (64 images per file)", len(indices))
     with torch.no_grad():
         for dataset_idx in indices:
             sample = base_dataset[dataset_idx]
@@ -547,81 +630,139 @@ def extract_embeddings_for_dataset(
                 uid = str(dataset_idx)
             if s1_img is None or s2_img is None:
                 continue
-            s1_tensor = _to_tensor(s1_img).unsqueeze(0).to(device=device, dtype=input_dtype)
-            s2_tensor = _to_tensor(s2_img).unsqueeze(0).to(device=device, dtype=input_dtype)
- 
 
-            encode_s1 = getattr(model, "encode_s1", None)
-            encode_s2 = getattr(model, "encode_s2", None)
-        
+            # S1 tensor shape with unsqueeze(0): torch.Size([1, 64, 2, 224, 224])
+            # without unsqueeze(0): S1 shape=torch.Size([64, 2, 224, 224])
+            s1_tensor = _to_tensor(s1_img).to(device=device, dtype=input_dtype)
+            s2_tensor = _to_tensor(s2_img).to(device=device, dtype=input_dtype)
+
+            # print shapes
+            print(f"Processing sample UID={uid}: S1 shape={s1_tensor.shape}, S2 shape={s2_tensor.shape}")
+
             with autocast():
-                s1_raw = _run_encoder_method(
-                    encode_s1,
-                    s1_tensor,
-                    project_hyperbolic=False,
-                    normalize=False,
-                    # post_head=True
-                )
+                if model.encoder_s1 is not None:
+                    s1_raw = _run_encoder_method(
+                        model.encode_s1,
+                        s1_tensor,
+                        project_hyperbolic=False,
+                        normalize=False
+                    )
+                
                 s2_raw = _run_encoder_method(
-                    encode_s2,
+                    model.encode_s2,
                     s2_tensor,
                     project_hyperbolic=False,
-                    normalize=False,
-                    # post_head=True
+                    normalize=False
                     )
+                assert s2_raw is not None, "S2 raw embeddings must not be None"
+                assert (model.encoder_s1 is None) or (s1_raw.shape == s2_raw.shape), "S1 and S2 raw embeddings must have the same shape {s1_raw.shape} vs {s2_raw.shape}"
+
 
                 with capture_controller.suspend():
-                    # if lorentzciip model, project hyperbolic is true
-                    if _encoder_accepts_lorentz(encode_s1):
-                        s1_norm = _run_encoder_method(
-                            encode_s1,
-                            s1_tensor,
-                            project_hyperbolic=True,
+                
+                # if lorentzciip model, project hyperbolic is true
+                    if _encoder_accepts_lorentz(model.encode_s2):
+                        if model.encoder_s1 is not None:
+                            s1_norm = _run_encoder_method(
+                                model.encode_s1,
+                                s1_tensor,
+                                project_hyperbolic=True,
+                                normalize=False, # not used in lorentzciip
                             # post_head=True
-                        )
+                            )
+                        # print("S1 norm shape:", s1_norm.shape)
                         s2_norm = _run_encoder_method(
-                            encode_s2,
-                            s2_tensor,
-                            project_hyperbolic=True,
+                                model.encode_s2,
+                                s2_tensor,
+                                project_hyperbolic=True,
+                                normalize=False, # not used in lorentzciip
                             # post_head=True
-                        )
+                            )
+                        # print("S2 norm shape:", s2_norm.shape)
+                        assert s2_norm is not None, "S2 norm embeddings must not be None"
                     # else take L2 norm
                     else:
-                        s1_norm = _run_encoder_method(
-                            encode_s1,
-                            s1_tensor,
-                            project_hyperbolic=False,
-                            normalize=True,
-                            # post_head=True
-                        )
+                        if model.encoder_s1 is not None:
+                            s1_norm = _run_encoder_method(
+                                model.encode_s1,
+                                s1_tensor,
+                                project_hyperbolic=False,
+                                normalize=True,
+                                # post_head=True
+                            )
                         s2_norm = _run_encoder_method(
-                            encode_s2,
+                            model.encode_s2,
                             s2_tensor,
                             project_hyperbolic=False,
                             normalize=True,
                             # post_head=True
                         )
+                        assert s2_norm is not None, "S2 norm embeddings must not be None"
 
-            
-            s1_vectors.append(s1_raw.squeeze(0).cpu().to(torch.float32))
-            s2_vectors.append(s2_raw.squeeze(0).cpu().to(torch.float32))
-            s1_norm_vectors.append(s1_norm.squeeze(0).cpu().to(torch.float32))
-            s2_norm_vectors.append(s2_norm.squeeze(0).cpu().to(torch.float32))
+                    # print("S2 norm shape:", s2_norm.shape)
+                    
+                
+                    # now extract backbone embeddings 
+                    if model.encoder_s1 is not None:
+                            s1_backbone = _run_encoder_method(
+                                model.encoder_s1,
+                                s1_tensor
+                            )
+                    s2_backbone = _run_encoder_method(
+                        model.encoder_s2,
+                        s2_tensor
+                    )
+                    assert s2_backbone is not None, "S2 norm embeddings must not be None"
+                    # print("S2 backbone shape:", s2_backbone.shape)
+                    # print("S1 backbone shape:", s1_backbone.shape)
+                    # raise NotImplementedError("Stop here for debugging")
+
+
+
+            for handle in handles:
+                handle.remove()
+
+            if model.encoder_s1 is not None:
+                if s1_raw.squeeze(0).dim() != 2 or s2_raw.squeeze(0).dim() != 2 or s1_norm.squeeze(0).dim() != 2 or s2_norm.squeeze(0).dim() != 2:
+                    raise ValueError("Extracted embeddings must be 2D after squeezing")
+                s1_vectors.append(s1_raw.squeeze(0).cpu().to(torch.float32))
+                s2_vectors.append(s2_raw.squeeze(0).cpu().to(torch.float32))
+                s1_norm_vectors.append(s1_norm.squeeze(0).cpu().to(torch.float32))
+                s2_norm_vectors.append(s2_norm.squeeze(0).cpu().to(torch.float32))
+                s1_backbone_vectors.append(s1_backbone.squeeze(0).cpu().to(torch.float32))
+                s2_backbone_vectors.append(s2_backbone.squeeze(0).cpu().to(torch.float32))
+
+            else:
+                if s2_raw.squeeze(0).dim() != 2 or s2_norm.squeeze(0).dim() != 2:
+                    raise ValueError("Extracted embeddings must be 2D after squeezing")
+                s2_vectors.append(s2_raw.squeeze(0).cpu().to(torch.float32))
+                s2_norm_vectors.append(s2_norm.squeeze(0).cpu().to(torch.float32))
+                s2_backbone_vectors.append(s2_backbone.squeeze(0).cpu().to(torch.float32))
             sample_ids.append(str(uid))
 
-    for handle in handles:
-        handle.remove()
+    
 
     def _stack(list_tensors: List[torch.Tensor]) -> torch.Tensor:
         if not list_tensors:
-            return torch.empty(0, 0)
+            raise ValueError("No tensors to stack")
+        # if there are 2 dims, stack on first dim
+        if list_tensors[0].dim() == 2:
+            # if the first dim is 64
+            assert list_tensors[0].shape[0] == 64, "Expected first dimension to be 64"
+            return torch.cat(list_tensors, dim=0)
         return torch.stack(list_tensors, dim=0)
+    
+    # print(layer_cache["s1"].items())
+    # print(layer_cache["s2"].items())
 
     s1_layers = {name: torch.cat(tensors, dim=0) for name, tensors in layer_cache["s1"].items() if tensors}
     s2_layers = {name: torch.cat(tensors, dim=0) for name, tensors in layer_cache["s2"].items() if tensors}
 
-    s1_embeddings = ModalityEmbeddings(_stack(s1_vectors), _stack(s1_norm_vectors), s1_layers)
-    s2_embeddings = ModalityEmbeddings(_stack(s2_vectors), _stack(s2_norm_vectors), s2_layers)
+    if model.encoder_s1 is not None:
+        s1_embeddings = ModalityEmbeddings(_stack(s1_vectors), _stack(s1_norm_vectors), s1_layers, backbone=_stack(s1_backbone_vectors))
+    else:
+        s1_embeddings = None
+    s2_embeddings = ModalityEmbeddings(_stack(s2_vectors), _stack(s2_norm_vectors), s2_layers, backbone=_stack(s2_backbone_vectors))
     return s1_embeddings, s2_embeddings, sample_ids
 
 
@@ -660,7 +801,7 @@ def _compute_epoch_diagnostics(
     )
 
 
-def _plot_singular_values(ax, values: np.ndarray, *, modality: str, embedding_dim: int) -> None:
+def _plot_singular_values(ax, values: np.ndarray, *, modality: str, embedding_dim: int, label: Optional[str]) -> None:
     if values.size == 0:
         ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
         ax.set_xticks([])
@@ -671,7 +812,7 @@ def _plot_singular_values(ax, values: np.ndarray, *, modality: str, embedding_di
     ax.set_xlim(0, 50)
     ax.set_xlabel("Component rank")
     ax.set_ylabel("Singular value")
-    ax.set_title(f"{modality} SVD (dim={embedding_dim})")
+    ax.set_title(f"{modality} SVD (dim={embedding_dim}) {label}")
     ax.grid(True, alpha=0.2)
 
 
@@ -684,26 +825,91 @@ def _plot_cka(ax, matrix: Optional[np.ndarray], x_labels: List[str], y_labels: L
         return
     im = ax.imshow(matrix, vmin=0.0, vmax=1.0, aspect="auto", cmap="viridis")
     ax.set_title(title)
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
-    ax.set_xticks(range(len(x_labels)))
-    ax.set_xticklabels(x_labels, rotation=45, ha="right")
-    ax.set_yticks(range(len(y_labels)))
-    ax.set_yticklabels(y_labels)
+    # assert contents of
+    assert [a == b for (a, b) in zip(x_labels, y_labels)], f"{x_labels} \n\n {y_labels}"
+    
+    ax.set_xlabel('Layer #')
+    ax.set_ylabel('Layer #')
+
+    n = len(x_labels)
+    label_nums = list(range(n))
+    downsampled = label_nums[::10] if n > 0 else []
+
+    ax.set_xticks(downsampled)
+    ax.set_xticklabels(downsampled, rotation=45, ha="right")
+
+    ax.set_yticks(downsampled)
+    ax.set_yticklabels(downsampled)
     ax.figure.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="Linear CKA")
 
 
-def plot_epoch_diagnostics(epoch_diag: EpochDiagnostics, output_dir: Path) -> Path:
+def plot_epoch_diagnostics_s2only(epoch_diag: EpochDiagnostics, output_dir: Path, label: str) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # 2x2 layout: [S2 singular values | summary], [S2 within-CKA | empty]
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+    # Embedding dim for S2
+    if epoch_diag.s2.raw.ndim == 2:
+        embedding_dim_s2 = epoch_diag.s2.raw.shape[1]
+    else:
+        embedding_dim_s2 = epoch_diag.s2.raw.view(epoch_diag.s2.raw.shape[0], -1).shape[1]
+
+    # Top-left: S2 singular values
+    _plot_singular_values(
+        axes[0, 0],
+        epoch_diag.s2_singular_values,
+        modality="S2",
+        embedding_dim=embedding_dim_s2,
+        label='posthead-raw'
+    )
+
+    # Top-right: summary text
+    axes[0, 1].axis("off")
+    axes[0, 1].text(
+        0.5,
+        0.5,
+        f"{label}:\nEpoch {epoch_diag.epoch}\n"
+        f"Samples: {len(epoch_diag.ids)}*64={len(epoch_diag.ids)*64}",
+        ha="center",
+        va="center",
+        transform=axes[0, 1].transAxes,
+    )
+
+    # Bottom-left: S2 within-encoder CKA
+    _plot_cka(
+        axes[1, 0],
+        epoch_diag.s2_within_cka,
+        epoch_diag.s2_layers,
+        epoch_diag.s2_layers,
+        title="S2 within-encoder",
+        xlabel="Layer",
+        ylabel="Layer",
+    )
+
+    # Bottom-right: empty
+    axes[1, 1].axis("off")
+
+    fig.suptitle(f"Embedding diagnostics — {epoch_diag.label}")
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+
+    output_path = output_dir / "embedding_diagnostics.png"
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+    return output_path
+
+def plot_epoch_diagnostics(epoch_diag: EpochDiagnostics, output_dir: Path, label: str) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     fig, axes = plt.subplots(2, 3, figsize=(18, 10))
 
     embedding_dim_s1 = epoch_diag.s1.raw.shape[1] if epoch_diag.s1.raw.ndim == 2 else epoch_diag.s1.raw.view(epoch_diag.s1.raw.shape[0], -1).shape[1]
     embedding_dim_s2 = epoch_diag.s2.raw.shape[1] if epoch_diag.s2.raw.ndim == 2 else epoch_diag.s2.raw.view(epoch_diag.s2.raw.shape[0], -1).shape[1]
 
-    _plot_singular_values(axes[0, 0], epoch_diag.s1_singular_values, modality="S1", embedding_dim=embedding_dim_s1)
-    _plot_singular_values(axes[0, 1], epoch_diag.s2_singular_values, modality="S2", embedding_dim=embedding_dim_s2)
+
+    _plot_singular_values(axes[0, 0], epoch_diag.s1_singular_values, modality="S1", embedding_dim=embedding_dim_s1, label='posthead-raw')
+    _plot_singular_values(axes[0, 1], epoch_diag.s2_singular_values, modality="S2", embedding_dim=embedding_dim_s2, label='posthead-raw')
     axes[0, 2].axis("off")
-    axes[0, 2].text(0.5, 0.5, f"Epoch {epoch_diag.epoch}\n{epoch_diag.label}\nSamples: {len(epoch_diag.ids)}", ha="center", va="center", transform=axes[0, 2].transAxes)
+    axes[0, 2].text(0.5, 0.5, f"{label}:/nEpoch {epoch_diag.epoch}\n{epoch_diag.label}\nSamples: {len(epoch_diag.ids)}*64={len(epoch_diag.ids)*64}", ha="center", va="center", transform=axes[0, 2].transAxes)
 
     _plot_cka(
         axes[1, 0],
@@ -735,7 +941,7 @@ def plot_epoch_diagnostics(epoch_diag: EpochDiagnostics, output_dir: Path) -> Pa
 
     fig.suptitle(f"Embedding diagnostics — {epoch_diag.label}")
     fig.tight_layout(rect=[0, 0, 1, 0.96])
-    output_path = output_dir / "diagnostics.png"
+    output_path = output_dir / "embedding_diagnostics.png"
     fig.savefig(output_path, dpi=200)
     plt.close(fig)
     return output_path

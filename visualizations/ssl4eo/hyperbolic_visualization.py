@@ -181,6 +181,8 @@ def _extract_curvature_from_state(
     return torch.exp(curv_tensor)
 
 
+
+
 def compute_hyperbolic_context(
     model: LorentzCIIP,
     s1_feats: torch.Tensor,
@@ -191,7 +193,6 @@ def compute_hyperbolic_context(
     device = s1_feats.device
     if not isinstance(model, LorentzCIIP):
         raise TypeError("compute_hyperbolic_context requires a LorentzCIIP model instance")
-
     curvature = _extract_curvature_from_state(model, device=device, dtype=s1_feats.dtype)
     s1_points = s1_feats.to(device=device, dtype=s1_feats.dtype)
     s2_points = s2_feats.to(device=device, dtype=s2_feats.dtype)
@@ -252,11 +253,12 @@ def plot_angle_aperture(angles: np.ndarray, aperture_s1: np.ndarray, aperture_s2
 
 
 def plot_radial_histogram(s1_norms: np.ndarray, s2_norms: np.ndarray, output: Path) -> None:
+    # print(s1_norms)
     fig, ax = plt.subplots(figsize=(7, 5))
     bins = max(20, int(math.sqrt(len(s1_norms))))
     ax.hist(s1_norms, bins=bins, alpha=0.6, density=True, label="S1", color="tab:blue")
     ax.hist(s2_norms, bins=bins, alpha=0.6, density=True, label="S2", color="tab:orange")
-    ax.set_xlabel("Pre-lift norm")
+    ax.set_xlabel("Geodesic distance from origin (hyperbolic radius)")
     ax.set_ylabel("Density")
     ax.set_title("Radial distribution per modality")
     ax.legend()

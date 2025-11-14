@@ -20,17 +20,32 @@ from zarr.storage import ZipStore
 
 ### band statistics: mean & std
 # calculated from 50k data
-S1_MEAN = [-12.54847273, -20.19237134]
-S1_STD = [5.25697717, 5.91150917]
+### OLD SSL4EO v1.0 STATS
+# S1_MEAN = [-12.54847273, -20.19237134]
+# S1_STD = [5.25697717, 5.91150917]
 
-S2A_MEAN = [752.40087073, 884.29673756, 1144.16202635, 1297.47289228, 1624.90992062, 2194.6423161, 2422.21248945, 2517.76053101, 2581.64687018, 2645.51888987, 2368.51236873, 1805.06846033]
-S2A_STD = [1108.02887453, 1155.15170768, 1183.6292542, 1368.11351514, 1370.265037, 1355.55390699, 1416.51487101, 1474.78900051, 1439.3086061, 1582.28010962, 1455.52084939, 1343.48379601]
+# S2A_MEAN = [752.40087073, 884.29673756, 1144.16202635, 1297.47289228, 1624.90992062, 2194.6423161, 2422.21248945, 2517.76053101, 2581.64687018, 2645.51888987, 2368.51236873, 1805.06846033]
+# S2A_STD = [1108.02887453, 1155.15170768, 1183.6292542, 1368.11351514, 1370.265037, 1355.55390699, 1416.51487101, 1474.78900051, 1439.3086061, 1582.28010962, 1455.52084939, 1343.48379601]
 
-S2C_MEAN = [1605.57504906, 1390.78157673, 1314.8729939, 1363.52445545, 1549.44374991, 2091.74883118, 2371.7172463, 2299.90463006, 2560.29504086, 830.06605044, 22.10351321, 2177.07172323, 1524.06546312]
-S2C_STD = [786.78685367, 850.34818441, 875.06484736, 1138.84957046, 1122.17775652, 1161.59187054, 1274.39184232, 1248.42891965, 1345.52684884, 577.31607053, 51.15431158, 1336.09932639, 1136.53823676]
+# S2C_MEAN = [1605.57504906, 1390.78157673, 1314.8729939, 1363.52445545, 1549.44374991, 2091.74883118, 2371.7172463, 2299.90463006, 2560.29504086, 830.06605044, 22.10351321, 2177.07172323, 1524.06546312]
+# S2C_STD = [786.78685367, 850.34818441, 875.06484736, 1138.84957046, 1122.17775652, 1161.59187054, 1274.39184232, 1248.42891965, 1345.52684884, 577.31607053, 51.15431158, 1336.09932639, 1136.53823676]
+#######
+
+
+# V1.1
+S2L1C_MEAN = [2607.345, 2393.068, 2320.225, 2373.963, 2562.536, 3110.071, 3392.832, 3321.154, 3583.77, 1838.712, 1021.753, 3205.112, 2545.798]
+S2L1C_STD = [786.523, 849.702, 875.318, 1143.578, 1126.248, 1161.98, 1273.505, 1246.79, 1342.755, 576.795, 45.626, 1340.347, 1145.036]
+
 S2L2A_MEAN = [1793.243, 1924.863, 2184.553, 2340.936, 2671.402, 3240.082, 3468.412, 3563.244, 3627.704, 3711.071, 3416.714, 2849.625]
 S2L2A_STD = [1160.144, 1201.092, 1219.943, 1397.225, 1400.035, 1373.136, 1429.17, 1485.025, 1447.836, 1652.703, 1471.002, 1365.307]
 
+S1GRD_MEAN = [-12.577, -20.265]
+S1GRD_STD = [5.179, 5.872]
+
+S2RGB_MEAN = [100.708, 87.489, 61.932]
+S2RGB_STD = [68.550, 47.647, 40.592]
+
+####
 
 def _open_zarr_dataset(source):
     try:
@@ -137,8 +152,8 @@ class SSL4EODataset(Dataset):
             for b in (s2_band_names if s2_band_names is not None else self.DEFAULT_S2_BANDS)
         ]
         # if len(self.s2_band_names) != len(S2L2A_MEAN):
-        s2_means = S2C_MEAN if s2_tier.lower() == "s2l1c" else S2L2A_MEAN
-        s2_stds = S2C_STD if s2_tier.lower() == "s2l1c" else S2L2A_STD
+        s2_means = S2L1C_MEAN if s2_tier.lower() == "s2l1c" else S2L2A_MEAN
+        s2_stds = S2L1C_STD if s2_tier.lower() == "s2l1c" else S2L2A_STD
             # raise ValueError("Unexpected number of S2 band names for provided statistics")
 
         self.s2_stats: Dict[str, Tuple[float, float]] = {
@@ -186,6 +201,7 @@ class SSL4EODataset(Dataset):
         s2_tensor = self.normalize_s2(s2_tensor, self.s2_stats, self.s2_band_names)
 
         # Return (P,C,H,W) for both; collate_fn will flatten P into batch
+        # print('returning samples_per_file:', s1_tensor.shape[0])
         return s1_tensor, s2_tensor
 
     # ---------- helpers ----------
@@ -344,8 +360,8 @@ class SSL4EODataset(Dataset):
         if x.ndim == 3:
             x = x.unsqueeze(0)
         C = x.shape[1]
-        mean = torch.tensor(S1_MEAN[:C], dtype=x.dtype, device=x.device).view(1, C, 1, 1)
-        std  = torch.tensor(S1_STD[:C],  dtype=x.dtype, device=x.device).view(1, C, 1, 1)
+        mean = torch.tensor(S1GRD_MEAN[:C], dtype=x.dtype, device=x.device).view(1, C, 1, 1)
+        std  = torch.tensor(S1GRD_STD[:C],  dtype=x.dtype, device=x.device).view(1, C, 1, 1)
         y = (x - mean) / std
         return y[0] if y.shape[0] == 1 else y
 
@@ -380,6 +396,7 @@ class SSL4EODataset(Dataset):
         name = self.sample_names[location_idx]
         uid = f"{name}_season{season_idx}"
         return uid, self.s1_paths[location_idx]
+    
 from torch.utils.data._utils.collate import default_collate
 
 def collate_concat_samples(batch):
@@ -716,10 +733,10 @@ class SSL4EODatasetOld(Dataset):
 
         if self.s2_tier == "s2a":
             stat_bands = ["1", "2", "3", "4", "5", "6", "7", "8", "8A", "9", "11", "12"]
-            self.s2_stats = {b: (m, s) for b, m, s in zip(stat_bands, S2A_MEAN, S2A_STD)}
+            self.s2_stats = {b: (m, s) for b, m, s in zip(stat_bands, S2L2A_MEAN, S2L2A_STD)}
         else:
             stat_bands = ["1", "2", "3", "4", "5", "6", "7", "8", "8A", "9", "10", "11", "12"]
-            self.s2_stats = {b: (m, s) for b, m, s in zip(stat_bands, S2C_MEAN, S2C_STD)}
+            self.s2_stats = {b: (m, s) for b, m, s in zip(stat_bands, S2L1C_MEAN, S2L1C_STD)}
 
         original_working_directory = hydra.utils.get_original_cwd()
         data_parent_directory = "/".join(original_working_directory.split("/")[:-2])
@@ -836,8 +853,8 @@ class SSL4EODatasetOld(Dataset):
 
   
     def normalize_s1(self, x):  # x: [2,H,W] in your chosen S1 domain
-        mean = torch.tensor(S1_MEAN, dtype=x.dtype, device=x.device)[:, None, None]
-        std  = torch.tensor(S1_STD,  dtype=x.dtype, device=x.device)[:, None, None]
+        mean = torch.tensor(S1GRD_MEAN, dtype=x.dtype, device=x.device)[:, None, None]
+        std  = torch.tensor(S1GRD_STD,  dtype=x.dtype, device=x.device)[:, None, None]
         return (x - mean) / std
 
     def normalize_s2(self, x , s2_stats, s2_bands):
