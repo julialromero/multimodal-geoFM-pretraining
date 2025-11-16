@@ -80,6 +80,73 @@ EUROSATSTD = {
 EUROSATBANDS = ("B01", "B02", "B03", "B04", "B05", "B06", "B07", "B08", "B8A", "B09", "B10", "B11", "B12")
 ##
 
+
+def _first_conv_in_channels(module: Optional[nn.Module]) -> Optional[int]:
+    if module is None:
+        return None
+    conv1 = getattr(module, "conv1", None)
+    if isinstance(conv1, nn.Conv2d):
+        return conv1.in_channels
+    for submodule in module.modules():
+        if isinstance(submodule, nn.Conv2d):
+            return submodule.in_channels
+    return None
+
+
+def _infer_model_in_channels(adapter: EvaluationAdapter, fallback: int) -> int:
+    """Best-effort detection of the Sentinel-2 channel count for the adapter."""
+
+    encoder = getattr(adapter, "encoder_s2", None)
+    in_channels = _first_conv_in_channels(encoder)
+    if in_channels is None:
+        in_channels = _first_conv_in_channels(getattr(adapter, "base_model", None))
+    if in_channels is None:
+        in_channels = fallback
+    return in_channels
+
+
+def _resolve_eurosat_bands(num_channels: int) -> Tuple[str, ...]:
+    """Return the EuroSAT band tuple matching the model channel budget."""
+
+    if num_channels >= len(EUROSATBANDS):
+        return EUROSATBANDS
+    if num_channels == 12:
+        return tuple(band for band in EUROSATBANDS if band != "B10")
+    if num_channels < 1:
+        raise ValueError("Model must expose at least one Sentinel-2 channel")
+    logging.warning(
+        "Model exposes %d Sentinel-2 channels; defaulting to the first %d EuroSAT bands.",
+        num_channels,
+        num_channels,
+    )
+    return tuple(EUROSATBANDS[:num_channels])
+
+
+def _align_s2_channels(image: torch.Tensor, expected_channels: Optional[int]) -> torch.Tensor:
+    """Drop the cirrus band when the model only supports 12 Sentinel-2 bands."""
+
+    if expected_channels is None or image.ndim < 3:
+        return image
+
+    channel_dim = 1 if image.ndim >= 4 else 0
+    current_channels = image.size(channel_dim)
+
+    if current_channels == expected_channels:
+        return image
+
+    if current_channels == 13 and expected_channels == 12:
+        # Drop B10 (0-indexed channel 10) to match 12-band encoders.
+        indices = torch.arange(current_channels, device=image.device)
+        keep_indices = torch.cat([indices[:10], indices[11:]])
+        return torch.index_select(image, channel_dim, keep_indices)
+
+    logging.warning(
+        "Unable to automatically align Sentinel-2 channels (expected %s, observed %s).",
+        expected_channels,
+        current_channels,
+    )
+    return image
+
 from ciip.evaluation.export_neuco_embeddings import (  # type: ignore
     E2SChallengeDataset,
     Normalize,
@@ -163,6 +230,7 @@ def _extract_embeddings(
     *,
     device: torch.device,
     require_ids: bool = False,
+    expected_in_channels: Optional[int] = None,
 ) -> EmbeddingBundle:
     backbone_vectors: List[np.ndarray] = []
     posthead_vectors: List[np.ndarray] = []
@@ -195,6 +263,8 @@ def _extract_embeddings(
 
         if image.ndim == 5:  # (B, T, C, H, W)
             image = image.mean(dim=1)
+
+        image = _align_s2_channels(image, expected_in_channels)
 
         input_dtype = adapter.dtype_s2
         if device.type != "cuda" and input_dtype in {torch.float16, torch.bfloat16}:
@@ -249,9 +319,11 @@ def _extract_embeddings(
     return bundle
 
 
-def _build_eurosat_loaders(config: ModelEvalConfig) -> Dict[str, DataLoader]:
-    mean = [EUROSATMEAN[b] for b in EUROSATBANDS]
-    std = [EUROSATSTD[b] for b in EUROSATBANDS]
+def _build_eurosat_loaders(
+    config: ModelEvalConfig, *, bands: Sequence[str]
+) -> Dict[str, DataLoader]:
+    mean = [EUROSATMEAN[b] for b in bands]
+    std = [EUROSATSTD[b] for b in bands]
 
     data_transforms = {
         "train": transforms.Compose(
@@ -277,7 +349,7 @@ def _build_eurosat_loaders(config: ModelEvalConfig) -> Dict[str, DataLoader]:
         split: EuroSAT(
             root=str(config.eurosat_root),
             split=split,
-            bands=EUROSATBANDS,
+            bands=bands,
             transforms=train_transform if split == "train" else eval_transform,
             download=True,
         )
@@ -895,13 +967,21 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
     base_model = getattr(adapter, "base_model", adapter)
     is_lorentz = getattr(adapter, "is_lorentz", False)
 
+    model_s2_channels = _infer_model_in_channels(adapter, config.model_in_channels)
+    eurosat_bands = _resolve_eurosat_bands(model_s2_channels)
+    logging.info(
+        "EuroSAT linear probe will use %d Sentinel-2 bands (%s)",
+        len(eurosat_bands),
+        ", ".join(eurosat_bands),
+    )
+
     output_dir = config.output_dir
     os.makedirs(output_dir, exist_ok=True)
 
     # check if dir exists
     eurosat_output_dir = output_dir / "linear_probe"
     if True: #not eurosat_output_dir.exists():
-        eurosat_loaders = _build_eurosat_loaders(config)
+        eurosat_loaders = _build_eurosat_loaders(config, bands=eurosat_bands)
         eurosat_embeddings: Dict[str, EmbeddingBundle] = {}
         for split, loader in eurosat_loaders.items():
             # The backbone features are not normalized (pre-prof)
@@ -910,6 +990,7 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
                 adapter,
                 loader,
                 device=device,
+                expected_in_channels=model_s2_channels,
             )
         _run_linear_probe(config, eurosat_embeddings, output_dir=output_dir, label="eurosat")
 
@@ -938,6 +1019,7 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
             neuco_loader,
             device=device,
             require_ids=True,
+            expected_in_channels=model_s2_channels,
         )
     
         _export_neuco(neuco_bundle, neuco_output_dir / "neuco_export", label=modality)
