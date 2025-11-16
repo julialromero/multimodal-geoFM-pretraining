@@ -56,6 +56,8 @@ class EvaluationAdapter(nn.Module):
         super().__init__()
         self.base_model: nn.Module = self
         self.dtype_s2: torch.dtype = torch.float32
+        self.dtype_s1: torch.dtype = torch.float32
+        self._active_modality: str = "s2"
 
     # These helpers are intentionally thin wrappers so that the evaluation
     # pipeline can treat all models uniformly.
@@ -90,10 +92,29 @@ class EvaluationAdapter(nn.Module):
         if tensor.ndim == 5:  # (B, T, C, H, W)
             tensor = tensor.mean(dim=1)
 
-        input_dtype = self.dtype_s2
+        active_modality = self.get_active_modality()
+        dtype_attr = f"dtype_{active_modality}"
+        input_dtype = getattr(self, dtype_attr, self.dtype_s2)
         if device.type != "cuda" and input_dtype in {torch.float16, torch.bfloat16}:
             input_dtype = torch.float32
         return tensor.to(device=device, dtype=input_dtype, non_blocking=True)
+
+    def get_active_modality(self) -> str:
+        return getattr(self, "_active_modality", "s2")
+
+    def supports_modality(self, modality: str) -> bool:
+        normalized = modality.lower()
+        if normalized == "s1":
+            return getattr(self, "encoder_s1", None) is not None
+        return True
+
+    def set_active_modality(self, modality: str) -> None:
+        normalized = modality.lower()
+        if normalized not in {"s1", "s2"}:
+            raise ValueError(f"Unsupported modality '{modality}'. Expected 's1' or 's2'.")
+        if normalized == "s1" and not self.supports_modality("s1"):
+            raise ValueError("Adapter does not expose an S1 encoder; cannot activate 's1'.")
+        self._active_modality = normalized
 
 
 class CiipEvaluationAdapter(EvaluationAdapter):
@@ -115,6 +136,11 @@ class CiipEvaluationAdapter(EvaluationAdapter):
         self.supports_hyperbolic = bool(is_lorentz)
 
     def _default_stream(self) -> Tuple[nn.Module, torch.dtype, str]:
+        preferred = self.get_active_modality()
+        if preferred == "s1" and self.encoder_s1 is not None:
+            return self.encoder_s1, self.dtype_s1, "s1"
+        if preferred == "s2" and self.encoder_s2 is not None:
+            return self.encoder_s2, self.dtype_s2, "s2"
         if self.encoder_s2 is not None:
             return self.encoder_s2, self.dtype_s2, "s2"
         if self.encoder_s1 is not None:
@@ -257,6 +283,11 @@ class TorchGeoResNetAdapter(EvaluationAdapter):
             self.encoder_s1 = s1_backbone
 
     def _default_stream(self) -> Tuple[nn.Module, torch.dtype, str]:
+        preferred = self.get_active_modality()
+        if preferred == "s1" and self.encoder_s1 is not None:
+            return self.encoder_s1, self.dtype_s1, "s1"
+        if preferred == "s2" and self.encoder_s2 is not None:
+            return self.encoder_s2, self.dtype_s2, "s2"
         if self.encoder_s2 is not None:
             return self.encoder_s2, self.dtype_s2, "s2"
         if self.encoder_s1 is not None:
@@ -352,10 +383,16 @@ class CromaEvaluationAdapter(EvaluationAdapter):
             sar_tensor = self._extract_modality(batch, {"sar", "s1", "sentinel1"})
             optical_tensor = self._extract_modality(batch, {"optical", "s2", "s2l1c", "s2l2a", "sentinel2"})
         else:
-            sar_tensor = None
-            optical_tensor = batch
+            if self.get_active_modality() == "s1":
+                sar_tensor = batch
+                optical_tensor = None
+            else:
+                sar_tensor = None
+                optical_tensor = batch
 
-        optical_prepared = self._prepare_optical(optical_tensor, device)
+        optical_prepared = (
+            self._prepare_optical(optical_tensor, device) if optical_tensor is not None else None
+        )
         sar_prepared = self._prepare_sar(sar_tensor, device) if sar_tensor is not None else None
 
         return {"optical": optical_prepared, "sar": sar_prepared}
@@ -364,6 +401,16 @@ class CromaEvaluationAdapter(EvaluationAdapter):
         self, inputs: Dict[str, Optional[torch.Tensor]]
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         outputs = self._encode_modalities(inputs, include_joint=True)
+
+        modality = self.get_active_modality()
+        if modality == "s1":
+            sar_encodings = outputs.get("sar_encodings")
+            sar_gap = outputs.get("sar_gap")
+            if sar_encodings is None or sar_gap is None:
+                raise RuntimeError("SAR modality is required when evaluating CROMA with 's1'.")
+            backbone = sar_encodings.flatten(start_dim=1)
+            projected = F.normalize(sar_gap, p=2, dim=1, eps=1e-12)
+            return backbone, sar_gap, projected
 
         optical_encodings = outputs.get("optical_encodings")
         optical_gap = outputs.get("optical_gap")
@@ -417,19 +464,27 @@ class CromaEvaluationAdapter(EvaluationAdapter):
         optical = inputs.get("optical")
         sar = inputs.get("sar") if inputs is not None else None
 
-        if optical is None:
+        require_optical = self.get_active_modality() != "s1"
+        if optical is None and require_optical:
             raise RuntimeError("Optical imagery must be provided for CROMA evaluation.")
 
-        device = optical.device
-        attn_bias = self.base_model.attn_bias.to(device=device, dtype=optical.dtype)
+        sample_tensor = optical if optical is not None else sar
+        if sample_tensor is None:
+            raise RuntimeError("At least one modality must be provided for CROMA evaluation.")
+
+        device = sample_tensor.device
+        attn_bias = self.base_model.attn_bias.to(device=device, dtype=sample_tensor.dtype)
 
         outputs: Dict[str, torch.Tensor] = {}
 
         with torch.no_grad():
-            optical_enc = self.base_model.s2_encoder(imgs=optical, attn_bias=attn_bias)
-            optical_gap = self.base_model.GAP_FFN_s2(optical_enc.mean(dim=1))
-            outputs["optical_encodings"] = optical_enc
-            outputs["optical_gap"] = optical_gap
+            optical_enc = None
+            optical_gap = None
+            if optical is not None:
+                optical_enc = self.base_model.s2_encoder(imgs=optical, attn_bias=attn_bias)
+                optical_gap = self.base_model.GAP_FFN_s2(optical_enc.mean(dim=1))
+                outputs["optical_encodings"] = optical_enc
+                outputs["optical_gap"] = optical_gap
 
             sar_enc = None
             sar_gap = None
