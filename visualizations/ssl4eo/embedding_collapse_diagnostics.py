@@ -823,7 +823,7 @@ def _plot_cka(ax, matrix: Optional[np.ndarray], x_labels: List[str], y_labels: L
         ax.set_xticks([])
         ax.set_yticks([])
         return
-    im = ax.imshow(matrix, vmin=0.0, vmax=1.0, aspect="auto", cmap="viridis")
+    im = ax.imshow(matrix, vmin=0.0, vmax=1.0, aspect="auto", cmap="viridis", origin='lower')
     ax.set_title(title)
     # assert contents of
     assert [a == b for (a, b) in zip(x_labels, y_labels)], f"{x_labels} \n\n {y_labels}"

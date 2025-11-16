@@ -80,6 +80,73 @@ EUROSATSTD = {
 EUROSATBANDS = ("B01", "B02", "B03", "B04", "B05", "B06", "B07", "B08", "B8A", "B09", "B10", "B11", "B12")
 ##
 
+
+def _first_conv_in_channels(module: Optional[nn.Module]) -> Optional[int]:
+    if module is None:
+        return None
+    conv1 = getattr(module, "conv1", None)
+    if isinstance(conv1, nn.Conv2d):
+        return conv1.in_channels
+    for submodule in module.modules():
+        if isinstance(submodule, nn.Conv2d):
+            return submodule.in_channels
+    return None
+
+
+def _infer_model_in_channels(adapter: EvaluationAdapter, fallback: int) -> int:
+    """Best-effort detection of the Sentinel-2 channel count for the adapter."""
+
+    encoder = getattr(adapter, "encoder_s2", None)
+    in_channels = _first_conv_in_channels(encoder)
+    if in_channels is None:
+        in_channels = _first_conv_in_channels(getattr(adapter, "base_model", None))
+    if in_channels is None:
+        in_channels = fallback
+    return in_channels
+
+
+def _resolve_eurosat_bands(num_channels: int) -> Tuple[str, ...]:
+    """Return the EuroSAT band tuple matching the model channel budget."""
+
+    if num_channels >= len(EUROSATBANDS):
+        return EUROSATBANDS
+    if num_channels == 12:
+        return tuple(band for band in EUROSATBANDS if band != "B10")
+    if num_channels < 1:
+        raise ValueError("Model must expose at least one Sentinel-2 channel")
+    logging.warning(
+        "Model exposes %d Sentinel-2 channels; defaulting to the first %d EuroSAT bands.",
+        num_channels,
+        num_channels,
+    )
+    return tuple(EUROSATBANDS[:num_channels])
+
+
+def _align_s2_channels(image: torch.Tensor, expected_channels: Optional[int]) -> torch.Tensor:
+    """Drop the cirrus band when the model only supports 12 Sentinel-2 bands."""
+
+    if expected_channels is None or image.ndim < 3:
+        return image
+
+    channel_dim = 1 if image.ndim >= 4 else 0
+    current_channels = image.size(channel_dim)
+
+    if current_channels == expected_channels:
+        return image
+
+    if current_channels == 13 and expected_channels == 12:
+        # Drop B10 (0-indexed channel 10) to match 12-band encoders.
+        indices = torch.arange(current_channels, device=image.device)
+        keep_indices = torch.cat([indices[:10], indices[11:]])
+        return torch.index_select(image, channel_dim, keep_indices)
+
+    logging.warning(
+        "Unable to automatically align Sentinel-2 channels (expected %s, observed %s).",
+        expected_channels,
+        current_channels,
+    )
+    return image
+
 from ciip.evaluation.export_neuco_embeddings import (  # type: ignore
     E2SChallengeDataset,
     InputResizer,
@@ -113,7 +180,9 @@ from visualizations.ssl4eo.hyperbolic_visualization import (  # type: ignore
     plot_angular_pca,
     plot_cone_polar,
     plot_radial_histogram,
-    _extract_curvature_from_state
+    _extract_curvature_from_state,
+    compute_lorentz_pos_neg,
+    plot_pos_neg_hist
 )
 from visualizations.ssl4eo.hyperbolic_retrieval import compute_cross_modal_retrieval
 from ciip.open_clip_train.data import SSL4EODataset
@@ -165,6 +234,7 @@ def _extract_embeddings(
     *,
     device: torch.device,
     require_ids: bool = False,
+    expected_in_channels: Optional[int] = None,
 ) -> EmbeddingBundle:
     backbone_vectors: List[np.ndarray] = []
     posthead_vectors: List[np.ndarray] = []
@@ -200,6 +270,12 @@ def _extract_embeddings(
 
         if backbone is None:
             raise RuntimeError("Backbone embeddings cannot be None")
+        image = _align_s2_channels(image, expected_in_channels)
+
+        input_dtype = adapter.dtype_s2
+        if device.type != "cuda" and input_dtype in {torch.float16, torch.bfloat16}:
+            input_dtype = torch.float32
+        image = image.to(device=device, dtype=input_dtype, non_blocking=True)
 
         backbone_np = _to_numpy(backbone)
         backbone_vectors.append(backbone_np)
@@ -236,9 +312,11 @@ def _extract_embeddings(
     return bundle
 
 
-def _build_eurosat_loaders(config: ModelEvalConfig) -> Dict[str, DataLoader]:
-    mean = [EUROSATMEAN[b] for b in EUROSATBANDS]
-    std = [EUROSATSTD[b] for b in EUROSATBANDS]
+def _build_eurosat_loaders(
+    config: ModelEvalConfig, *, bands: Sequence[str]
+) -> Dict[str, DataLoader]:
+    mean = [EUROSATMEAN[b] for b in bands]
+    std = [EUROSATSTD[b] for b in bands]
 
     target_size = int(config.eurosat_image_size)
     eval_resize = max(target_size, int(round(target_size * 256 / 224)))
@@ -267,7 +345,7 @@ def _build_eurosat_loaders(config: ModelEvalConfig) -> Dict[str, DataLoader]:
         split: EuroSAT(
             root=str(config.eurosat_root),
             split=split,
-            bands=EUROSATBANDS,
+            bands=bands,
             transforms=train_transform if split == "train" else eval_transform,
             download=True,
         )
@@ -705,6 +783,8 @@ def _run_embedding_diagnostics(
         if config.model_type == "torchgeo_resnet50":
             plot_epoch_diagnostics_s2only(epoch_diagnostics, output_dir, label='backbone_raw')
         plot_epoch_diagnostics(epoch_diagnostics, output_dir, label='posthead_raw')
+
+
     else:
         if config.model_type == "torchgeo_resnet50":
             plot_epoch_diagnostics_s2only(epoch_diagnostics, output_dir, label='s2_backbone_raw')
@@ -835,6 +915,36 @@ def _run_hyperbolic_visualisations(
     s1_distances = context["s1_distances"].cpu().numpy()
     s2_distances = context["s2_distances"].cpu().numpy()
 
+    angles_mat = context["angles"]          # (N, N), on device
+    N = angles_mat.size(0)
+    # positives: diagonal α(x_i, y_i)
+    pos_alpha = context["positive_angles"].cpu().numpy()
+    # negatives: all off-diagonals α(x_i, y_j), i != j
+    neg_alpha = angles_mat[~torch.eye(N, dtype=torch.bool, device=angles_mat.device)].cpu().numpy()
+
+    # Convert to "similarity" the way the loss does: κ = -α
+    pos_angle_sim = -pos_alpha
+    neg_angle_sim = -neg_alpha
+
+    plot_pos_neg_hist(
+        pos_angle_sim,
+        neg_angle_sim,
+        use_distance=False,
+        out_path=output_dir / "angle_sim_hist.png",
+    )
+
+    # # Lorentz “similarity” (hyperbolic analogue of cosine sim)
+    # lorentz_mat = context["pairwise_lorentz"]       # (N, N)
+    # pos_sim = context["positive_lorentz"].cpu().numpy()       # diag
+    # neg_sim = lorentz_mat[~torch.eye(lorentz_mat.size(0), dtype=torch.bool)].cpu().numpy()
+
+    # # # Or distances
+    # # dist_mat = ctx["pairwise_dist"]
+    # # pos_dist = ctx["positive_dist"]
+    # # neg_dist = dist_mat[~torch.eye(dist_mat.size(0), dtype=torch.bool)]
+
+    # plot_pos_neg_hist(pos_sim, neg_sim, use_distance=False, out_path= output_dir /"lorentz_sim_hist.png")
+
     plot_angle_aperture(positive_angles, aperture_s1, aperture_s2, output_dir / "angle_aperture.png")
     plot_radial_histogram(s1_distances, s2_distances, output_dir / "radial_histogram.png")
     plot_angular_pca(s1_dirs, s2_dirs, s1_distances, s2_distances, output_dir / "angular_pca.png")
@@ -866,13 +976,21 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
     base_model = getattr(adapter, "base_model", adapter)
     is_lorentz = getattr(adapter, "is_lorentz", False)
 
+    model_s2_channels = _infer_model_in_channels(adapter, config.model_in_channels)
+    eurosat_bands = _resolve_eurosat_bands(model_s2_channels)
+    logging.info(
+        "EuroSAT linear probe will use %d Sentinel-2 bands (%s)",
+        len(eurosat_bands),
+        ", ".join(eurosat_bands),
+    )
+
     output_dir = config.output_dir
     os.makedirs(output_dir, exist_ok=True)
 
     # check if dir exists
     eurosat_output_dir = output_dir / "linear_probe"
     if True: #not eurosat_output_dir.exists():
-        eurosat_loaders = _build_eurosat_loaders(config)
+        eurosat_loaders = _build_eurosat_loaders(config, bands=eurosat_bands)
         eurosat_embeddings: Dict[str, EmbeddingBundle] = {}
         for split, loader in eurosat_loaders.items():
             # The backbone features are not normalized (pre-prof)
@@ -881,6 +999,7 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
                 adapter,
                 loader,
                 device=device,
+                expected_in_channels=model_s2_channels,
             )
         _run_linear_probe(config, eurosat_embeddings, output_dir=output_dir, label="eurosat")
 
@@ -909,6 +1028,7 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
             neuco_loader,
             device=device,
             require_ids=True,
+            expected_in_channels=model_s2_channels,
         )
     
         _export_neuco(neuco_bundle, neuco_output_dir / "neuco_export", label=modality)
@@ -996,23 +1116,23 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
             device=device,
         )
 
-    #     _run_embedding_diagnostics(
-    #         config,
-    #         s1_ssl4eo,
-    #         s2_ssl4eo,
-    #         sample_ids=ssl4eo_ids,
-    #         output_dir=output_dir / "embedding_diagnostics",
-    #     )
-    #     logging.info("Completed SSL4EO diagnostics")
-    #     # print output dir
-    #     print("SSL4EO diagnostics saved to ", output_dir)
-    # else:
-    #     logging.info(
-    #         "Skipping SSL4EO diagnostics (enable_ssl4eo=%s, root=%s, supports_ssl4eo=%s)",
-    #         config.enable_ssl4eo,
-    #         config.ssl4eo_root,
-    #         getattr(adapter, "supports_ssl4eo", True),
-    #     )
+        _run_embedding_diagnostics(
+            config,
+            s1_ssl4eo,
+            s2_ssl4eo,
+            sample_ids=ssl4eo_ids,
+            output_dir=output_dir / "embedding_diagnostics",
+        )
+        logging.info("Completed SSL4EO diagnostics")
+        # print output dir
+        print("SSL4EO diagnostics saved to ", output_dir)
+    else:
+        logging.info(
+            "Skipping SSL4EO diagnostics (enable_ssl4eo=%s, root=%s, supports_ssl4eo=%s)",
+            config.enable_ssl4eo,
+            config.ssl4eo_root,
+            getattr(adapter, "supports_ssl4eo", True),
+        )
     curvature = None
     if is_lorentz and s1_ssl4eo is not None and s2_ssl4eo is not None:
         if not isinstance(base_model, LorentzCIIP):
@@ -1057,6 +1177,7 @@ if __name__ == "__main__":
     parser.add_argument("--model-in-channels", type=int, default=13, help="Number of input channels for TorchGeo ResNet models.")
     parser.add_argument("--croma-weights", type=Path, help="Path to the pretrained CROMA weights.")
     parser.add_argument("--croma-image-resolution", type=int, default=120, help="Input resolution expected by the CROMA model.")
+    parser.add_argument("--model-in-channels", type=int, default=12, help="Number of input channels for TorchGeo ResNet models.")
     # parser.add_argument("--eurosat-root", type=Path, required=True, help="EuroSAT dataset root directory.")
     # parser.add_argument("--neuco-root", type=Path, required=True, help="NeuCo-Bench dataset root directory.")
     # parser.add_argument("--output-dir", type=Path, required=True, help="Directory to write evaluation artifacts.")
@@ -1064,10 +1185,10 @@ if __name__ == "__main__":
     parser.add_argument("--disable-ssl4eo", action="store_true", help="Skip SSL4EO diagnostics even if a root is provided.")
     parser.add_argument("--tsne-samples", type=int, default=1500, help="Samples used for t-SNE visualisations.")
     parser.add_argument("--pca-samples", type=int, default=5000, help="Samples used for PCA visualisations.")
-    parser.add_argument("--ssl4eo-subset-size", type=int, default=20, help="Subset size for SSL4EO embedding extraction.")
+    parser.add_argument("--ssl4eo-subset-size", type=int, default=50, help="Subset size for SSL4EO embedding extraction.")
     parser.add_argument("--ssl4eo-subset-seed", type=int, default=0, help="Subset seed for SSL4EO sampling.")
-    parser.add_argument("--neuco-modalities", nargs="*", default=["s2l1c"], help="NeuCo modalities to export.")
-    parser.add_argument("--neuco-seasons", type=int, default=4, help="Number of seasons for NeuCo extraction.")
+    parser.add_argument("--neuco-modalities", nargs="*", default=["s2l2a"], help="NeuCo modalities to export.")
+    parser.add_argument("--neuco-seasons", type=int, default=4, help="Number of seasons for NeuCo extraction.") # i believe these are averaged
 
     args = parser.parse_args()
 
@@ -1085,17 +1206,22 @@ if __name__ == "__main__":
 
 
     args.model_root = '/local/ms-data/SSL4EO/model/'
-    args.model_path = '2025_11_05-21_04_44-model_resnet50-lr_0.001-b_128-j_6-p_amp/'
+    args.model_path = '2025_11_14-10_56_41-model_resnet50-lr_0.001-b_2-j_6-p_amp'
+    # '2025_11_05-21_04_44-model_resnet50-lr_0.001-b_128-j_6-p_amp/'
+    # '/local/ms-data/SSL4EO/model/2025_11_13-08_33_13-model_resnet50-lr_0.001-b_2-j_6-p_amp/checkpoints/epoch_10.pt'
+    # 
+    
+    # '2025_11_05-21_04_44-model_resnet50-lr_0.001-b_128-j_6-p_amp/'
     # '2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp'
     # '2025_11_07-09_24_18-model_resnet50-lr_0.001-b_128-j_6-p_amp'
     # '2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp'
     checkpoint_root = Path(args.model_root) / args.model_path / "checkpoints"
     # args.output_dir = Path("diagnostics/output")
 
-    args.checkpoint=Path(f"{checkpoint_root}/epoch_10.pt")
+    args.checkpoint=Path(f"{checkpoint_root}/epoch_40.pt")
     args.eurosat_root=Path("/local/ms-data/EuroSAT/")
     args.neuco_root=Path("/local/ms-data/SSL4EO-S12-downstream/data")
-    args.output_dir=Path("/home/juro4948/ciip/diagnostics/unified_eval/curv_init_1_epoch10/") #dino_13bands/") #curv_init_1_epoch10/
+    args.output_dir=Path("/home/juro4948/ciip/diagnostics/unified_eval/curv_init_0.1_v1.1_epoch40/") #dino_13bands/") #curv_init_1_epoch10/ curv_init_1
     args.ssl4eo_root=Path("/local/ms-data/SSL4EOv1.1/train")
 
 
