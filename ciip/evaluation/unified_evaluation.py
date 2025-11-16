@@ -82,6 +82,7 @@ EUROSATBANDS = ("B01", "B02", "B03", "B04", "B05", "B06", "B07", "B08", "B8A", "
 
 from ciip.evaluation.export_neuco_embeddings import (  # type: ignore
     E2SChallengeDataset,
+    InputResizer,
     Normalize,
     TemporalMean,
     collate_fn,
@@ -126,6 +127,8 @@ class ModelEvalConfig:
     model_type: str = "ciip_checkpoint"
     model_weights: Optional[str] = None
     model_in_channels: int = 13
+    croma_weights: Optional[Path] = None
+    croma_image_resolution: int = 120
     enable_ssl4eo: bool = True
     neuco_modalities: Sequence[str] = ("s2l1c",)
     neuco_resize: Optional[Tuple[int, int]] = None
@@ -139,6 +142,7 @@ class ModelEvalConfig:
     ssl4eo_s2_tier: str = "s2c"
     ssl4eo_s2_bands: Sequence[str] = DEFAULT_S2_BANDS
     ssl4eo_image_dimension: int = 224
+    eurosat_image_size: int = 224
 
 
 @dataclass
@@ -186,44 +190,29 @@ def _extract_embeddings(
             batch_ids = None
 
 
-        if isinstance(image, dict):
+        if isinstance(image, dict) and not getattr(adapter, "supports_multimodal_dict", False):
             image = image[next(iter(image))]
 
-        # print(image)
-
-        if image.ndim == 5:  # (B, T, C, H, W)
-            image = image.mean(dim=1)
-
-        input_dtype = adapter.dtype_s2
-        if device.type != "cuda" and input_dtype in {torch.float16, torch.bfloat16}:
-            input_dtype = torch.float32
-        image = image.to(device=device, dtype=input_dtype, non_blocking=True)
+        prepared_inputs = adapter.prepare_inputs(image, device=device)
 
         with torch.no_grad():
-            #defaults to s2
-            backbone = adapter.compute_backbone(image)
-            assert backbone is not None, "Backbone embeddings cannot be None"
-            # if basemodel is torchgeo resnet50 
-            # print(adapter.__class__.__name__)
-            # if adapter class is TorchGeoResNetAdapter
-            if adapter.__class__.__name__ == "TorchGeoResNetAdapter":
+            backbone, post, projected = adapter.compute_embeddings(prepared_inputs)
 
-                post = None
-                projected = None
-            else:
-                post = adapter.compute_posthead(image)
-                projected = adapter.compute_projected(image)
+        if backbone is None:
+            raise RuntimeError("Backbone embeddings cannot be None")
 
-        # print shape
-        # print(f"Backbone shape: {backbone.shape}, Posthead shape: {post.shape}, Projected shape: {projected.shape}")
-        backbone_vectors.append(_to_numpy(backbone))
-        if adapter.__class__.__name__ == "TorchGeoResNetAdapter":
-            # for torchgeo resnet50, only return posthead and projected as None
-            posthead_vectors.append(np.zeros((backbone.shape[0], 0), dtype=np.float32))
-            projected_vectors.append(np.zeros((backbone.shape[0], 0), dtype=np.float32))
+        backbone_np = _to_numpy(backbone)
+        backbone_vectors.append(backbone_np)
+        batch_size = backbone_np.shape[0]
 
+        if post is None:
+            posthead_vectors.append(np.zeros((batch_size, 0), dtype=np.float32))
         else:
             posthead_vectors.append(_to_numpy(post))
+
+        if projected is None:
+            projected_vectors.append(np.zeros((batch_size, 0), dtype=np.float32))
+        else:
             projected_vectors.append(_to_numpy(projected))
 
         if batch_labels is not None:
@@ -251,18 +240,21 @@ def _build_eurosat_loaders(config: ModelEvalConfig) -> Dict[str, DataLoader]:
     mean = [EUROSATMEAN[b] for b in EUROSATBANDS]
     std = [EUROSATSTD[b] for b in EUROSATBANDS]
 
+    target_size = int(config.eurosat_image_size)
+    eval_resize = max(target_size, int(round(target_size * 256 / 224)))
+
     data_transforms = {
         "train": transforms.Compose(
             [
-                transforms.RandomResizedCrop(224),
+                transforms.RandomResizedCrop(target_size),
                 transforms.RandomHorizontalFlip(),
                 transforms.Normalize(mean=mean, std=std),
             ]
         ),
         "eval": transforms.Compose(
             [
-                transforms.Resize(256),
-                transforms.CenterCrop(224),
+                transforms.Resize(eval_resize),
+                transforms.CenterCrop(target_size),
                 transforms.Normalize(mean=mean, std=std),
             ]
         ),
@@ -294,7 +286,10 @@ def _build_eurosat_loaders(config: ModelEvalConfig) -> Dict[str, DataLoader]:
 
 
 def _build_neuco_loader(config: ModelEvalConfig) -> DataLoader:
-    transform = transforms.Compose([Normalize(), TemporalMean()])
+    transform_steps = [Normalize(), TemporalMean()]
+    if config.neuco_resize is not None:
+        transform_steps.append(InputResizer(config.neuco_resize))
+    transform = transforms.Compose(transform_steps)
     dataset = E2SChallengeDataset(
         data_path=str(config.neuco_root),
         modalities=list(config.neuco_modalities),
@@ -849,11 +844,21 @@ def _run_hyperbolic_visualisations(
 def run_full_evaluation(config: ModelEvalConfig) -> None:
     logging.basicConfig(level=logging.INFO)
 
+    if config.model_type == "croma":
+        config.eurosat_image_size = config.croma_image_resolution
+        if config.neuco_resize is None:
+            config.neuco_resize = (
+                config.croma_image_resolution,
+                config.croma_image_resolution,
+            )
+
     adapter = build_evaluation_adapter(
         model_type=config.model_type,
         checkpoint=config.checkpoint,
         model_weights=config.model_weights,
         in_chans=config.model_in_channels,
+        croma_weights=config.croma_weights,
+        croma_image_resolution=config.croma_image_resolution,
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     adapter = adapter.to(device)
@@ -1041,10 +1046,17 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Run the unified CIIP evaluation pipeline.")
-    parser.add_argument("--model-type", default="ciip_checkpoint", choices=["ciip_checkpoint", "torchgeo_resnet50"], help="Model source to evaluate.")
+    parser.add_argument(
+        "--model-type",
+        default="ciip_checkpoint",
+        choices=["ciip_checkpoint", "torchgeo_resnet50", "croma"],
+        help="Model source to evaluate.",
+    )
     # parser.add_argument("--checkpoint", type=Path, help="Checkpoint path for CIIP/Lorentz models.")
     parser.add_argument("--model-weights", choices=["dino", "moco"], help="TorchGeo ResNet50 weight selection.")
     parser.add_argument("--model-in-channels", type=int, default=13, help="Number of input channels for TorchGeo ResNet models.")
+    parser.add_argument("--croma-weights", type=Path, help="Path to the pretrained CROMA weights.")
+    parser.add_argument("--croma-image-resolution", type=int, default=120, help="Input resolution expected by the CROMA model.")
     # parser.add_argument("--eurosat-root", type=Path, required=True, help="EuroSAT dataset root directory.")
     # parser.add_argument("--neuco-root", type=Path, required=True, help="NeuCo-Bench dataset root directory.")
     # parser.add_argument("--output-dir", type=Path, required=True, help="Directory to write evaluation artifacts.")
@@ -1091,6 +1103,8 @@ if __name__ == "__main__":
         parser.error("--checkpoint is required when --model-type=ciip_checkpoint")
     if args.model_type == "torchgeo_resnet50" and args.model_weights is None:
         parser.error("--model-weights must be provided for torchgeo_resnet50 models")
+    if args.model_type == "croma" and args.croma_weights is None:
+        parser.error("--croma-weights must be provided when --model-type=croma")
     
 
     cfg = ModelEvalConfig(
@@ -1101,6 +1115,8 @@ if __name__ == "__main__":
         model_type=args.model_type,
         model_weights=args.model_weights,
         model_in_channels=args.model_in_channels,
+        croma_weights=args.croma_weights,
+        croma_image_resolution=args.croma_image_resolution,
         enable_ssl4eo=not args.disable_ssl4eo,
         ssl4eo_root=args.ssl4eo_root,
         tsne_samples=args.tsne_samples,

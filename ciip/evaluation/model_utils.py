@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from types import ModuleType
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -15,12 +17,40 @@ from torchgeo.models import ResNet50_Weights, resnet50
 from ciip.model_ciip import CIIP, LorentzCIIP
 
 
+_CROMA_MODULE: Optional[ModuleType] = None
+
+
+def _load_croma_module() -> ModuleType:
+    """Dynamically import the CROMA helper without requiring package installation."""
+
+    global _CROMA_MODULE
+    if _CROMA_MODULE is not None:
+        return _CROMA_MODULE
+
+    module_path = Path(__file__).resolve().parents[2] / "comparison" / "CROMA-main" / "use_croma.py"
+    if not module_path.exists():
+        raise FileNotFoundError(
+            "CROMA weights requested but 'use_croma.py' was not found. "
+            "Expected it under comparison/CROMA-main/use_croma.py."
+        )
+
+    spec = importlib.util.spec_from_file_location("croma_use_croma", module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Unable to import CROMA utilities from '{module_path}'.")
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _CROMA_MODULE = module
+    return module
+
+
 class EvaluationAdapter(nn.Module):
     """Common interface used by unified evaluation to extract embeddings."""
 
     supports_ssl4eo: bool = True
     supports_hyperbolic: bool = False
     is_lorentz: bool = False
+    supports_multimodal_dict: bool = False
 
     def __init__(self) -> None:
         super().__init__()
@@ -37,6 +67,33 @@ class EvaluationAdapter(nn.Module):
 
     def compute_projected(self, images: torch.Tensor) -> torch.Tensor:  # pragma: no cover - interface
         raise NotImplementedError
+
+    def compute_embeddings(self, images: Any) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """Return backbone, post-head and projected embeddings for ``images``."""
+
+        backbone = self.compute_backbone(images)
+        posthead = self.compute_posthead(images)
+        projected = self.compute_projected(images)
+        return backbone, posthead, projected
+
+    def prepare_inputs(self, batch: Any, *, device: torch.device) -> Any:
+        """Prepare a batch prior to embedding extraction.
+
+        The default implementation expects a tensor containing Sentinel-2 data.
+        Sub-classes can override this method to support multi-modal inputs.
+        """
+
+        if isinstance(batch, dict):
+            raise TypeError("Multi-modal dictionaries are not supported by this adapter")
+
+        tensor = batch
+        if tensor.ndim == 5:  # (B, T, C, H, W)
+            tensor = tensor.mean(dim=1)
+
+        input_dtype = self.dtype_s2
+        if device.type != "cuda" and input_dtype in {torch.float16, torch.bfloat16}:
+            input_dtype = torch.float32
+        return tensor.to(device=device, dtype=input_dtype, non_blocking=True)
 
 
 class CiipEvaluationAdapter(EvaluationAdapter):
@@ -243,6 +300,198 @@ class TorchGeoResNetAdapter(EvaluationAdapter):
         return features
 
 
+class CromaEvaluationAdapter(EvaluationAdapter):
+    """Adapter around the published CROMA base checkpoint."""
+
+    supports_ssl4eo = False
+    supports_multimodal_dict = True
+
+    def __init__(self, *, weights_path: Path, image_resolution: int = 120) -> None:
+        super().__init__()
+
+        if weights_path is None:
+            raise ValueError("'weights_path' must be provided to load CROMA.")
+
+        module = _load_croma_module()
+        PretrainedCROMA = getattr(module, "PretrainedCROMA")
+
+        model = PretrainedCROMA(
+            pretrained_path=str(weights_path),
+            size="base",
+            modality="both",
+            image_resolution=image_resolution,
+        )
+
+        self.base_model = model.eval()
+        self.encoder_s1 = getattr(model, "s1_encoder", None)
+        self.encoder_s2 = getattr(model, "s2_encoder", None)
+        self.dtype_s1 = torch.float32
+        self.dtype_s2 = torch.float32
+        self.image_resolution = image_resolution
+        self._last_outputs: Dict[str, torch.Tensor] = {}
+        self._last_inputs: Optional[Dict[str, Optional[torch.Tensor]]] = None
+
+    def prepare_inputs(self, batch: Any, *, device: torch.device) -> Dict[str, Optional[torch.Tensor]]:
+        if isinstance(batch, dict):
+            sar_tensor = self._extract_modality(batch, {"sar", "s1", "sentinel1"})
+            optical_tensor = self._extract_modality(batch, {"optical", "s2", "s2l1c", "s2l2a", "sentinel2"})
+        else:
+            sar_tensor = None
+            optical_tensor = batch
+
+        optical_prepared = self._prepare_optical(optical_tensor, device)
+        sar_prepared = self._prepare_sar(sar_tensor, device) if sar_tensor is not None else None
+
+        return {"optical": optical_prepared, "sar": sar_prepared}
+
+    def compute_embeddings(
+        self, inputs: Dict[str, Optional[torch.Tensor]]
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+        outputs = self._encode_modalities(inputs, include_joint=True)
+
+        optical_encodings = outputs.get("optical_encodings")
+        optical_gap = outputs.get("optical_gap")
+        if optical_encodings is None or optical_gap is None:
+            raise RuntimeError("Optical modality is required when evaluating CROMA.")
+
+        backbone = optical_encodings.flatten(start_dim=1)
+        projected = F.normalize(optical_gap, p=2, dim=1, eps=1e-12)
+        return backbone, optical_gap, projected
+
+    def compute_backbone(self, images: Any) -> torch.Tensor:
+        backbone, _, _ = self.compute_embeddings(images)
+        return backbone
+
+    def compute_posthead(self, images: Any) -> torch.Tensor:
+        _, posthead, _ = self.compute_embeddings(images)
+        if posthead is None:
+            raise RuntimeError("Post-head embeddings unavailable for CROMA.")
+        return posthead
+
+    def compute_projected(self, images: Any) -> torch.Tensor:
+        _, _, projected = self.compute_embeddings(images)
+        if projected is None:
+            raise RuntimeError("Projected embeddings unavailable for CROMA.")
+        return projected
+
+    def compute_joint_embeddings(
+        self, inputs: Optional[Dict[str, Optional[torch.Tensor]]] = None
+    ) -> Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+        cached_inputs = inputs if inputs is not None else self._last_inputs
+        outputs = self._encode_modalities(cached_inputs, include_joint=True)
+        joint_encodings = outputs.get("joint_encodings")
+        joint_gap = outputs.get("joint_gap")
+        if joint_encodings is None or joint_gap is None:
+            return None
+        joint_backbone = joint_encodings.flatten(start_dim=1)
+        joint_projected = F.normalize(joint_gap, p=2, dim=1, eps=1e-12)
+        return joint_backbone, joint_gap, joint_projected
+
+    def _encode_modalities(
+        self,
+        inputs: Optional[Dict[str, Optional[torch.Tensor]]],
+        *,
+        include_joint: bool,
+    ) -> Dict[str, torch.Tensor]:
+        if inputs is None:
+            inputs = getattr(self, "_last_inputs", None)
+            if inputs is None:
+                raise RuntimeError("No cached inputs available for computing CROMA embeddings.")
+
+        optical = inputs.get("optical")
+        sar = inputs.get("sar") if inputs is not None else None
+
+        if optical is None:
+            raise RuntimeError("Optical imagery must be provided for CROMA evaluation.")
+
+        device = optical.device
+        attn_bias = self.base_model.attn_bias.to(device=device, dtype=optical.dtype)
+
+        outputs: Dict[str, torch.Tensor] = {}
+
+        with torch.no_grad():
+            optical_enc = self.base_model.s2_encoder(imgs=optical, attn_bias=attn_bias)
+            optical_gap = self.base_model.GAP_FFN_s2(optical_enc.mean(dim=1))
+            outputs["optical_encodings"] = optical_enc
+            outputs["optical_gap"] = optical_gap
+
+            sar_enc = None
+            sar_gap = None
+            if sar is not None:
+                sar = sar.to(device=device, dtype=self.dtype_s1, non_blocking=True)
+                sar_enc = self.base_model.s1_encoder(imgs=sar, attn_bias=attn_bias)
+                sar_gap = self.base_model.GAP_FFN_s1(sar_enc.mean(dim=1))
+                outputs["sar_encodings"] = sar_enc
+                outputs["sar_gap"] = sar_gap
+
+            if include_joint and sar_enc is not None and optical_enc is not None:
+                joint_enc = self.base_model.cross_encoder(
+                    x=sar_enc,
+                    context=optical_enc,
+                    relative_position_bias=attn_bias,
+                )
+                joint_gap = joint_enc.mean(dim=1)
+                outputs["joint_encodings"] = joint_enc
+                outputs["joint_gap"] = joint_gap
+
+        self._last_outputs = outputs
+        self._last_inputs = {"optical": optical, "sar": sar}
+        return outputs
+
+    def _prepare_optical(self, tensor: Optional[torch.Tensor], device: torch.device) -> torch.Tensor:
+        if tensor is None:
+            raise ValueError("Optical imagery is required for CROMA evaluation.")
+
+        tensor = tensor.to(device=device, dtype=self.dtype_s2, non_blocking=True)
+        if tensor.ndim == 5:
+            tensor = tensor.mean(dim=1)
+        if tensor.ndim == 4 and tensor.size(1) == 1:
+            tensor = tensor.squeeze(1)
+        if tensor.ndim == 3:
+            tensor = tensor.unsqueeze(0)
+
+        if tensor.size(1) == 13:
+            tensor = torch.cat([tensor[:, :10], tensor[:, 11:]], dim=1)
+        if tensor.size(1) != 12:
+            raise RuntimeError(
+                f"CROMA expects 12 Sentinel-2 bands; received {tensor.size(1)} bands."
+            )
+
+        if tensor.size(-1) != self.image_resolution or tensor.size(-2) != self.image_resolution:
+            tensor = F.adaptive_avg_pool2d(tensor, output_size=(self.image_resolution, self.image_resolution))
+        return tensor
+
+    def _prepare_sar(self, tensor: Optional[torch.Tensor], device: torch.device) -> Optional[torch.Tensor]:
+        if tensor is None:
+            return None
+
+        tensor = tensor.to(device=device, dtype=self.dtype_s1, non_blocking=True)
+        if tensor.ndim == 5:
+            tensor = tensor.mean(dim=1)
+        if tensor.ndim == 4 and tensor.size(1) == 1:
+            tensor = tensor.squeeze(1)
+        if tensor.ndim == 3:
+            tensor = tensor.unsqueeze(0)
+
+        if tensor.size(1) < 2:
+            raise RuntimeError("CROMA expects two SAR channels.")
+        if tensor.size(1) > 2:
+            tensor = tensor[:, :2]
+
+        if tensor.size(-1) != self.image_resolution or tensor.size(-2) != self.image_resolution:
+            tensor = F.adaptive_avg_pool2d(tensor, output_size=(self.image_resolution, self.image_resolution))
+        return tensor
+
+    @staticmethod
+    def _extract_modality(batch: Dict[str, torch.Tensor], aliases: set[str]) -> Optional[torch.Tensor]:
+        for key, value in batch.items():
+            if isinstance(value, torch.Tensor) and key.lower() in aliases:
+                return value
+        for key, value in batch.items():
+            if isinstance(value, torch.Tensor):
+                return value
+        return None
+
 def _clean_state_dict(raw_state: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
     """Strip DataParallel prefixes from checkpoint state dictionaries."""
 
@@ -319,6 +568,8 @@ def build_evaluation_adapter(
     checkpoint: Optional[Path],
     model_weights: Optional[str],
     in_chans: int = 13,
+    croma_weights: Optional[Path] = None,
+    croma_image_resolution: int = 120,
 ) -> EvaluationAdapter:
     """Create an evaluation adapter based on the requested model type."""
 
@@ -332,9 +583,17 @@ def build_evaluation_adapter(
         weights = _resolve_resnet_weights(model_weights)
         return TorchGeoResNetAdapter(weights=weights, in_chans=in_chans)
 
+    if model_type == "croma":
+        if croma_weights is None:
+            raise ValueError("'croma_weights' must be provided when model_type='croma'.")
+        return CromaEvaluationAdapter(
+            weights_path=croma_weights,
+            image_resolution=int(croma_image_resolution),
+        )
+
     raise ValueError(
         f"Unsupported model_type '{model_type}'. "
-        "Valid options are 'ciip_checkpoint' and 'torchgeo_resnet50'."
+        "Valid options are 'ciip_checkpoint', 'torchgeo_resnet50' and 'croma'."
     )
 
 
@@ -342,6 +601,7 @@ __all__ = [
     "EvaluationAdapter",
     "CiipEvaluationAdapter",
     "TorchGeoResNetAdapter",
+    "CromaEvaluationAdapter",
     "build_model_from_checkpoint",
     "build_evaluation_adapter",
 ]
