@@ -86,13 +86,29 @@ class CiipEvaluationAdapter(EvaluationAdapter):
         #print encoder
         # print(encoder)
         # if fc layer, replace with identity
-        if hasattr(encoder, 'fc'):
-            encoder.fc = nn.Identity()
-        # same with proj layer
-        if hasattr(encoder, 'proj'):
-            encoder.proj = nn.Identity()
+        # if hasattr(encoder, 'fc'):
+        #     encoder.fc = nn.Identity()
+        # # same with proj layer
+        # if hasattr(encoder, 'proj'):
+        #     encoder.proj = nn.Identity()
+        #      features = encoder(images.type(dtype))
 
-        features = encoder(images.type(dtype))
+        replaced_modules = []
+        for attr in ("fc", "proj"):
+            module = getattr(encoder, attr, None)
+            if isinstance(module, nn.Module):
+                replaced_modules.append((attr, module))
+                setattr(encoder, attr, nn.Identity())
+
+        try:
+            features = encoder(images.type(dtype))
+        finally:
+            for attr, module in replaced_modules:
+                setattr(encoder, attr, module)
+
+
+
+        
         if isinstance(features, (tuple, list)):
             features = features[0]
         if features.ndim > 2:
@@ -260,6 +276,31 @@ def _infer_projection_dims(state_dict: Dict[str, torch.Tensor]) -> Tuple[int, in
         return int(weight.shape[0]), int(weight.shape[0])
     raise RuntimeError("Unable to infer embedding dimensions from checkpoint")
 
+def _infer_s2_bands(state_dict: Dict[str, torch.Tensor]) -> int:
+    """Infer the number of S2 bands from the checkpoint's first conv layer."""
+    
+    # Look for the first convolutional layer in the S2 encoder
+    conv_keys = [
+        "encoder_s2.conv1.weight",           # Direct conv1
+        "encoder_s2.backbone.conv1.weight",  # If backbone is wrapped
+        "encoder_s2.model.conv1.weight",     # Alternative wrapping
+    ]
+    
+    for key in conv_keys:
+        if key in state_dict:
+            weight = state_dict[key]
+            # Conv2d weight shape is [out_channels, in_channels, kernel_h, kernel_w]
+            return int(weight.shape[1])  # in_channels = number of bands
+    
+    # Fallback: try to find any conv1 weight
+    for key in state_dict.keys():
+        if "conv1.weight" in key and "encoder_s2" in key:
+            weight = state_dict[key]
+            return int(weight.shape[1])
+    
+    # Default fallback
+    logging.warning("Could not infer S2 bands from checkpoint, defaulting to 13")
+    return 13
 
 def build_model_from_checkpoint(checkpoint: Path) -> Tuple[nn.Module, bool]:
     """Instantiate a CIIP or LorentzCIIP model from a checkpoint path."""
@@ -268,6 +309,12 @@ def build_model_from_checkpoint(checkpoint: Path) -> Tuple[nn.Module, bool]:
     cleaned = _clean_state_dict(state_dict)
     embed_dim, pre_dim = _infer_projection_dims(cleaned)
     is_lorentz = any(key.startswith("curv") or "lorentz" in key for key in cleaned)
+
+
+    # infer nummber of s2 bands in checkpoint
+    s2_bands = _infer_s2_bands(cleaned)
+    logging.info(f"Inferred S2 bands from checkpoint: {s2_bands}")
+
 
     kwargs = dict(
         embed_dim=embed_dim,
@@ -281,7 +328,7 @@ def build_model_from_checkpoint(checkpoint: Path) -> Tuple[nn.Module, bool]:
         s2_layers=(3, 4, 6, 3),
         s2_width=32,
         s2_patch_size=16,
-        s2_bands=13,
+        s2_bands=s2_bands,
         framework="resnet50",
     )
 

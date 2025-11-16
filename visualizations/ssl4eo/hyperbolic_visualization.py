@@ -180,8 +180,88 @@ def _extract_curvature_from_state(
     curv_tensor = curv_param.to(device=device, dtype=dtype)
     return torch.exp(curv_tensor)
 
+def compute_lorentz_pos_neg(
+    modality_tensors: dict,
+    curv: float = 1.0,
+    use_distance: bool = False,
+):
+    """
+    Compute Lorentzian inner-product (or hyperbolic distance) for
+    positive vs negative S1–S2 pairs.
 
+    Args:
+        modality_tensors: dict with
+            modality_tensors["s1"]["projected"] : (N, D) tensor
+            modality_tensors["s2"]["projected"] : (N, D) tensor
+        curv: positive scalar curvature parameter.
+        use_distance: if True, return hyperbolic distances instead of
+            Lorentz inner products.
 
+    Returns:
+        pos_vals: 1D tensor of positive-pair values (length N)
+        neg_vals: 1D tensor of negative-pair values (length N*(N-1))
+    """
+    s1 = modality_tensors["s1"]["projected"]   # (N, D)
+    s2 = modality_tensors["s2"]["projected"]   # (N, D)
+
+    assert s1.shape == s2.shape, "S1 and S2 projected tensors must have same shape"
+    N = s1.shape[0]
+
+    with torch.no_grad():
+        if use_distance:
+            # Full pairwise geodesic distances
+            mat = pairwise_dist(s1, s2, curv=curv)  # (N, N)
+        else:
+            # Full pairwise Lorentzian inner products
+            mat = pairwise_inner(s1, s2, curv=curv)  # (N, N)
+
+        # Positive pairs = diagonal (i, i)
+        pos_vals = torch.diag(mat)
+
+        # Negative pairs = all off-diagonal entries
+        mask = ~torch.eye(N, dtype=torch.bool, device=mat.device)
+        neg_vals = mat[mask]
+
+    return pos_vals.cpu(), neg_vals.cpu()
+
+def plot_pos_neg_hist(
+    pos_vals: torch.Tensor,
+    neg_vals: torch.Tensor,
+    use_distance: bool = False,
+    bins: int = 100,
+    out_path: str | None = None,
+):
+    """
+    Plot histograms of positive vs negative similarity (or distance).
+
+    Args:
+        pos_vals: 1D tensor of positive-pair values.
+        neg_vals: 1D tensor of negative-pair values.
+        use_distance: if True, label x-axis as hyperbolic distance;
+            otherwise as Lorentzian inner product.
+        bins: number of histogram bins.
+        out_path: if not None, path to save the figure (e.g. 'hyp_sim_hist.png').
+    """
+    pos_np = pos_vals #.numpy()
+    neg_np = neg_vals #.numpy()
+
+    plt.figure(figsize=(6, 4))
+    plt.hist(pos_np, bins=bins, alpha=0.5, density=True, label="Positive pairs")
+    plt.hist(neg_np, bins=bins, alpha=0.5, density=True, label="Negative pairs")
+
+    if use_distance:
+        raise ValueError
+        # plt.xlabel("Hyperbolic distance $d_\\mathbb{H}(x,y)$")
+    else:
+        plt.xlabel("Exterior angle similarities $\\langle x,y \\rangle_L$")
+    plt.ylabel("Density")
+    plt.legend()
+    plt.tight_layout()
+
+    if out_path is not None:
+        plt.savefig(out_path, dpi=300)
+
+    return plt.gcf()
 
 def compute_hyperbolic_context(
     model: LorentzCIIP,
@@ -202,6 +282,8 @@ def compute_hyperbolic_context(
     # for angular plots below.
     s1_tangent = L.log_map0(s1_points, curvature)
     s2_tangent = L.log_map0(s2_points, curvature)
+
+    # hyperbolci distances from origin
     s1_distances = torch.norm(s1_tangent, dim=-1)
     s2_distances = torch.norm(s2_tangent, dim=-1)
 
@@ -209,17 +291,31 @@ def compute_hyperbolic_context(
         safe_norm = torch.clamp(distances, min=1e-9).unsqueeze(-1)
         return tangent / safe_norm
 
+    # Unit directions in tangent space (angular orientation)
     s1_dirs = _unit_direction(s1_tangent, s1_distances)
     s2_dirs = _unit_direction(s2_tangent, s2_distances)
 
+    # Time components (scaled), used for aperture computation
     s1_inner = torch.sqrt(1 + curvature * torch.sum(s1_points**2, dim=-1))
     s2_inner = torch.sqrt(1 + curvature * torch.sum(s2_points**2, dim=-1))
 
+    # Exterior angles between S1/S2 points at the hyperbolic origin
     angles = L.pairwise_oxy_angle(s1_points, s2_points, curvature)
     positive_angles = torch.diagonal(angles)
+
     eps = float(getattr(model, "hyperbolic_eps", 1e-5))
     aperture_s1 = _aperture_from_inner(s1_inner, eps, aperture_logk)
     aperture_s2 = _aperture_from_inner(s2_inner, eps, aperture_logk)
+
+    # # hyperbolic angle similarirites (equivalent to cosine sim)
+    # pairwise_lorentz = L.pairwise_inner(s1_points, s2_points, curvature) # loss function operates on angles
+    # pairwise_dist = L.pairwise_dist(s1_points, s2_points, curvature) # prior hyperbolic implemetnations use geodesic distances
+
+    # # Positive-pair similarities/distances = diagonal (i == j)
+    # positive_lorentz = torch.diagonal(pairwise_lorentz)
+    # positive_dist = torch.diagonal(pairwise_dist)
+
+
     return {
         "positive_angles": positive_angles,
         "aperture_s1": aperture_s1,
@@ -229,6 +325,7 @@ def compute_hyperbolic_context(
         "s1_distances": s1_distances,
         "s2_distances": s2_distances,
         "curvature": curvature,
+        "angles": angles
     }
 
 

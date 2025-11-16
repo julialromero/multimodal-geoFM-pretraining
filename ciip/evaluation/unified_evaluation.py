@@ -112,7 +112,9 @@ from visualizations.ssl4eo.hyperbolic_visualization import (  # type: ignore
     plot_angular_pca,
     plot_cone_polar,
     plot_radial_histogram,
-    _extract_curvature_from_state
+    _extract_curvature_from_state,
+    compute_lorentz_pos_neg,
+    plot_pos_neg_hist
 )
 from visualizations.ssl4eo.hyperbolic_retrieval import compute_cross_modal_retrieval
 from ciip.open_clip_train.data import SSL4EODataset
@@ -710,6 +712,8 @@ def _run_embedding_diagnostics(
         if config.model_type == "torchgeo_resnet50":
             plot_epoch_diagnostics_s2only(epoch_diagnostics, output_dir, label='backbone_raw')
         plot_epoch_diagnostics(epoch_diagnostics, output_dir, label='posthead_raw')
+
+
     else:
         if config.model_type == "torchgeo_resnet50":
             plot_epoch_diagnostics_s2only(epoch_diagnostics, output_dir, label='s2_backbone_raw')
@@ -839,6 +843,36 @@ def _run_hyperbolic_visualisations(
     s2_dirs = context["s2_dirs"].cpu().numpy()
     s1_distances = context["s1_distances"].cpu().numpy()
     s2_distances = context["s2_distances"].cpu().numpy()
+
+    angles_mat = context["angles"]          # (N, N), on device
+    N = angles_mat.size(0)
+    # positives: diagonal α(x_i, y_i)
+    pos_alpha = context["positive_angles"].cpu().numpy()
+    # negatives: all off-diagonals α(x_i, y_j), i != j
+    neg_alpha = angles_mat[~torch.eye(N, dtype=torch.bool, device=angles_mat.device)].cpu().numpy()
+
+    # Convert to "similarity" the way the loss does: κ = -α
+    pos_angle_sim = -pos_alpha
+    neg_angle_sim = -neg_alpha
+
+    plot_pos_neg_hist(
+        pos_angle_sim,
+        neg_angle_sim,
+        use_distance=False,
+        out_path=output_dir / "angle_sim_hist.png",
+    )
+
+    # # Lorentz “similarity” (hyperbolic analogue of cosine sim)
+    # lorentz_mat = context["pairwise_lorentz"]       # (N, N)
+    # pos_sim = context["positive_lorentz"].cpu().numpy()       # diag
+    # neg_sim = lorentz_mat[~torch.eye(lorentz_mat.size(0), dtype=torch.bool)].cpu().numpy()
+
+    # # # Or distances
+    # # dist_mat = ctx["pairwise_dist"]
+    # # pos_dist = ctx["positive_dist"]
+    # # neg_dist = dist_mat[~torch.eye(dist_mat.size(0), dtype=torch.bool)]
+
+    # plot_pos_neg_hist(pos_sim, neg_sim, use_distance=False, out_path= output_dir /"lorentz_sim_hist.png")
 
     plot_angle_aperture(positive_angles, aperture_s1, aperture_s2, output_dir / "angle_aperture.png")
     plot_radial_histogram(s1_distances, s2_distances, output_dir / "radial_histogram.png")
@@ -991,23 +1025,23 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
             device=device,
         )
 
-    #     _run_embedding_diagnostics(
-    #         config,
-    #         s1_ssl4eo,
-    #         s2_ssl4eo,
-    #         sample_ids=ssl4eo_ids,
-    #         output_dir=output_dir / "embedding_diagnostics",
-    #     )
-    #     logging.info("Completed SSL4EO diagnostics")
-    #     # print output dir
-    #     print("SSL4EO diagnostics saved to ", output_dir)
-    # else:
-    #     logging.info(
-    #         "Skipping SSL4EO diagnostics (enable_ssl4eo=%s, root=%s, supports_ssl4eo=%s)",
-    #         config.enable_ssl4eo,
-    #         config.ssl4eo_root,
-    #         getattr(adapter, "supports_ssl4eo", True),
-    #     )
+        _run_embedding_diagnostics(
+            config,
+            s1_ssl4eo,
+            s2_ssl4eo,
+            sample_ids=ssl4eo_ids,
+            output_dir=output_dir / "embedding_diagnostics",
+        )
+        logging.info("Completed SSL4EO diagnostics")
+        # print output dir
+        print("SSL4EO diagnostics saved to ", output_dir)
+    else:
+        logging.info(
+            "Skipping SSL4EO diagnostics (enable_ssl4eo=%s, root=%s, supports_ssl4eo=%s)",
+            config.enable_ssl4eo,
+            config.ssl4eo_root,
+            getattr(adapter, "supports_ssl4eo", True),
+        )
     curvature = None
     if is_lorentz and s1_ssl4eo is not None and s2_ssl4eo is not None:
         if not isinstance(base_model, LorentzCIIP):
@@ -1044,7 +1078,7 @@ if __name__ == "__main__":
     parser.add_argument("--model-type", default="ciip_checkpoint", choices=["ciip_checkpoint", "torchgeo_resnet50"], help="Model source to evaluate.")
     # parser.add_argument("--checkpoint", type=Path, help="Checkpoint path for CIIP/Lorentz models.")
     parser.add_argument("--model-weights", choices=["dino", "moco"], help="TorchGeo ResNet50 weight selection.")
-    parser.add_argument("--model-in-channels", type=int, default=13, help="Number of input channels for TorchGeo ResNet models.")
+    parser.add_argument("--model-in-channels", type=int, default=12, help="Number of input channels for TorchGeo ResNet models.")
     # parser.add_argument("--eurosat-root", type=Path, required=True, help="EuroSAT dataset root directory.")
     # parser.add_argument("--neuco-root", type=Path, required=True, help="NeuCo-Bench dataset root directory.")
     # parser.add_argument("--output-dir", type=Path, required=True, help="Directory to write evaluation artifacts.")
@@ -1052,10 +1086,10 @@ if __name__ == "__main__":
     parser.add_argument("--disable-ssl4eo", action="store_true", help="Skip SSL4EO diagnostics even if a root is provided.")
     parser.add_argument("--tsne-samples", type=int, default=1500, help="Samples used for t-SNE visualisations.")
     parser.add_argument("--pca-samples", type=int, default=5000, help="Samples used for PCA visualisations.")
-    parser.add_argument("--ssl4eo-subset-size", type=int, default=20, help="Subset size for SSL4EO embedding extraction.")
+    parser.add_argument("--ssl4eo-subset-size", type=int, default=50, help="Subset size for SSL4EO embedding extraction.")
     parser.add_argument("--ssl4eo-subset-seed", type=int, default=0, help="Subset seed for SSL4EO sampling.")
-    parser.add_argument("--neuco-modalities", nargs="*", default=["s2l1c"], help="NeuCo modalities to export.")
-    parser.add_argument("--neuco-seasons", type=int, default=4, help="Number of seasons for NeuCo extraction.")
+    parser.add_argument("--neuco-modalities", nargs="*", default=["s2l2a"], help="NeuCo modalities to export.")
+    parser.add_argument("--neuco-seasons", type=int, default=4, help="Number of seasons for NeuCo extraction.") # i believe these are averaged
 
     args = parser.parse_args()
 
@@ -1073,17 +1107,22 @@ if __name__ == "__main__":
 
 
     args.model_root = '/local/ms-data/SSL4EO/model/'
-    args.model_path = '2025_11_05-21_04_44-model_resnet50-lr_0.001-b_128-j_6-p_amp/'
+    args.model_path = '2025_11_14-10_56_41-model_resnet50-lr_0.001-b_2-j_6-p_amp'
+    # '2025_11_05-21_04_44-model_resnet50-lr_0.001-b_128-j_6-p_amp/'
+    # '/local/ms-data/SSL4EO/model/2025_11_13-08_33_13-model_resnet50-lr_0.001-b_2-j_6-p_amp/checkpoints/epoch_10.pt'
+    # 
+    
+    # '2025_11_05-21_04_44-model_resnet50-lr_0.001-b_128-j_6-p_amp/'
     # '2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp'
     # '2025_11_07-09_24_18-model_resnet50-lr_0.001-b_128-j_6-p_amp'
     # '2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp'
     checkpoint_root = Path(args.model_root) / args.model_path / "checkpoints"
     # args.output_dir = Path("diagnostics/output")
 
-    args.checkpoint=Path(f"{checkpoint_root}/epoch_10.pt")
+    args.checkpoint=Path(f"{checkpoint_root}/epoch_40.pt")
     args.eurosat_root=Path("/local/ms-data/EuroSAT/")
     args.neuco_root=Path("/local/ms-data/SSL4EO-S12-downstream/data")
-    args.output_dir=Path("/home/juro4948/ciip/diagnostics/unified_eval/curv_init_1_epoch10/") #dino_13bands/") #curv_init_1_epoch10/
+    args.output_dir=Path("/home/juro4948/ciip/diagnostics/unified_eval/curv_init_0.1_v1.1_epoch40/") #dino_13bands/") #curv_init_1_epoch10/ curv_init_1
     args.ssl4eo_root=Path("/local/ms-data/SSL4EOv1.1/train")
 
 
