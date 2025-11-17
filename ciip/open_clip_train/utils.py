@@ -217,12 +217,12 @@ def create_model(args, device, **model_kwargs):
     # cast_dtype set for fp16 and bf16 (manual mixed-precision), not set for 'amp' or 'pure' modes
     cast_dtype = get_cast_dtype(precision)
 
-    pre_projection_dim = getattr(args.model, "pre_projection_dim", args.model.embed_dim)
+    # pre_projection_dim = getattr(args.model, "pre_projection_dim", args.model.embed_dim)
 
     if args.loss.hyperbolic:
         print("Using hyperbolic model")
         model = LorentzCIIP(embed_dim=args.model.embed_dim,
-            pre_projection_dim=pre_projection_dim,
+            # pre_projection_dim=pre_projection_dim,
             s1_resolution=args.model.s1_resolution,
             s1_layers=OmegaConf.to_object(args.model.s1_layers),
             s1_width=args.model.width,
@@ -244,8 +244,8 @@ def create_model(args, device, **model_kwargs):
             entail_weight=args.loss.entail_weight)
     else:
 
-        model = CIIP(embed_dim=2048,#args.model.embed_dim,
-            pre_projection_dim=1024,#pre_projection_dim,
+        model = CIIP(embed_dim=args.model.embed_dim,
+            # pre_projection_dim=1024,#pre_projection_dim,
             s1_resolution=args.model.s1_resolution,
             s1_layers=OmegaConf.to_object(args.model.s1_layers),
             s1_width=args.model.width,

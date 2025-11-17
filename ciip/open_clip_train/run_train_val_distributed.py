@@ -31,7 +31,7 @@ try:
 except ImportError:
     hvd = None
 
-from ciip.open_clip_train import transforms
+# from ciip.open_clip_train import transforms
 from ciip.open_clip_train.data import get_data
 from ciip.open_clip_train.distributed import (
     broadcast_object,
@@ -441,9 +441,12 @@ def main(args: DictConfig, start_epoch=0):
     #   ])
         assert args.model.s1_resolution != args.model.s2_resolution, 'S1 target resolution is not the same as S2 target resolution'
         # transforms = PairGeom(out_size=args.model.s1_resolution)
-        transforms = transforms.PairAugmented(
-            pair_geom=transforms.PairGeom(out_size=args.model.s1_resolution)
-        )
+        # transforms = transforms.PairAugmented(
+        #     pair_geom=transforms.PairGeom(out_size=args.model.s1_resolution)
+
+        # )
+        raise NotImplementedError('Transforms not yet supported.')
+        
     else:
         transforms = None
 

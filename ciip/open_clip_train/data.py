@@ -16,7 +16,7 @@ from torch.utils.data.distributed import DistributedSampler
 from torchvision.transforms import Resize
 import xarray as xr
 from zarr.storage import ZipStore
-
+from torchvision import transforms
 
 ### band statistics: mean & std
 # calculated from 50k data
@@ -101,7 +101,7 @@ class SSL4EODataset(Dataset):
         self.root = root
         self.dataset_name = str(dataset_name)
         self.transforms = transforms
-        self.resize_transform = Resize(target_image_dimension)
+        # self.resize_transform = #Resize(target_image_dimension)
 
         self.s1_dir = os.path.join(root, "S1GRD")
         if s2_tier.lower() == "s2l1c":
@@ -151,15 +151,15 @@ class SSL4EODataset(Dataset):
             _canonicalize_band_label(b)
             for b in (s2_band_names if s2_band_names is not None else self.DEFAULT_S2_BANDS)
         ]
-        # if len(self.s2_band_names) != len(S2L2A_MEAN):
-        s2_means = S2L1C_MEAN if s2_tier.lower() == "s2l1c" else S2L2A_MEAN
-        s2_stds = S2L1C_STD if s2_tier.lower() == "s2l1c" else S2L2A_STD
-            # raise ValueError("Unexpected number of S2 band names for provided statistics")
+        # # if len(self.s2_band_names) != len(S2L2A_MEAN):
+        # s2_means = S2L1C_MEAN if s2_tier.lower() == "s2l1c" else S2L2A_MEAN
+        # s2_stds = S2L1C_STD if s2_tier.lower() == "s2l1c" else S2L2A_STD
+        #     # raise ValueError("Unexpected number of S2 band names for provided statistics")
 
-        self.s2_stats: Dict[str, Tuple[float, float]] = {
-            band: (mean, std)
-            for band, mean, std in zip(self.s2_band_names, s2_means, s2_stds)
-        }
+        # self.s2_stats: Dict[str, Tuple[float, float]] = {
+        #     band: (mean, std)
+        #     for band, mean, std in zip(self.s2_band_names, s2_means, s2_stds)
+        # }
 
         self._s2_band_selection: Optional[Tuple[str, List[int]]] = self._resolve_s2_band_selection(self.s2_paths[0])
 
@@ -187,9 +187,9 @@ class SSL4EODataset(Dataset):
         s1_tensor = torch.from_numpy(s1_array).float()
         s2_tensor = torch.from_numpy(s2_array).float()
 
-        # Resize supports leading batch dims; shape stays (P, C, H, W)
-        s1_tensor = self.resize_transform(s1_tensor)
-        s2_tensor = self.resize_transform(s2_tensor)
+        # # Resize supports leading batch dims; shape stays (P, C, H, W)
+        # s1_tensor = self.resize_transform(s1_tensor)
+        # s2_tensor = self.resize_transform(s2_tensor)
 
         # Optional transforms (should also support (P, C, H, W))
         if self.transforms is not None:
@@ -197,11 +197,15 @@ class SSL4EODataset(Dataset):
             s2_tensor = self.transforms(s2_tensor)
 
         # Normalize channel-wise; supports (P,C,H,W) or (C,H,W)
-        s1_tensor = self.normalize_s1(s1_tensor)
-        s2_tensor = self.normalize_s2(s2_tensor, self.s2_stats, self.s2_band_names)
+        # s1_tensor = self.normalize_s1(s1_tensor)
+        # s2_tensor = self.normalize_s2(s2_tensor, self.s2_stats, self.s2_band_names)
 
         # Return (P,C,H,W) for both; collate_fn will flatten P into batch
         # print('returning samples_per_file:', s1_tensor.shape[0])
+        # print range of each tensor
+        # print("s1_tensor range:", s1_tensor.min().item(), s1_tensor.max().item())
+        # print("s2_tensor range:", s2_tensor.min().item(), s2_tensor.max().item())
+        # raise ValueError("Debugging - remove this")
         return s1_tensor, s2_tensor
 
     # ---------- helpers ----------
@@ -355,32 +359,32 @@ class SSL4EODataset(Dataset):
 
     # -------- normalization that supports (P,C,H,W) or (C,H,W) --------
 
-    def normalize_s1(self, x: torch.Tensor) -> torch.Tensor:
-        # Bring to (P,C,H,W)
-        if x.ndim == 3:
-            x = x.unsqueeze(0)
-        C = x.shape[1]
-        mean = torch.tensor(S1GRD_MEAN[:C], dtype=x.dtype, device=x.device).view(1, C, 1, 1)
-        std  = torch.tensor(S1GRD_STD[:C],  dtype=x.dtype, device=x.device).view(1, C, 1, 1)
-        y = (x - mean) / std
-        return y[0] if y.shape[0] == 1 else y
+    # def normalize_s1(self, x: torch.Tensor) -> torch.Tensor:
+    #     # Bring to (P,C,H,W)
+    #     if x.ndim == 3:
+    #         x = x.unsqueeze(0)
+    #     C = x.shape[1]
+    #     mean = torch.tensor(S1GRD_MEAN[:C], dtype=x.dtype, device=x.device).view(1, C, 1, 1)
+    #     std  = torch.tensor(S1GRD_STD[:C],  dtype=x.dtype, device=x.device).view(1, C, 1, 1)
+    #     y = (x - mean) / std
+    #     return y[0] if y.shape[0] == 1 else y
 
-    def normalize_s2(
-        self,
-        x: torch.Tensor,
-        s2_stats: Dict[str, Tuple[float, float]],
-        s2_bands: Sequence[str],
-    ) -> torch.Tensor:
-        # Bring to (P,C,H,W)
-        if x.ndim == 3:
-            x = x.unsqueeze(0)
-        C = x.shape[1]
-        means = [s2_stats[b][0] for b in s2_bands[:C]]
-        stds  = [s2_stats[b][1] for b in s2_bands[:C]]
-        mean = torch.tensor(means, dtype=x.dtype, device=x.device).view(1, C, 1, 1)
-        std  = torch.tensor(stds,  dtype=x.dtype, device=x.device).view(1, C, 1, 1)
-        y = (x - mean) / std
-        return y[0] if y.shape[0] == 1 else y
+    # def normalize_s2(
+    #     self,
+    #     x: torch.Tensor,
+    #     s2_stats: Dict[str, Tuple[float, float]],
+    #     s2_bands: Sequence[str],
+    # ) -> torch.Tensor:
+    #     # Bring to (P,C,H,W)
+    #     if x.ndim == 3:
+    #         x = x.unsqueeze(0)
+    #     C = x.shape[1]
+    #     means = [s2_stats[b][0] for b in s2_bands[:C]]
+    #     stds  = [s2_stats[b][1] for b in s2_bands[:C]]
+    #     mean = torch.tensor(means, dtype=x.dtype, device=x.device).view(1, C, 1, 1)
+    #     std  = torch.tensor(stds,  dtype=x.dtype, device=x.device).view(1, C, 1, 1)
+    #     y = (x - mean) / std
+    #     return y[0] if y.shape[0] == 1 else y
 
     # -------- utilities --------
 
@@ -1038,6 +1042,43 @@ def get_dataset_fn(data_path, dataset_type):
         raise ValueError(f"Unsupported dataset type: {dataset_type}")
     
 
+def get_transform(modality, is_train):
+    if modality == "s1":
+        if is_train:
+            return transforms.Compose([
+                transforms.RandomCrop(224),
+                transforms.Normalize(mean=S1GRD_MEAN, std=S1GRD_STD),
+            ])
+        else:
+            return transforms.Compose([
+                transforms.CenterCrop(224),
+                transforms.Normalize(mean=S1GRD_MEAN, std=S1GRD_STD),
+            ])
+    elif modality == "s2a":
+        if is_train:
+            return transforms.Compose([
+                transforms.RandomCrop(224),
+                transforms.Normalize(mean=S2L2A_MEAN, std=S2L2A_STD),
+            ])
+        else:
+            return transforms.Compose([
+                transforms.CenterCrop(224),
+                transforms.Normalize(mean=S2L2A_MEAN, std=S2L2A_STD),
+            ])
+    elif modality == "s2c":
+        if is_train:
+            return transforms.Compose([
+                transforms.RandomCrop(224),
+                transforms.Normalize(mean=S2L1C_MEAN, std=S2L1C_STD),
+            ])
+        else:
+            return transforms.Compose([
+                transforms.CenterCrop(224),
+                transforms.Normalize(mean=S2L1C_MEAN, std=S2L1C_STD),
+            ])
+    else:
+        raise ValueError(f"Unsupported modality: {modality}")
+
 # def get_data(args, preprocess_fns, epoch=0, tokenizer=None):
 def get_data(args, preprocess_fns=None):
     data = {}
@@ -1045,6 +1086,7 @@ def get_data(args, preprocess_fns=None):
     if args.dataset.dataset_type == "ssl4eo":
         ### make splits
         if args.train.use_val:
+            raise NotImplementedError("use_val not implemented for ssl4eo yet.")
             # first prepare full dataset
             full_datainfo = get_dataset_fn(args.dataset.train_data, args.dataset.dataset_type)(
                 args, is_train=True, transforms=preprocess_fns) # is_train and transforms don't matter here
@@ -1059,8 +1101,11 @@ def get_data(args, preprocess_fns=None):
 
 
         else:
+            s1_preprocess = get_transform("s1", is_train=True)
+            s2_preprocess = get_transform(args.dataset.s2_tier, is_train=True)
+                
             data['train'] = get_dataset_fn(args.dataset.train_data, args.dataset.dataset_type)(
-                args, is_train=True, transforms=preprocess_fns)
+                args, is_train=True, transforms={"s1": s1_preprocess, "s2": s2_preprocess})
 
         return data
     

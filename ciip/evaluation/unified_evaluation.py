@@ -378,6 +378,8 @@ def _extract_embeddings(
     return bundle
 
 
+
+
 def _build_eurosat_loaders(
     config: ModelEvalConfig, *, bands: Sequence[str], modality: str
 ) -> Dict[str, DataLoader]:

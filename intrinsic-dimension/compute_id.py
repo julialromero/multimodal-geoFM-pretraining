@@ -11,13 +11,16 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 import skdim.id as id
+from torchvision import transforms as T
 
 # --- Your existing evaluation helpers (used only for the data loader) ---
 from ciip.evaluation.unified_evaluation import (
     ModelEvalConfig,
-    _build_eurosat_loaders,
-    _resolve_eurosat_bands,
+    # _build_eurosat_loaders,
+    # _resolve_eurosat_bands,
 )
+from s2geo_dataset import S2Geo
+S2_100K_ROOT = Path("/local/ms-data/S2_100K")
 from ciip.evaluation.model_utils import build_model_from_checkpoint
 
 # ---------------------------------------------------------------------------
@@ -76,6 +79,93 @@ S2_WAVELENGTHS_UM: List[float] = [
 S2_WAVELENGTHS_UM_OPTICAL_12: List[float] = [
     w for i, w in enumerate(S2_WAVELENGTHS_UM) if i != 10
 ]
+
+def build_s2_100k_loader(
+    in_chans: int,
+    target_size: int,
+    batch_size: int = 64,
+    num_workers: int = 4,
+    rgb_mode: bool = False,
+) -> DataLoader:
+    """
+    Build a DataLoader over SatCLIP's S2-100K using its S2GeoDataset class.
+    Yields dicts with keys {"image", "label"} to match the rest of the script.
+    """
+    mean = [0.4139, 0.4341, 0.3482, 0.5263],
+    std = [0.0010, 0.0010, 0.0013, 0.0013]
+    transform = T.Compose([
+        T.Resize((target_size, target_size), interpolation=T.InterpolationMode.BICUBIC),
+        T.Normalize(mean=mean, std=std),
+    ])
+
+    # 1) Base SatCLIP dataset (change split as you like: "train", "val", "test")
+    base = S2Geo(
+        root=S2_100K_ROOT,
+        # split="train",          # or "val"/"test" if available in your dump
+        # download=False,        
+        transform=None,  
+        mode="both",     
+    )
+
+    # 2) Wrap to format samples like your EuroSAT loader did
+    class _S2GeoWrapped(torch.utils.data.Dataset):
+        def __init__(self, base, target_size, in_chans, rgb_mode):
+            self.base = base
+            self.in_chans = in_chans
+            self.rgb_mode = rgb_mode
+            self.resize = T.Resize((target_size, target_size), interpolation=T.InterpolationMode.BICUBIC)
+
+        def __len__(self):
+            return len(self.base)
+
+        def __getitem__(self, idx):
+            item = self.base[idx]
+            # SatCLIP typically returns dicts; fall back just in case
+            x = item["image"] if isinstance(item, dict) and "image" in item else item[0]
+            y = item.get("label", 0) if isinstance(item, dict) else (item[1] if len(item) > 1 else 0)
+
+            # Convert to float tensor, handle HWC/CHW
+            if isinstance(x, np.ndarray):
+                x = torch.from_numpy(x)
+            elif not isinstance(x, torch.Tensor):
+                # If it's a PIL Image
+                x = T.ToTensor()(x)  # -> [C,H,W] in [0,1]
+
+            if x.ndim == 3 and x.shape[0] not in (3, 12, 13):
+                # likely HWC -> CHW
+                x = x.permute(2, 0, 1).contiguous()
+
+            # Select channels to match the model spec
+            if self.rgb_mode:
+                # S2 RGB convention: B4,B3,B2 -> indices 3,2,1 in [B1..B12]; if 13 bands and includes B8A, adjust accordingly
+                # Safe fallback: if ≥4 chans, pick [3,2,1]; else assume already RGB
+                if x.shape[0] >= 4:
+                    x = x[[3, 2, 1], ...]
+            else:
+                # Expect 12 or 13 bands; if 12 needed (e.g., without B10), drop band index 10 when present
+                if self.in_chans == 12 and x.shape[0] == 13:
+                    keep = [i for i in range(13) if i != 10]  # drop cirrus B10
+                    x = x[keep, ...]
+                # If in_chans==13 and x has 12, you may need to pad or adapt—raise early:
+                if self.in_chans != x.shape[0]:
+                    raise RuntimeError(f"Channel mismatch: wanted {self.in_chans}, got {x.shape[0]}")
+
+            # Resize (expects CHW)
+            x = self.resize(x)
+
+            return {"image": x.float(), "label": int(y)}
+
+    ds = _S2GeoWrapped(base, target_size=target_size, in_chans=in_chans, rgb_mode=rgb_mode)
+
+    loader = DataLoader(
+        ds,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True,
+        drop_last=False,
+    )
+    return loader
 
 
 # ---------------------------------------------------------------------------
@@ -523,6 +613,7 @@ def build_s2_like_loader(
     target_size: int,
     batch_size: int = 64,
     num_workers: int = 4,
+    rgb_mode: bool = False,
 ) -> DataLoader:
     """
     Reuses your EuroSAT loader as a stand-in for S2-100K.
@@ -535,20 +626,30 @@ def build_s2_like_loader(
     (images, ...) where images are (B, in_chans, H, W) and
     already resized/cropped to `target_size`.
     """
-    config = ModelEvalConfig(
-        eurosat_root=EUROSAT_ROOT,
-        neuco_root=NEUCO_ROOT,
-        output_dir=OUTPUT_DIR,
-        checkpoint=None,
-        model_type="dummy",  # unused
-        model_weights=None,
-        model_in_channels=in_chans,
-        eurosat_image_size=target_size,
-        enable_ssl4eo=False,
+    # config = ModelEvalConfig(
+    #     eurosat_root=EUROSAT_ROOT,
+    #     neuco_root=NEUCO_ROOT,
+    #     output_dir=OUTPUT_DIR,
+    #     checkpoint=None,
+    #     model_type="dummy",  # unused
+    #     model_weights=None,
+    #     model_in_channels=in_chans,
+    #     eurosat_image_size=target_size,
+    #     enable_ssl4eo=False,
+    # )
+
+    loader = build_s2_100k_loader(
+        in_chans=in_chans,
+        target_size=target_size,
+        batch_size=64,
+        num_workers=4,
+        rgb_mode=False,   # propagate whether the model expects RGB
     )
-    bands = _resolve_eurosat_bands(in_chans)
-    loaders = _build_eurosat_loaders(config, bands=bands, modality=EUROSAT_MODALITY)
-    return loaders["test"]
+
+
+    # bands = _resolve_eurosat_bands(in_chans)
+    # loaders = _build_eurosat_loaders(config, bands=bands, modality=EUROSAT_MODALITY)
+    return loader #s["test"]
 
 
 # ---------------------------------------------------------------------------
@@ -632,6 +733,7 @@ def main() -> None:
             target_size=spec.target_size,
             batch_size=64,
             num_workers=4,
+            rgb_mode=spec.rgb_mode,
         )
         # except Exception as e:
         #     print(f"  [SKIP] Failed to build loader for in_chans={spec.in_chans}: {e}")
