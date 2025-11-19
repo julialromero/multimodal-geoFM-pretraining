@@ -61,13 +61,19 @@ class EvaluationAdapter(nn.Module):
 
     # These helpers are intentionally thin wrappers so that the evaluation
     # pipeline can treat all models uniformly.
-    def compute_backbone(self, images: torch.Tensor) -> torch.Tensor:  # pragma: no cover - interface
+    def compute_backbone(
+        self, images: torch.Tensor, modality: str = "s2"
+    ) -> torch.Tensor:  # pragma: no cover - interface
         raise NotImplementedError
 
-    def compute_posthead(self, images: torch.Tensor) -> torch.Tensor:  # pragma: no cover - interface
+    def compute_posthead(
+        self, images: torch.Tensor, modality: str = "s2"
+    ) -> torch.Tensor:  # pragma: no cover - interface
         raise NotImplementedError
 
-    def compute_projected(self, images: torch.Tensor) -> torch.Tensor:  # pragma: no cover - interface
+    def compute_projected(
+        self, images: torch.Tensor, modality: str = "s2"
+    ) -> torch.Tensor:  # pragma: no cover - interface
         raise NotImplementedError
 
     def compute_embeddings(self, images: Any) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
@@ -291,7 +297,7 @@ class TorchGeoResNetAdapter(EvaluationAdapter):
         raise RuntimeError("TorchGeoResNet adapter does not expose any encoders")
         
 
-    def compute_backbone(self, images: torch.Tensor) -> torch.Tensor:
+    def compute_backbone(self, images: torch.Tensor, modality: str = "s2") -> torch.Tensor:
         encoder, dtype, _ = self._default_stream()
         features = encoder(images)
         if isinstance(features, (tuple, list)):
@@ -300,10 +306,10 @@ class TorchGeoResNetAdapter(EvaluationAdapter):
             features = features.flatten(start_dim=1)
         return features
 
-    def compute_posthead(self, images: torch.Tensor) -> torch.Tensor:
+    def compute_posthead(self, images: torch.Tensor, modality: str = "s2") -> torch.Tensor:
         return None
 
-    def compute_projected(self, images: torch.Tensor) -> torch.Tensor:
+    def compute_projected(self, images: torch.Tensor, modality: str = "s2") -> torch.Tensor:
         return None
 
     def encode_s2(  # pragma: no cover - compatibility wrapper
@@ -417,21 +423,53 @@ class CromaEvaluationAdapter(EvaluationAdapter):
         projected = F.normalize(optical_gap, p=2, dim=1, eps=1e-12)
         return backbone, optical_gap, projected
 
-    def compute_backbone(self, images: Any) -> torch.Tensor:
-        backbone, _, _ = self.compute_embeddings(images)
+    def compute_backbone(self, images: Any, modality: str = "s2") -> torch.Tensor:
+        prepared = self._ensure_prepared_inputs(images, modality)
+        backbone, _, _ = self.compute_embeddings(prepared)
         return backbone
 
-    def compute_posthead(self, images: Any) -> torch.Tensor:
-        _, posthead, _ = self.compute_embeddings(images)
+    def compute_posthead(self, images: Any, modality: str = "s2") -> torch.Tensor:
+        prepared = self._ensure_prepared_inputs(images, modality)
+        _, posthead, _ = self.compute_embeddings(prepared)
         if posthead is None:
             raise RuntimeError("Post-head embeddings unavailable for CROMA.")
         return posthead
 
-    def compute_projected(self, images: Any) -> torch.Tensor:
-        _, _, projected = self.compute_embeddings(images)
+    def compute_projected(self, images: Any, modality: str = "s2") -> torch.Tensor:
+        prepared = self._ensure_prepared_inputs(images, modality)
+        _, _, projected = self.compute_embeddings(prepared)
         if projected is None:
             raise RuntimeError("Projected embeddings unavailable for CROMA.")
         return projected
+
+    def _ensure_prepared_inputs(
+        self, images: Any, modality: str
+    ) -> Dict[str, Optional[torch.Tensor]]:
+        if isinstance(images, dict):
+            candidate = images
+        else:
+            if not isinstance(images, torch.Tensor):
+                raise TypeError(
+                    "CROMA adapters expect tensors or modality dictionaries for embedding extraction."
+                )
+            candidate = {"optical": None, "sar": None}
+            if modality.lower() == "s1":
+                candidate["sar"] = images
+            else:
+                candidate["optical"] = images
+
+        device = None
+        for value in candidate.values():
+            if isinstance(value, torch.Tensor):
+                device = value.device
+                break
+        if device is None:
+            device = next(self.base_model.parameters()).device
+
+        prepared = self.prepare_inputs(candidate, device=device)
+        if not isinstance(prepared, dict):
+            raise TypeError("CROMA prepare_inputs must return a dictionary of modalities.")
+        return prepared
 
     def compute_joint_embeddings(
         self, inputs: Optional[Dict[str, Optional[torch.Tensor]]] = None

@@ -19,7 +19,7 @@ import json
 import logging
 import contextlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -763,7 +763,7 @@ def _export_neuco(
 
 def _run_embedding_diagnostics(
     config: ModelEvalConfig,
-    s1_bundle: ModalityEmbeddings,
+    s1_bundle: Optional[ModalityEmbeddings],
     s2_bundle: ModalityEmbeddings,
     *,
     sample_ids: Optional[Sequence[str]] = None,
@@ -771,113 +771,129 @@ def _run_embedding_diagnostics(
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # if empty s1_bundle riase error
-    if s1_bundle is not None:
-        if not s1_bundle.layer_activations or not s2_bundle.layer_activations:
-            raise ValueError("Layer activations are empty, cannot compute CKA diagnostics")
-        modality_tensors = {
-            "s1": {
-                "backbone": s1_bundle.backbone.detach() if s1_bundle.backbone is not None else None,
-                "posthead": s1_bundle.raw.detach(),
-                "projected": s1_bundle.projected.detach(),
-                "layers": s1_bundle.layer_activations,
-            },
-            "s2": {
-                "backbone": s2_bundle.backbone.detach() if s2_bundle.backbone is not None else None,
-                "posthead": s2_bundle.raw.detach(),
-                "projected": s2_bundle.projected.detach(),
-                "layers": s2_bundle.layer_activations,
-            },
-        }
-        assert modality_tensors["s1"]["layers"], "No S1 layer activations for CKA"
-        assert modality_tensors["s2"]["layers"], "No S2 layer activations for CKA"
+    def _detach_or_none(tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+        return tensor.detach() if tensor is not None else None
 
-        assert modality_tensors["s1"]["posthead"].shape[0] == modality_tensors["s2"]["posthead"].shape[0], "S1 and S2 posthead tensors have different number of samples" 
-        # asser that thwew are no nonfinite values in the tensors
-        if not torch.isfinite(modality_tensors["s1"]["posthead"]).all():
-            raise ValueError("Non-finite values found in S1 posthead tensor")
-        if not torch.isfinite(modality_tensors["s2"]["posthead"]).all():
-            raise ValueError("Non-finite values found in S2 posthead tensor")
-    
-        s1_layers, s1_within = compute_within_encoder_cka(modality_tensors["s1"]["layers"])
-        cross_s1_layers, cross_s2_layers, cross_matrix = compute_cross_encoder_cka(modality_tensors["s1"]["layers"], modality_tensors["s2"]["layers"])
-        projected_cka = compute_linear_cka(modality_tensors["s1"]["projected"], modality_tensors["s2"]["projected"])
-        s1_posthead_singular = compute_singular_values(modality_tensors["s1"]["posthead"])
-        s1_projected_singular = compute_singular_values(modality_tensors["s1"]["projected"])
-        s1_backbone_singular = compute_singular_values(modality_tensors["s1"]["backbone"])
-        s2_layers, s2_within = compute_within_encoder_cka(modality_tensors["s2"]["layers"])
-        s2_posthead_singular = compute_singular_values(modality_tensors["s2"]["posthead"])
-        s2_projected_singular = compute_singular_values(modality_tensors["s2"]["projected"])
-        s2_backbone_singular = compute_singular_values(modality_tensors["s2"]["backbone"])
-        cka_payload = {
-            "s1": {
-                "layers": s1_layers,
-                "matrix": s1_within.tolist() if s1_within is not None else None,
-            },
-            "s2": {
-                "layers": s2_layers,
-                "matrix": s2_within.tolist() if s2_within is not None else None,
-            },
-            "cross": {
-                "s1_layers": cross_s1_layers,
-                "s2_layers": cross_s2_layers,
-                "matrix": cross_matrix.tolist() if cross_matrix is not None else None,
-            },
-            "projected_similarity": projected_cka,
+    def _prepare_modality(bundle: Optional[ModalityEmbeddings]) -> Optional[Dict[str, object]]:
+        if bundle is None:
+            return None
+        return {
+            "backbone": _detach_or_none(getattr(bundle, "backbone", None)),
+            "posthead": _detach_or_none(getattr(bundle, "raw", None)),
+            "projected": _detach_or_none(getattr(bundle, "projected", None)),
+            "layers": bundle.layer_activations or {},
         }
 
-        spectra = [
-            ("s1", "posthead", s1_posthead_singular),
-            ("s1", "projected", s1_projected_singular),
-            ("s2", "posthead", s2_posthead_singular),
-            ("s2", "projected", s2_projected_singular),
-            ("s1", 'backbone', s1_backbone_singular),
-            ("s2", 'backbone', s2_backbone_singular),
-        ]
-    
+    modality_tensors: Dict[str, Optional[Dict[str, object]]] = {
+        "s1": _prepare_modality(s1_bundle),
+        "s2": _prepare_modality(s2_bundle),
+    }
+    if modality_tensors["s2"] is None:
+        raise ValueError("S2 embeddings are required for diagnostics")
+
+    def _maybe_singular(modality: str, feature: str) -> Optional[np.ndarray]:
+        tensors = modality_tensors.get(modality)
+        if tensors is None:
+            return None
+        tensor = tensors.get(feature)
+        if tensor is None:
+            return None
+        return compute_singular_values(tensor)  # type: ignore[arg-type]
+
+    s1_layers: List[str] = []
+    s1_within: Optional[np.ndarray] = None
+    s2_layers: List[str] = []
+    s2_within: Optional[np.ndarray] = None
+    cross_s1_layers: List[str] = []
+    cross_s2_layers: List[str] = []
+    cross_matrix: Optional[np.ndarray] = None
+    projected_cka: Optional[float] = None
+
+    if modality_tensors["s1"] and modality_tensors["s1"]["layers"]:
+        s1_layers, s1_within = compute_within_encoder_cka(
+            modality_tensors["s1"]["layers"]  # type: ignore[arg-type]
+        )
+    elif s1_bundle is not None:
+        logging.warning("S1 layer activations unavailable; skipping S1 CKA diagnostics")
+
+    if modality_tensors["s2"] and modality_tensors["s2"]["layers"]:
+        s2_layers, s2_within = compute_within_encoder_cka(
+            modality_tensors["s2"]["layers"]  # type: ignore[arg-type]
+        )
     else:
-        if not s2_bundle.layer_activations:
-            raise ValueError("Layer activations are empty, cannot compute CKA diagnostics")
+        logging.warning("S2 layer activations unavailable; skipping S2 CKA diagnostics")
 
-        modality_tensors = {
-            "s2": {
-                "posthead": s2_bundle.raw.detach(),
-                "projected": s2_bundle.projected.detach(),
-                "layers": s2_bundle.layer_activations,
-            },
-            "s1": None
+    if (
+        modality_tensors["s1"]
+        and modality_tensors["s1"]["layers"]
+        and modality_tensors["s2"]
+        and modality_tensors["s2"]["layers"]
+    ):
+        cross_s1_layers, cross_s2_layers, cross_matrix = compute_cross_encoder_cka(
+            modality_tensors["s1"]["layers"],  # type: ignore[arg-type]
+            modality_tensors["s2"]["layers"],  # type: ignore[arg-type]
+        )
+
+    s1_posthead_singular = _maybe_singular("s1", "posthead")
+    s1_projected_singular = _maybe_singular("s1", "projected")
+    s1_backbone_singular = _maybe_singular("s1", "backbone")
+    s2_posthead_singular = _maybe_singular("s2", "posthead")
+    s2_projected_singular = _maybe_singular("s2", "projected")
+    s2_backbone_singular = _maybe_singular("s2", "backbone")
+
+    if (
+        modality_tensors["s1"]
+        and modality_tensors["s1"].get("projected") is not None
+        and modality_tensors["s2"].get("projected") is not None
+    ):
+        projected_cka = compute_linear_cka(
+            modality_tensors["s1"]["projected"],  # type: ignore[arg-type]
+            modality_tensors["s2"]["projected"],  # type: ignore[arg-type]
+        )
+
+    cka_payload: Dict[str, Optional[Dict[str, object]]] = {
+        "s1": None,
+        "s2": None,
+        "cross": None,
+        "projected_similarity": projected_cka,
+    }
+    if s1_layers:
+        cka_payload["s1"] = {
+            "layers": s1_layers,
+            "matrix": s1_within.tolist() if s1_within is not None else None,
         }
-        
-
-        assert modality_tensors["s2"]["layers"], "No S2 layer activations for CKA"
-        s2_layers, s2_within = compute_within_encoder_cka(modality_tensors["s2"]["layers"])
-        s2_posthead_singular = compute_singular_values(modality_tensors["s2"]["posthead"])
-        s2_projected_singular = compute_singular_values(modality_tensors["s2"]["projected"])
-        s2_backbone_singular = compute_singular_values(modality_tensors["s2"]["backbone"])
-        cka_payload = {
-            "s2": {
-                "layers": s2_layers,
-                "matrix": s2_within.tolist() if s2_within is not None else None,
-            },
+    if s2_layers:
+        cka_payload["s2"] = {
+            "layers": s2_layers,
+            "matrix": s2_within.tolist() if s2_within is not None else None,
         }
-        spectra = [
-            ("s2", "posthead", s2_posthead_singular),
-            ("s2", "projected", s2_projected_singular),
-            ("s2", 'backbone', s2_backbone_singular),
-        ]
- 
+    if cross_matrix is not None:
+        cka_payload["cross"] = {
+            "s1_layers": cross_s1_layers,
+            "s2_layers": cross_s2_layers,
+            "matrix": cross_matrix.tolist(),
+        }
 
-        s1_posthead_singular = None
-        s1_projected_singular = None
-        s1_layers = None
-        s1_within = None
-        cross_s1_layers = None
-        cross_matrix = None
-        cross_s2_layers = None
+    spectra: List[Tuple[str, str, np.ndarray]] = []
+    if s1_posthead_singular is not None:
+        spectra.append(("s1", "posthead", s1_posthead_singular))
+    if s1_projected_singular is not None:
+        spectra.append(("s1", "projected", s1_projected_singular))
+    if s1_backbone_singular is not None:
+        spectra.append(("s1", "backbone", s1_backbone_singular))
+    if s2_posthead_singular is not None:
+        spectra.append(("s2", "posthead", s2_posthead_singular))
+    if s2_projected_singular is not None:
+        spectra.append(("s2", "projected", s2_projected_singular))
+    if s2_backbone_singular is not None:
+        spectra.append(("s2", "backbone", s2_backbone_singular))
 
-    if s2_posthead_singular.shape != s2_projected_singular.shape:
-            raise ValueError("S2 posthead and projected singular values have different dimensions")
-
+    if (
+        s2_posthead_singular is not None
+        and s2_projected_singular is not None
+        and s2_posthead_singular.shape != s2_projected_singular.shape
+    ):
+        raise ValueError("S2 posthead and projected singular values have different dimensions")
 
     with (output_dir / "cka.json").open("w", encoding="utf-8") as handle:
         json.dump(cka_payload, handle, indent=2)
@@ -887,7 +903,7 @@ def _run_embedding_diagnostics(
         or config.model_weights
         or config.model_type
     )
-    
+
     epoch_source = (
         (config.checkpoint.stem if config.checkpoint is not None else "")
         or (config.model_weights or "")
@@ -895,18 +911,20 @@ def _run_embedding_diagnostics(
     epoch_match = re.search(r"epoch[_=-]?(\d+)", epoch_source)
     epoch_value = int(epoch_match.group(1)) if epoch_match else 0
 
-    # if torchgeo then set epoch value to None
     if config.model_type == "torchgeo_resnet50":
         epoch_value = None
         label_source = config.model_weights
-        
 
-    sample_count = int(s2_bundle.raw.shape[0]) if s2_bundle.raw.ndim > 0 else 0
+    s2_raw = getattr(s2_bundle, "raw", None)
+    sample_count = int(s2_raw.shape[0]) if s2_raw is not None and s2_raw.ndim > 0 else 0
     diagnostic_ids = (
         [str(item) for item in sample_ids]
         if sample_ids is not None and len(sample_ids) > 0
         else [str(index) for index in range(sample_count)]
     )
+
+    def _as_array(values: Optional[np.ndarray]) -> np.ndarray:
+        return values if values is not None else np.empty(0, dtype=np.float32)
 
     epoch_diagnostics = EpochDiagnostics(
         label=label_source,
@@ -914,8 +932,8 @@ def _run_embedding_diagnostics(
         ids=diagnostic_ids,
         s1=s1_bundle,
         s2=s2_bundle,
-        s1_singular_values=s1_posthead_singular,
-        s2_singular_values=s2_posthead_singular,
+        s1_singular_values=_as_array(s1_posthead_singular),
+        s2_singular_values=_as_array(s2_posthead_singular),
         s1_layers=s1_layers,
         s2_layers=s2_layers,
         s1_within_cka=s1_within,
@@ -924,58 +942,71 @@ def _run_embedding_diagnostics(
         cross_s1_layers=cross_s1_layers,
         cross_s2_layers=cross_s2_layers,
     )
-    if s1_bundle is not None:
-        if config.model_type == "torchgeo_resnet50":
-            plot_epoch_diagnostics_s2only(epoch_diagnostics, output_dir, label='backbone_raw')
-        plot_epoch_diagnostics(epoch_diagnostics, output_dir, label='posthead_raw')
 
+    can_plot_full = (
+        s1_bundle is not None
+        and modality_tensors["s1"] is not None
+        and modality_tensors["s1"].get("posthead") is not None
+        and modality_tensors["s2"].get("posthead") is not None
+    )
+    can_plot_s2_only = (
+        s1_bundle is None and modality_tensors["s2"].get("posthead") is not None
+    )
 
-    else:
+    if can_plot_full:
         if config.model_type == "torchgeo_resnet50":
-            plot_epoch_diagnostics_s2only(epoch_diagnostics, output_dir, label='s2_backbone_raw')
+            plot_epoch_diagnostics_s2only(epoch_diagnostics, output_dir, label="backbone_raw")
+        plot_epoch_diagnostics(epoch_diagnostics, output_dir, label="posthead_raw")
+    elif can_plot_s2_only:
+        if config.model_type == "torchgeo_resnet50":
+            plot_epoch_diagnostics_s2only(epoch_diagnostics, output_dir, label="s2_backbone_raw")
         else:
-            raise ValueError("Model type not supported for S1 missing case")
+            logging.info("S1 modality unavailable; skipping S1/S2 joint diagnostics plot")
+    else:
+        logging.info("Skipping epoch diagnostics plots due to missing posthead/projected features")
 
-    
+    if not spectra:
+        logging.warning("No features available for singular value diagnostics")
+    else:
+        n = len(spectra)
+        ncols = min(3, n)
+        nrows = int(np.ceil(n / ncols)) if ncols > 0 else 1
+        fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(6 * ncols, 4 * nrows))
+        axes = np.atleast_1d(axes).ravel()
 
-    n=len(spectra)
-    ncols = min(3, n)  # up to 3 columns
-    nrows = int(np.ceil(n / ncols))
-    fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(6 * ncols, 4 * nrows))
-    axes = np.atleast_1d(axes).ravel()  # flatten in case of single subplot
+        for ax, (modality, feature_name, spectrum) in zip(axes, spectra):
+            ax.plot(np.arange(len(spectrum)), spectrum, marker=".")
+            ax.set_xlabel("Component")
+            ax.set_ylabel("Singular value")
+            ax.set_title(f"{modality.upper()} {feature_name}")
+            ax.grid(alpha=0.3)
+            ax.set_xlim(0, 100)
 
-    for ax, (modality, feature_name, spectrum) in zip(axes, spectra):
-        ax.plot(np.arange(len(spectrum)), spectrum, marker=".")
-        ax.set_xlabel("Component")
-        ax.set_ylabel("Singular value")
-        ax.set_title(f"{modality.upper()} {feature_name}")
-        ax.grid(alpha=0.3)
-        ax.set_xlim(0, 100)
+        for ax in axes[len(spectra):]:
+            ax.axis("off")
 
-    # Hide any unused subplots
-    for ax in axes[len(spectra):]:
-        ax.axis("off")
-
-    fig.suptitle("Singular Values per Modality / Feature", fontsize=14)
-    fig.tight_layout(rect=[0, 0, 1, 0.97])
-    fig.savefig(output_dir / "singular_values_all.png", dpi=200)
-    plt.close(fig)
-
+        fig.suptitle("Singular Values per Modality / Feature", fontsize=14)
+        fig.tight_layout(rect=[0, 0, 1, 0.97])
+        fig.savefig(output_dir / "singular_values_all.png", dpi=200)
+        plt.close(fig)
 
     rng = np.random.default_rng(config.random_seed)
 
     def _stack_features(feature_name: str) -> Tuple[np.ndarray, np.ndarray]:
-        if modality_tensors["s1"] is None:
-            s2_np = modality_tensors["s2"][feature_name].cpu().numpy()
-            labels = np.repeat("S2", len(s2_np))
-            features = s2_np
-        else:
-            s1_np = modality_tensors["s1"][feature_name].cpu().numpy()
-            s2_np = modality_tensors["s2"][feature_name].cpu().numpy()
-            #assert shapes match
-            assert s1_np.shape[0] == s2_np.shape[0], "S1 and S2 feature counts do not match for stacking shapes are {} and {}".format(s1_np.shape, s2_np.shape)
-            labels = np.concatenate((np.repeat("S1", len(s1_np)), np.repeat("S2", len(s2_np))))
-            features = np.concatenate((s1_np, s2_np), axis=0)
+        tensors: List[np.ndarray] = []
+        label_arrays: List[np.ndarray] = []
+        if modality_tensors["s1"] and modality_tensors["s1"].get(feature_name) is not None:
+            s1_np = modality_tensors["s1"][feature_name].cpu().numpy()  # type: ignore[index]
+            tensors.append(s1_np)
+            label_arrays.append(np.repeat("S1", len(s1_np)))
+        if modality_tensors["s2"] and modality_tensors["s2"].get(feature_name) is not None:
+            s2_np = modality_tensors["s2"][feature_name].cpu().numpy()  # type: ignore[index]
+            tensors.append(s2_np)
+            label_arrays.append(np.repeat("S2", len(s2_np)))
+        if not tensors:
+            return np.empty((0, 0), dtype=np.float32), np.empty(0, dtype="<U2")
+        features = np.concatenate(tensors, axis=0)
+        labels = np.concatenate(label_arrays, axis=0)
         return features, labels
 
     def _sample(features: np.ndarray, labels: np.ndarray, maximum: int) -> Tuple[np.ndarray, np.ndarray]:
@@ -984,7 +1015,7 @@ def _run_embedding_diagnostics(
         indices = rng.choice(len(features), size=maximum, replace=False)
         return features[indices], labels[indices]
 
-    for feature_name in ("posthead", "projected", 'backbone'):
+    for feature_name in ("posthead", "projected", "backbone"):
         combined, modality_labels = _stack_features(feature_name)
         if combined.size == 0:
             continue
@@ -1290,9 +1321,24 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
         )
 
         curvature = _extract_curvature_from_state(base_model, device=device, dtype=s1_proj_feats.dtype)
-        
+
+    retrieval_s1 = s1_ssl4eo
+    retrieval_s2 = s2_ssl4eo
+    if config.model_type == "croma":
+        logging.info("Using backbone embeddings for CROMA cross-modal retrieval")
+
+        def _use_backbone(bundle: Optional[ModalityEmbeddings]) -> Optional[ModalityEmbeddings]:
+            if bundle is None:
+                return None
+            if bundle.backbone is None:
+                raise ValueError("CROMA retrieval requires backbone embeddings")
+            return replace(bundle, projected=bundle.backbone)
+
+        retrieval_s1 = _use_backbone(s1_ssl4eo)
+        retrieval_s2 = _use_backbone(s2_ssl4eo)
+
     # compute retrieval metrics
-    retrieval_metrics = compute_cross_modal_retrieval(s1_ssl4eo, s2_ssl4eo, curvature=curvature)
+    retrieval_metrics = compute_cross_modal_retrieval(retrieval_s1, retrieval_s2, curvature=curvature)
     retrieval_path = output_dir / "ssl4eo_retrieval.json"
     retrieval_path.write_text(json.dumps(retrieval_metrics, indent=2, sort_keys=True))
     logging.info("SSL4EO cross-modal retrieval metrics: %s", retrieval_metrics)
