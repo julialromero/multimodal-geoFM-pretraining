@@ -280,8 +280,8 @@ class ModelEvalConfig:
 @dataclass
 class EmbeddingBundle:
     backbone: Optional[np.ndarray]
-    posthead: np.ndarray
-    projected: np.ndarray
+    posthead: Optional[np.ndarray]
+    projected: Optional[np.ndarray]
     labels: Optional[np.ndarray] = None
     ids: Optional[List[str]] = None
 
@@ -322,33 +322,27 @@ def _extract_embeddings(
         if isinstance(image, dict) and not getattr(adapter, "supports_multimodal_dict", False):
             image = image[next(iter(image))]
 
-        prepared_inputs = adapter.prepare_inputs(image, device=device, modality='s2')
-
-        with torch.no_grad():
-            backbone, post, projected = adapter.compute_embeddings(prepared_inputs)
-
-        if backbone is None:
-            raise RuntimeError("Backbone embeddings cannot be None")
         if modality.lower() == "s2" and isinstance(image, torch.Tensor):
             image = _align_s2_channels(image, expected_in_channels)
 
-            input_dtype = adapter.dtype_s2
-            if device.type != "cuda" and input_dtype in {torch.float16, torch.bfloat16}:
-                input_dtype = torch.float32
-            image = image.to(device=device, dtype=input_dtype, non_blocking=True)
+        prepared_inputs = adapter.prepare_inputs(image, device=device, modality=modality)
+
+        with torch.no_grad():
+            backbone, post, projected = adapter.compute_embeddings(
+                prepared_inputs, modality=modality
+            )
+
+        if backbone is None:
+            raise RuntimeError("Backbone embeddings cannot be None")
 
         backbone_np = _to_numpy(backbone)
         backbone_vectors.append(backbone_np)
         batch_size = backbone_np.shape[0]
 
-        if post is None:
-            posthead_vectors.append(np.zeros((batch_size, 0), dtype=np.float32))
-        else:
+        if post is not None:
             posthead_vectors.append(_to_numpy(post))
 
-        if projected is None:
-            projected_vectors.append(np.zeros((batch_size, 0), dtype=np.float32))
-        else:
+        if projected is not None:
             projected_vectors.append(_to_numpy(projected))
 
         if batch_labels is not None:
@@ -362,10 +356,17 @@ def _extract_embeddings(
     else:
         backbone_array = None
 
+    posthead_array = (
+        np.concatenate(posthead_vectors, axis=0) if posthead_vectors else None
+    )
+    projected_array = (
+        np.concatenate(projected_vectors, axis=0) if projected_vectors else None
+    )
+
     bundle = EmbeddingBundle(
         backbone=backbone_array,
-        posthead=np.concatenate(posthead_vectors, axis=0),
-        projected=np.concatenate(projected_vectors, axis=0),
+        posthead=posthead_array,
+        projected=projected_array,
         labels=np.asarray(labels, dtype=np.int64) if labels else None,
         ids=ids if ids else None,
     )
@@ -578,23 +579,29 @@ def _run_linear_probe(
 
     
     
-    if embeddings["train"].posthead.sum() == 0:
-        probe_specs = (
-            ("backbone", "backbone", False),
-            ("backbone", "backbone_batchnorm", True),
-        )
-        marker_map = {"backbone": "o"}
+    def _available_feature(name: str) -> bool:
+        feature = getattr(embeddings["train"], name)
+        return feature is not None and feature.size > 0
 
-    else:
-        probe_specs = (
-            ("backbone", "backbone", False),
-            ("posthead", "posthead", False),
-            ("projected", "projected", False),
-            ("backbone", "backbone_batchnorm", True),
-            ("posthead", "posthead_batchnorm", True),
-            ("projected", "projected_batchnorm", True),
+    probe_specs = []
+    marker_map = {"backbone": "o", "posthead": "^", "projected": "s"}
+
+    if _available_feature("backbone"):
+        probe_specs.extend(
+            [
+                ("backbone", "backbone", False),
+                ("backbone", "backbone_batchnorm", True),
+            ]
         )
-        marker_map = {"backbone": "o", "posthead": "^", "projected": "s"}
+
+    for name in ("posthead", "projected"):
+        if _available_feature(name):
+            probe_specs.append((name, name, False))
+            probe_specs.append((name, f"{name}_batchnorm", True))
+
+    if not probe_specs:
+        logging.warning("No embeddings available for linear probe; skipping")
+        return
 
 
     plots_dir = output_dir / "linear_probe"
@@ -774,8 +781,10 @@ def _export_neuco(
     output_dir.mkdir(parents=True, exist_ok=True)
     if bundle.backbone is not None:
         _write(bundle.backbone, "backbone")
-    _write(bundle.posthead, "posthead")
-    _write(bundle.projected, "projected")
+    if bundle.posthead is not None:
+        _write(bundle.posthead, "posthead")
+    if bundle.projected is not None:
+        _write(bundle.projected, "projected")
 
 
 def _run_embedding_diagnostics(
@@ -1135,6 +1144,19 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
     base_model = getattr(adapter, "base_model", adapter)
     is_lorentz = getattr(adapter, "is_lorentz", False)
 
+    def _model_label() -> str:
+        """Derive a label for organizing outputs per model run."""
+
+        if config.model_path:
+            return Path(config.model_path).stem
+        if config.model_weights:
+            return Path(config.model_weights).stem
+        if config.checkpoint:
+            return config.checkpoint.stem
+        return config.model_type
+
+    output_root = config.output_dir / _model_label()
+
     target_modality = config.evaluation_modality.lower()
     if target_modality not in {"s1", "s2"}:
         raise ValueError("evaluation_modality must be either 's1' or 's2'")
@@ -1153,7 +1175,7 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
         ", ".join(eurosat_bands),
     )
 
-    output_dir = config.output_dir
+    output_dir = output_root
     os.makedirs(output_dir, exist_ok=True)
 
     # check if dir exists
@@ -1322,7 +1344,13 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
             getattr(adapter, "supports_ssl4eo", True),
         )
     curvature = None
-    if is_lorentz and s1_ssl4eo is not None and s2_ssl4eo is not None:
+    if (
+        is_lorentz
+        and s1_ssl4eo is not None
+        and s1_ssl4eo.projected is not None
+        and s2_ssl4eo is not None
+        and s2_ssl4eo.projected is not None
+    ):
         if not isinstance(base_model, LorentzCIIP):
             raise TypeError("Expected LorentzCIIP model when is_lorentz is True")
         # use SSL4EO post-head projected features for hyperbolic visualisations

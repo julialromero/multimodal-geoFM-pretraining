@@ -69,8 +69,8 @@ class _LayerCaptureController:
 class ModalityEmbeddings:
     """Embeddings and layer activations for one modality."""
 
-    raw: torch.Tensor
-    projected: torch.Tensor
+    raw: Optional[torch.Tensor]
+    projected: Optional[torch.Tensor]
     layer_activations: Dict[str, torch.Tensor]
     # add optional field for backbone embeddings
     backbone: Optional[torch.Tensor] = None
@@ -572,6 +572,13 @@ def extract_embeddings_for_dataset(
     s2_backbone_vectors: List[torch.Tensor] = []
     sample_ids: List[str] = []
 
+    has_posthead = hasattr(model, "compute_posthead") and inspect.ismethod(
+        getattr(model, "compute_posthead")
+    )
+    has_projected = hasattr(model, "compute_projected") and inspect.ismethod(
+        getattr(model, "compute_projected")
+    )
+
     def _to_tensor(array) -> torch.Tensor:
         tensor = torch.as_tensor(array)
         if tensor.ndim == 3:
@@ -609,34 +616,34 @@ def extract_embeddings_for_dataset(
                     else contextlib.nullcontext()
                     )
 
+            s1_raw = None
+            s2_raw = None
+            s1_norm = None
+            s2_norm = None
+            s1_backbone = None
+            s2_backbone = None
+
             with ctx:
                 print('Extracting raw embeddings')
 
-                # icheck if model has attribute compute_posthead 
-                has_compute_posthead = hasattr(model, "compute_posthead") and inspect.ismethod(getattr(model, "compute_posthead"))
-                if has_compute_posthead:
+                if has_posthead:
                     if model.encoder_s1 is not None:
                         s1_raw = model.compute_posthead(s1_tensor, modality='s1')
 
                     s2_raw = model.compute_posthead(s2_tensor, modality='s2')
 
-                    assert s2_raw is not None, "S2 raw embeddings must not be None"
-                    assert (model.encoder_s1 is None) or (s1_raw.shape == s2_raw.shape), "S1 and S2 raw embeddings must have the same shape {s1_raw.shape} vs {s2_raw.shape}"
-
 
                 with capture_controller.suspend():
-                    
-                    has_compute_posthead = hasattr(model, "compute_projected") and inspect.ismethod(getattr(model, "compute_projected"))
-                    if has_compute_posthead:
+
+                    if has_projected:
 
                         print('Extracting norm embeddings')
                         if model.encoder_s1 is not None:
-                            s1_norm = model. compute_projected(s1_tensor, modality='s1')
+                            s1_norm = model.compute_projected(s1_tensor, modality='s1')
 
                         s2_norm = model.compute_projected(s2_tensor, modality='s2')
-                        assert s2_norm is not None, "S2 norm embeddings must not be None"
-                    
-                    # now extract backbone embeddings 
+
+                    # now extract backbone embeddings
                     print('Extracting backbone embeddings')
                     if model.encoder_s1 is not None:
                         s1_backbone = model.compute_backbone(
@@ -644,37 +651,41 @@ def extract_embeddings_for_dataset(
                         )
                     s2_backbone = model.compute_backbone(
                         s2_tensor.float(), modality='s2')
-
-                    assert s2_backbone is not None, "S2 norm embeddings must not be None"
                 
 
 
             for handle in handles:
                 handle.remove()
 
-            if model.encoder_s1 is not None:
-                if s1_raw.squeeze(0).dim() != 2 or s2_raw.squeeze(0).dim() != 2 or s1_norm.squeeze(0).dim() != 2 or s2_norm.squeeze(0).dim() != 2:
-                    raise ValueError("Extracted embeddings must be 2D after squeezing")
+            if s1_raw is not None:
+                if s1_raw.squeeze(0).dim() != 2:
+                    raise ValueError("Extracted S1 embeddings must be 2D after squeezing")
                 s1_vectors.append(s1_raw.squeeze(0).cpu().to(torch.float32))
-                s2_vectors.append(s2_raw.squeeze(0).cpu().to(torch.float32))
+            if s1_norm is not None:
+                if s1_norm.squeeze(0).dim() != 2:
+                    raise ValueError("Extracted normalized S1 embeddings must be 2D after squeezing")
                 s1_norm_vectors.append(s1_norm.squeeze(0).cpu().to(torch.float32))
-                s2_norm_vectors.append(s2_norm.squeeze(0).cpu().to(torch.float32))
-                s1_backbone_vectors.append(s1_backbone.squeeze(0).cpu().to(torch.float32))
-                s2_backbone_vectors.append(s2_backbone.squeeze(0).cpu().to(torch.float32))
 
-            else:
-                if s2_raw.squeeze(0).dim() != 2 or s2_norm.squeeze(0).dim() != 2:
-                    raise ValueError("Extracted embeddings must be 2D after squeezing")
+            if s2_raw is not None:
+                if s2_raw.squeeze(0).dim() != 2:
+                    raise ValueError("Extracted S2 embeddings must be 2D after squeezing")
                 s2_vectors.append(s2_raw.squeeze(0).cpu().to(torch.float32))
+            if s2_norm is not None:
+                if s2_norm.squeeze(0).dim() != 2:
+                    raise ValueError("Extracted normalized S2 embeddings must be 2D after squeezing")
                 s2_norm_vectors.append(s2_norm.squeeze(0).cpu().to(torch.float32))
+
+            if model.encoder_s1 is not None and s1_backbone is not None:
+                s1_backbone_vectors.append(s1_backbone.squeeze(0).cpu().to(torch.float32))
+            if s2_backbone is not None:
                 s2_backbone_vectors.append(s2_backbone.squeeze(0).cpu().to(torch.float32))
             sample_ids.append(str(uid))
 
     
 
-    def _stack(list_tensors: List[torch.Tensor]) -> torch.Tensor:
+    def _stack(list_tensors: List[torch.Tensor]) -> Optional[torch.Tensor]:
         if not list_tensors:
-            raise ValueError("No tensors to stack")
+            return None
         # if there are 2 dims, stack on first dim
         if list_tensors[0].dim() == 2:
             # if the first dim is 64
@@ -708,8 +719,8 @@ def _compute_epoch_diagnostics(
     s2: ModalityEmbeddings,
     ids: List[str],
 ) -> EpochDiagnostics:
-    s1_sv = compute_singular_values(s1.raw)
-    s2_sv = compute_singular_values(s2.raw)
+    s1_sv = compute_singular_values(s1.raw) if s1.raw is not None else np.empty(0, dtype=np.float32)
+    s2_sv = compute_singular_values(s2.raw) if s2.raw is not None else np.empty(0, dtype=np.float32)
     s1_layers, s1_cka = compute_within_encoder_cka(s1.layer_activations)
     s2_layers, s2_cka = compute_within_encoder_cka(s2.layer_activations)
     cross_s1, cross_s2, cross_cka = compute_cross_encoder_cka(s1.layer_activations, s2.layer_activations)
@@ -780,7 +791,9 @@ def plot_epoch_diagnostics_s2only(epoch_diag: EpochDiagnostics, output_dir: Path
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 
     # Embedding dim for S2
-    if epoch_diag.s2.raw.ndim == 2:
+    if epoch_diag.s2.raw is None:
+        embedding_dim_s2 = 0
+    elif epoch_diag.s2.raw.ndim == 2:
         embedding_dim_s2 = epoch_diag.s2.raw.shape[1]
     else:
         embedding_dim_s2 = epoch_diag.s2.raw.view(epoch_diag.s2.raw.shape[0], -1).shape[1]
@@ -832,8 +845,19 @@ def plot_epoch_diagnostics(epoch_diag: EpochDiagnostics, output_dir: Path, label
     output_dir.mkdir(parents=True, exist_ok=True)
     fig, axes = plt.subplots(2, 3, figsize=(18, 10))
 
-    embedding_dim_s1 = epoch_diag.s1.raw.shape[1] if epoch_diag.s1.raw.ndim == 2 else epoch_diag.s1.raw.view(epoch_diag.s1.raw.shape[0], -1).shape[1]
-    embedding_dim_s2 = epoch_diag.s2.raw.shape[1] if epoch_diag.s2.raw.ndim == 2 else epoch_diag.s2.raw.view(epoch_diag.s2.raw.shape[0], -1).shape[1]
+    if epoch_diag.s1.raw is None:
+        embedding_dim_s1 = 0
+    elif epoch_diag.s1.raw.ndim == 2:
+        embedding_dim_s1 = epoch_diag.s1.raw.shape[1]
+    else:
+        embedding_dim_s1 = epoch_diag.s1.raw.view(epoch_diag.s1.raw.shape[0], -1).shape[1]
+
+    if epoch_diag.s2.raw is None:
+        embedding_dim_s2 = 0
+    elif epoch_diag.s2.raw.ndim == 2:
+        embedding_dim_s2 = epoch_diag.s2.raw.shape[1]
+    else:
+        embedding_dim_s2 = epoch_diag.s2.raw.view(epoch_diag.s2.raw.shape[0], -1).shape[1]
 
 
     _plot_singular_values(axes[0, 0], epoch_diag.s1_singular_values, modality="S1", embedding_dim=embedding_dim_s1, label='posthead-raw')

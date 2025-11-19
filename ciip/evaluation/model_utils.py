@@ -76,12 +76,14 @@ class EvaluationAdapter(nn.Module):
     # ) -> torch.Tensor:  # pragma: no cover - interface
     #     raise NotImplementedError
 
-    def compute_embeddings(self, images: Any) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+    def compute_embeddings(
+        self, images: Any, modality: str = "s2"
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Return backbone, post-head and projected embeddings for ``images``."""
 
-        backbone = self.compute_backbone(images)
-        posthead = self.compute_posthead(images)
-        projected = self.compute_projected(images)
+        backbone = self.compute_backbone(images, modality=modality)
+        posthead = self.compute_posthead(images, modality=modality)
+        projected = self.compute_projected(images, modality=modality)
         return backbone, posthead, projected
 
     def prepare_inputs(self, batch: Any, *, device: torch.device, modality='s2') -> Any:
@@ -307,11 +309,15 @@ class TorchGeoResNetAdapter(EvaluationAdapter):
             features = features.flatten(start_dim=1)
         return features
 
-    # def compute_posthead(self, images: torch.Tensor, modality: str = "s2") -> torch.Tensor:
-    #     return None
+    def compute_posthead(
+        self, images: torch.Tensor, modality: str = "s2"
+    ) -> Optional[torch.Tensor]:
+        return None
 
-    # def compute_projected(self, images: torch.Tensor, modality: str = "s2") -> torch.Tensor:
-    #     return None
+    def compute_projected(
+        self, images: torch.Tensor, modality: str = "s2"
+    ) -> Optional[torch.Tensor]:
+        return None
 
     def encode_s2(  # pragma: no cover - compatibility wrapper
         self,
