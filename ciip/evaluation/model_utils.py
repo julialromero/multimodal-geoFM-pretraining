@@ -346,7 +346,7 @@ class TorchGeoResNetAdapter(EvaluationAdapter):
 class CromaEvaluationAdapter(EvaluationAdapter):
     """Adapter around the published CROMA base checkpoint."""
 
-    supports_ssl4eo = False
+    supports_ssl4eo = True
     supports_multimodal_dict = True
 
     def __init__(self, *, weights_path: Path, image_resolution: int = 120) -> None:
@@ -613,10 +613,15 @@ def build_model_from_checkpoint(checkpoint: Path) -> Tuple[nn.Module, bool]:
     print(f'Inferred embed_dim: {embed_dim}, pre_dim: {pre_dim}')
     is_lorentz = any(key.startswith("curv") or "lorentz" in key for key in cleaned)
 
+    print(f'Is Lorentz model: {is_lorentz}')
+
+
 
     # infer nummber of s2 bands in checkpoint
     s2_bands = _infer_s2_bands(cleaned)
     logging.info(f"Inferred S2 bands from checkpoint: {s2_bands}")
+
+    # quit()
 
 
     kwargs = dict(
@@ -640,7 +645,8 @@ def build_model_from_checkpoint(checkpoint: Path) -> Tuple[nn.Module, bool]:
     else:
         model = CIIP(**kwargs)
 
-    missing, unexpected = model.load_state_dict(cleaned, strict=False)
+    missing, unexpected = model.load_state_dict(cleaned, strict=True)
+    print(cleaned.keys())
     #
     if missing or unexpected:
         logging.warning("Checkpoint loaded with missing=%s, unexpected=%s", missing, unexpected)

@@ -309,22 +309,15 @@ def _extract_embeddings(
     
     for batch in tqdm(dataloader, desc="Extracting embeddings"):
         if isinstance(batch, dict):
-            # print(batch)
-            # print(batch)
-            # print(batch.keys())
-            # print(batch['data'])
-            # image = batch.get("image") # or 
-            # get image if key 'image' exists else 'data'
             image = batch.get("image") if "image" in batch else batch.get("data")
-            # image = batch.get("data")
             batch_labels = batch.get("label")
             batch_ids = batch.get("file_name")
         else:
             image, batch_labels = batch
             batch_ids = None
 
-        
-
+        print(f'Image type: {type(image)}')
+        print(f'Image shape: {image.shape if isinstance(image, torch.Tensor) else "N/A"}')
 
         if isinstance(image, dict) and not getattr(adapter, "supports_multimodal_dict", False):
             image = image[next(iter(image))]
@@ -778,7 +771,6 @@ def _run_embedding_diagnostics(
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # print(s1_bundle.layer_activations)
     # if empty s1_bundle riase error
     if s1_bundle is not None:
         if not s1_bundle.layer_activations or not s2_bundle.layer_activations:
@@ -841,10 +833,8 @@ def _run_embedding_diagnostics(
             ("s2", "projected", s2_projected_singular),
             ("s1", 'backbone', s1_backbone_singular),
             ("s2", 'backbone', s2_backbone_singular),
-
         ]
     
-
     else:
         if not s2_bundle.layer_activations:
             raise ValueError("Layer activations are empty, cannot compute CKA diagnostics")
@@ -858,7 +848,7 @@ def _run_embedding_diagnostics(
             "s1": None
         }
         
-        # print(modality_tensors["s2"]["layers"])
+
         assert modality_tensors["s2"]["layers"], "No S2 layer activations for CKA"
         s2_layers, s2_within = compute_within_encoder_cka(modality_tensors["s2"]["layers"])
         s2_posthead_singular = compute_singular_values(modality_tensors["s2"]["posthead"])
@@ -875,8 +865,7 @@ def _run_embedding_diagnostics(
             ("s2", "projected", s2_projected_singular),
             ("s2", 'backbone', s2_backbone_singular),
         ]
-        # assert that dims match
-        
+ 
 
         s1_posthead_singular = None
         s1_projected_singular = None
@@ -973,29 +962,7 @@ def _run_embedding_diagnostics(
     plt.close(fig)
 
 
-        # if spectrum.size == 0:
-        #     continue
-        # fig, ax = plt.subplots(figsize=(6, 4))
-        # ax.plot(np.arange(len(spectrum)), spectrum, marker=".")
-        # ax.set_xlabel("Component")
-        # ax.set_ylabel("Singular value")
-        # ax.set_title(f"Singular values ({modality.upper()} {feature_name})")
-        # ax.grid(alpha=0.3)
-        # ax.set_xlim(0,100)
-        # fig.tight_layout()
-        # fig.savefig(output_dir / f"singular_values_{modality}_{feature_name}.png", dpi=200)
-        # plt.close(fig)
-
     rng = np.random.default_rng(config.random_seed)
-
-    # def _stack_features(feature_name: str) -> Tuple[np.ndarray, np.ndarray]:
-
-    #     s1_np = modality_tensors["s1"][feature_name].cpu().numpy()
-    #     s2_np = modality_tensors["s2"][feature_name].cpu().numpy()
-    #     labels = np.concatenate((np.repeat("S1", len(s1_np)), np.repeat("S2", len(s2_np))))
-    #     features = np.concatenate((s1_np, s2_np), axis=0)
-    #     return features, labels
-
 
     def _stack_features(feature_name: str) -> Tuple[np.ndarray, np.ndarray]:
         if modality_tensors["s1"] is None:
@@ -1089,18 +1056,6 @@ def _run_hyperbolic_visualisations(
         out_path=output_dir / "angle_sim_hist.png",
     )
 
-    # # Lorentz “similarity” (hyperbolic analogue of cosine sim)
-    # lorentz_mat = context["pairwise_lorentz"]       # (N, N)
-    # pos_sim = context["positive_lorentz"].cpu().numpy()       # diag
-    # neg_sim = lorentz_mat[~torch.eye(lorentz_mat.size(0), dtype=torch.bool)].cpu().numpy()
-
-    # # # Or distances
-    # # dist_mat = ctx["pairwise_dist"]
-    # # pos_dist = ctx["positive_dist"]
-    # # neg_dist = dist_mat[~torch.eye(dist_mat.size(0), dtype=torch.bool)]
-
-    # plot_pos_neg_hist(pos_sim, neg_sim, use_distance=False, out_path= output_dir /"lorentz_sim_hist.png")
-
     plot_angle_aperture(positive_angles, aperture_s1, aperture_s2, output_dir / "angle_aperture.png")
     plot_radial_histogram(s1_distances, s2_distances, output_dir / "radial_histogram.png")
     plot_angular_pca(s1_dirs, s2_dirs, s1_distances, s2_distances, output_dir / "angular_pca.png")
@@ -1154,134 +1109,134 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
     os.makedirs(output_dir, exist_ok=True)
 
     # check if dir exists
-    # eurosat_output_dir = output_dir / "linear_probe"
-    # if True: #not eurosat_output_dir.exists():
-    #     eurosat_loaders = _build_eurosat_loaders(
-    #         config, bands=eurosat_bands, modality=target_modality
-    #     )
-    #     eurosat_embeddings: Dict[str, EmbeddingBundle] = {}
-    #     with _use_adapter_modality(adapter, target_modality):
-    #         for split, loader in eurosat_loaders.items():
-    #             eurosat_embeddings[split] = _extract_embeddings(
-    #                 adapter,
-    #                 loader,
-    #                 device=device,
-    #                 expected_in_channels=model_channels,
-    #                 modality=target_modality,
-    #             )
-    #     # _run_linear_probe(config, eurosat_embeddings, output_dir=output_dir, label="eurosat")
-    #     _plot_eurosat_tsne(
-    #         eurosat_embeddings["test"],
-    #         output_dir=eurosat_output_dir,
-    #         label="eurosat",
-    #         max_samples=config.tsne_samples,
-    #         seed=config.random_seed,
-    #         model_title=config.model_path,
-    #     )
+    eurosat_output_dir = output_dir / "linear_probe"
+    if True: #not eurosat_output_dir.exists():
+        eurosat_loaders = _build_eurosat_loaders(
+            config, bands=eurosat_bands, modality=target_modality
+        )
+        eurosat_embeddings: Dict[str, EmbeddingBundle] = {}
+        with _use_adapter_modality(adapter, target_modality):
+            for split, loader in eurosat_loaders.items():
+                eurosat_embeddings[split] = _extract_embeddings(
+                    adapter,
+                    loader,
+                    device=device,
+                    expected_in_channels=model_channels,
+                    modality=target_modality,
+                )
+        # _run_linear_probe(config, eurosat_embeddings, output_dir=output_dir, label="eurosat")
+        _plot_eurosat_tsne(
+            eurosat_embeddings["test"],
+            output_dir=eurosat_output_dir,
+            label="eurosat",
+            max_samples=config.tsne_samples,
+            seed=config.random_seed,
+            model_title=config.model_path,
+        )
 
 
-    # # first check if the output csvs already exist
-    # neuco_output_dir = output_dir / "neuco"
-    # neuco_modalities: List[str] = list(config.neuco_modalities)
-    # if target_modality == "s1":
-    #     neuco_modalities = ["s1"]
-    # elif not neuco_modalities:
-    #     neuco_modalities = ["s2l1c"]
+    # first check if the output csvs already exist
+    neuco_output_dir = output_dir / "neuco"
+    neuco_modalities: List[str] = list(config.neuco_modalities)
+    if target_modality == "s1":
+        neuco_modalities = ["s1"]
+    elif not neuco_modalities:
+        neuco_modalities = ["s2l1c"]
 
-    # if len(neuco_modalities) > 1:
-    #     print('Only useing 1st modality for neuco benchmark')
-    # modality = neuco_modalities[0]
-    # csv_out_backbone = neuco_output_dir / "neuco_export" / f"neuco_{modality}_backbone.csv"
-    # csv_out_posthead = neuco_output_dir / "neuco_export" / f"neuco_{modality}_posthead.csv"
-    # csv_out_projected = neuco_output_dir / "neuco_export" /f"neuco_{modality}_projected.csv"
+    if len(neuco_modalities) > 1:
+        print('Only useing 1st modality for neuco benchmark')
+    modality = neuco_modalities[0]
+    csv_out_backbone = neuco_output_dir / "neuco_export" / f"neuco_{modality}_backbone.csv"
+    csv_out_posthead = neuco_output_dir / "neuco_export" / f"neuco_{modality}_posthead.csv"
+    csv_out_projected = neuco_output_dir / "neuco_export" /f"neuco_{modality}_projected.csv"
     
-    # if csv_out_backbone.exists() and csv_out_posthead.exists() and csv_out_projected.exists():
-    #     print("NeuCo embeddings already exist, skipping extraction.")
+    if csv_out_backbone.exists() and csv_out_posthead.exists() and csv_out_projected.exists():
+        print("NeuCo embeddings already exist, skipping extraction.")
     
  
-    # # else:
-    # if True:
-    #     print("csvs at {}, {}, {} do not exist, extracting NeuCo embeddings.".format(csv_out_backbone, csv_out_posthead, csv_out_projected))
-    #     neuco_output_dir.mkdir(parents=True, exist_ok=True)
-    #     neuco_loader = _build_neuco_loader(
-    #         config, modalities=neuco_modalities, modality=target_modality
-    #     )
-    #     with _use_adapter_modality(adapter, target_modality):
-    #         neuco_bundle = _extract_embeddings(
-    #             adapter,
-    #             neuco_loader,
-    #             device=device,
-    #             require_ids=True,
-    #             expected_in_channels=model_channels,
-    #             modality=target_modality,
-    #         )
+    # else:
+    if True:
+        print("csvs at {}, {}, {} do not exist, extracting NeuCo embeddings.".format(csv_out_backbone, csv_out_posthead, csv_out_projected))
+        neuco_output_dir.mkdir(parents=True, exist_ok=True)
+        neuco_loader = _build_neuco_loader(
+            config, modalities=neuco_modalities, modality=target_modality
+        )
+        with _use_adapter_modality(adapter, target_modality):
+            neuco_bundle = _extract_embeddings(
+                adapter,
+                neuco_loader,
+                device=device,
+                require_ids=True,
+                expected_in_channels=model_channels,
+                modality=target_modality,
+            )
     
-    #     _export_neuco(neuco_bundle, neuco_output_dir / "neuco_export", label=modality)
-    #     print('Saved NeuCo embeddings to ', neuco_output_dir / "neuco_export")
+        _export_neuco(neuco_bundle, neuco_output_dir / "neuco_export", label=modality)
+        print('Saved NeuCo embeddings to ', neuco_output_dir / "neuco_export")
 
     
-#     # launch eval
-#     import subprocess
-#     # get size of embedings
-#     try:
-#         embedding_dim_backbone = str(neuco_bundle.backbone.shape[1])
-#         embedding_dim_posthead = str(neuco_bundle.posthead.shape[1])
-#     except:
-#         embedding_dim_backbone = "2048"  # default to 512 if extraction failed
-#         embedding_dim_posthead = "1024"
-#     # if model type ois torchgeo resnet
-#     if config.model_type == "torchgeo_resnet50":
-#         embedding_dim_backbone = "2048"
-#         embedding_dim_posthead = "2048"
+    # launch eval
+    import subprocess
+    # get size of embedings
+    try:
+        embedding_dim_backbone = str(neuco_bundle.backbone.shape[1])
+        embedding_dim_posthead = str(neuco_bundle.posthead.shape[1])
+    except:
+        embedding_dim_backbone = "2048"  # default to 512 if extraction failed
+        embedding_dim_posthead = "1024"
+    # if model type ois torchgeo resnet
+    if config.model_type == "torchgeo_resnet50":
+        embedding_dim_backbone = "2048"
+        embedding_dim_posthead = "2048"
 
-#     print(f"NeuCo embedding dimension: {embedding_dim_backbone}")
+    print(f"NeuCo embedding dimension: {embedding_dim_backbone}")
 
 
-#     cmd = [
-#         "python", "/local/ms-data/NeuCo-Bench/benchmark/main.py",
-#         "--annotation_path", "/local/ms-data/SSL4EO-S12-downstream/labels",
-#         "--output_dir", neuco_output_dir,
-#         "--config", "/local/ms-data/NeuCo-Bench/benchmark/config.yaml",
-#         "--method_name", "backbone",
-#         "--phase", "testing",
-#         "--submission_file", csv_out_backbone,
-#         "--embedding_dim", embedding_dim_backbone
-#     ]
+    cmd = [
+        "python", "/local/ms-data/NeuCo-Bench/benchmark/main.py",
+        "--annotation_path", "/local/ms-data/SSL4EO-S12-downstream/labels",
+        "--output_dir", neuco_output_dir,
+        "--config", "/local/ms-data/NeuCo-Bench/benchmark/config.yaml",
+        "--method_name", "backbone",
+        "--phase", "testing",
+        "--submission_file", csv_out_backbone,
+        "--embedding_dim", embedding_dim_backbone
+    ]
 
-# # python /local/ms-data/NeuCo-Bench/benchmark/main.py \
-# #   --annotation_path /local/ms-data/SSL4EO-S12-downstream/labels \
-# #   --output_dir /home/juro4948/ciip/diagnostics/unified_eval/curv_init_1/neuco_export \
-# #   --config /local/ms-data/NeuCo-Bench/benchmark/config.yaml \
-# #   --method_name backbone \
-# #   --phase testing \
-# #   --submission_file /home/juro4948/ciip/diagnostics/unified_eval/curv_init_1/neuco_export/neuco_s2l1c_backbone.csv
+# python /local/ms-data/NeuCo-Bench/benchmark/main.py \
+#   --annotation_path /local/ms-data/SSL4EO-S12-downstream/labels \
+#   --output_dir /home/juro4948/ciip/diagnostics/unified_eval/curv_init_1/neuco_export \
+#   --config /local/ms-data/NeuCo-Bench/benchmark/config.yaml \
+#   --method_name backbone \
+#   --phase testing \
+#   --submission_file /home/juro4948/ciip/diagnostics/unified_eval/curv_init_1/neuco_export/neuco_s2l1c_backbone.csv
     
-#     cmd1 = [
-#         "python", "/local/ms-data/NeuCo-Bench/benchmark/main.py",
-#         "--annotation_path", "/local/ms-data/SSL4EO-S12-downstream/labels",
-#         "--output_dir", neuco_output_dir,
-#         "--config", "/local/ms-data/NeuCo-Bench/benchmark/config.yaml",
-#         "--method_name", "posthead",
-#         "--phase", "testing",
-#         "--submission_file", csv_out_posthead,
-#         "--embedding_dim", embedding_dim_posthead
-#     ]
-#     cmd2 = [
-#         "python", "/local/ms-data/NeuCo-Bench/benchmark/main.py",
-#         "--annotation_path", "/local/ms-data/SSL4EO-S12-downstream/labels",
-#         "--output_dir", neuco_output_dir,
-#         "--config", "/local/ms-data/NeuCo-Bench/benchmark/config.yaml",
-#         "--method_name", "projected",
-#         "--phase", "testing",
-#         "--submission_file", csv_out_projected,
-#         "--embedding_dim", embedding_dim_posthead
-#     ]
-#     env = os.environ.copy()
-#     env["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
-#     subprocess.run(cmd, check=True, env=env)
-#     if config.model_type != "torchgeo_resnet50":
-#         subprocess.run(cmd1, check=True, env=env)
-#         subprocess.run(cmd2, check=True, env=env)
+    cmd1 = [
+        "python", "/local/ms-data/NeuCo-Bench/benchmark/main.py",
+        "--annotation_path", "/local/ms-data/SSL4EO-S12-downstream/labels",
+        "--output_dir", neuco_output_dir,
+        "--config", "/local/ms-data/NeuCo-Bench/benchmark/config.yaml",
+        "--method_name", "posthead",
+        "--phase", "testing",
+        "--submission_file", csv_out_posthead,
+        "--embedding_dim", embedding_dim_posthead
+    ]
+    cmd2 = [
+        "python", "/local/ms-data/NeuCo-Bench/benchmark/main.py",
+        "--annotation_path", "/local/ms-data/SSL4EO-S12-downstream/labels",
+        "--output_dir", neuco_output_dir,
+        "--config", "/local/ms-data/NeuCo-Bench/benchmark/config.yaml",
+        "--method_name", "projected",
+        "--phase", "testing",
+        "--submission_file", csv_out_projected,
+        "--embedding_dim", embedding_dim_posthead
+    ]
+    env = os.environ.copy()
+    env["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+    subprocess.run(cmd, check=True, env=env)
+    if config.model_type != "torchgeo_resnet50":
+        subprocess.run(cmd1, check=True, env=env)
+        subprocess.run(cmd2, check=True, env=env)
 
 
 
@@ -1359,7 +1314,7 @@ if __name__ == "__main__":
     )
     # parser.add_argument("--checkpoint", type=Path, help="Checkpoint path for CIIP/Lorentz models.")
     parser.add_argument("--model-weights", choices=["dino", "moco"], help="TorchGeo ResNet50 weight selection.")
-    parser.add_argument("--croma-weights", type=Path, help="Path to the pretrained CROMA weights.")
+    parser.add_argument("--croma-weights", type=Path,  help="Path to the pretrained CROMA weights.") # '/home/juro4948/ciip/comparison/CROMA-main/CROMA_base.pt'
     parser.add_argument("--croma-image-resolution", type=int, default=120, help="Input resolution expected by the CROMA model.")
     parser.add_argument("--model-in-channels", type=int, default=12, help="Number of input channels for TorchGeo ResNet models.")
     parser.add_argument("--model-path", type=str, help="Experiment path identifier for the model.")
@@ -1372,7 +1327,7 @@ if __name__ == "__main__":
     parser.add_argument("--pca-samples", type=int, default=5000, help="Samples used for PCA visualisations.")
     parser.add_argument("--ssl4eo-subset-size", type=int, default=50, help="Subset size for SSL4EO embedding extraction.")
     parser.add_argument("--ssl4eo-subset-seed", type=int, default=0, help="Subset seed for SSL4EO sampling.")
-    parser.add_argument("--neuco-modalities", nargs="*", default=["s2l1c"], help="NeuCo modalities to export.")
+    parser.add_argument("--neuco-modalities", nargs="*", default=["s2l2a"], help="NeuCo modalities to export.")
     parser.add_argument("--neuco-seasons", type=int, default=4, help="Number of seasons for NeuCo extraction.") # i believe these are averaged
     parser.add_argument(
         "--evaluation-modality",
@@ -1396,28 +1351,33 @@ if __name__ == "__main__":
     # '2025_11_12-12_28_55-model_resnet50-lr_0.001-b_2-j_6-p_amp': 'curv_init_0.1', epochs ..., increased lr for curvature param
 
     # if model_path arg is empty, set default
-    if args.model_path is None:
-        args.model_path =  '2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp'
+    if args.model_path is None and args.croma_weights is None:
+        args.model_path = '2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp'
+        # '2025_11_17-12_26_37-model_resnet50-lr_0.001-b_2-j_6-p_amp'
+        # '2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp'
         # '2025_11_18-16_14_01-model_resnet50-lr_0.001-b_2-j_6-p_amp'
         # '2025_11_17-12_26_37-model_resnet50-lr_0.001-b_2-j_6-p_amp' # not working??
         # '2025_11_05-21_04_44-model_resnet50-lr_0.001-b_128-j_6-p_amp/'
         # '2025_11_14-10_56_41-model_resnet50-lr_0.001-b_2-j_6-p_amp'
-    args.model_root = '/local/ms-data/SSL4EO/model/'
-    # '2025_11_05-21_04_44-model_resnet50-lr_0.001-b_128-j_6-p_amp/'
-    # '/local/ms-data/SSL4EO/model/2025_11_13-08_33_13-model_resnet50-lr_0.001-b_2-j_6-p_amp/checkpoints/epoch_10.pt'
-    # 
-    
-    # '2025_11_05-21_04_44-model_resnet50-lr_0.001-b_128-j_6-p_amp/'
-    # '2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp'
-    # '2025_11_07-09_24_18-model_resnet50-lr_0.001-b_128-j_6-p_amp'
-    # '2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp'
-    checkpoint_root = Path(args.model_root) / args.model_path / "checkpoints"
-    # args.output_dir = Path("diagnostics/output")
+        args.model_root = '/local/ms-data/SSL4EO/model/'
+        # '2025_11_05-21_04_44-model_resnet50-lr_0.001-b_128-j_6-p_amp/'
+        # '/local/ms-data/SSL4EO/model/2025_11_13-08_33_13-model_resnet50-lr_0.001-b_2-j_6-p_amp/checkpoints/epoch_10.pt'
+        # 
+        
+        # '2025_11_05-21_04_44-model_resnet50-lr_0.001-b_128-j_6-p_amp/'
+        # '2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp'
+        # '2025_11_07-09_24_18-model_resnet50-lr_0.001-b_128-j_6-p_amp'
+        # '2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp'
+        checkpoint_root = Path(args.model_root) / args.model_path / "checkpoints"
+        # args.output_dir = Path("diagnostics/output")
 
-    args.checkpoint=Path(f"{checkpoint_root}/epoch_10.pt")
+        args.checkpoint=Path(f"{checkpoint_root}/epoch_10.pt")
+
+    else:
+        args.checkpoint = None
     args.eurosat_root=Path("/local/ms-data/EuroSAT/")
     args.neuco_root=Path("/local/ms-data/SSL4EO-S12-downstream/data")
-    args.output_dir=Path("/home/juro4948/ciip/diagnostics/unified_eval/vanilla-take2_epoch10/") #dino_13bands/") #curv_init_1_epoch10/ curv_init_1
+    args.output_dir=Path("/home/juro4948/ciip/diagnostics/unified_eval/vanillaciip-epoch10/") #dino_13bands/") #curv_init_1_epoch10/ curv_init_1
     args.ssl4eo_root=Path("/local/ms-data/SSL4EOv1.1/train")
 
 

@@ -549,64 +549,9 @@ def _register_layer_hooks(
 
 
 def _encoder_accepts_lorentz(method) -> bool:
-    # print(type(method))
-    inst = getattr(method, "__self__", None)   # -> CiipEvaluationAdapter instance
-    # print is lorent
-    # print(f'is lorentz={getattr(inst, "is_lorentz", False)}')
+    inst = getattr(method, "__self__", None)  
     return getattr(inst, "is_lorentz", False)
     
-
-
-
-    # # if model class of method is LorentzCIIP, return true
-    # model_class = method.__self__.__class__.__name__
-    # print("Encoder model class:", model_class)
-    # return model_class.lower() == "lorentzciip"
-
-
-def _run_encoder_method(
-    method,
-    tensor: torch.Tensor,
-    *,
-    project_hyperbolic: Optional[bool] = None,
-    normalize: Optional[bool] = None,
-    post_head: bool = True,
-) -> torch.Tensor:
-    accepts_lorentz = _encoder_accepts_lorentz(method)
-    print(f'Encoder accepts lorentz: {accepts_lorentz}')
-    
-
-    # squeeze tensor if it has 5 dim
-    tensor = tensor.squeeze(0) if tensor.dim() == 5 else tensor
-
-    if accepts_lorentz and post_head:
-        # normalize is not used in LorentzCIIP
-        print(f"Running encoder with lorentz={project_hyperbolic}")
-        return method(tensor, lorentz=project_hyperbolic, normalize=normalize, post_head=post_head)
-    
-    # if method does not have noramlize or lorentz arguments, just call it with tensor
-    sig = inspect.signature(method)
-    # print(sig.parameters)
-    if "normalize" not in sig.parameters:
-        method.fc = nn.Identity()
-        print('Dropping final fc layer for encoder method without normalize argument')
-
-        # # drop fc layer if exists
-        # # todo: modify this so it is temporary only within this scope
-        # method_fc = getattr(method.__self__, "fc", None)
-        # if method_fc is not None and isinstance(method_fc, nn.Identity):
-        #     print("Dropping final fc layer for encoder method")
-        #     setattr(method.__self__, "fc", nn.Identity())
-
-            
-
-        t = method(tensor)
-        print("Embedding shape from encoder backbone:", t.shape)
-        assert t.shape[1] == 2048, f"Unexpected embedding shape from encoder: {t.shape}, backbone should be 2048"
-        return method(tensor)
-    
-    # return method(tensor, lorentz=project_hyperbolic, normalize=normalize)
-    return method(tensor, normalize=normalize, post_head=post_head)
 
 
 def extract_embeddings_for_dataset(
@@ -658,118 +603,43 @@ def extract_embeddings_for_dataset(
             # print shapes
             print(f"Processing sample UID={uid}: S1 shape={s1_tensor.shape}, S2 shape={s2_tensor.shape}")
 
-            with autocast():
+            ctx = (
+                    torch.cuda.amp.autocast(enabled=False)
+                    if s2_tensor.is_cuda
+                    else contextlib.nullcontext()
+                    )
+
+            with ctx:
                 print('Extractoring raw embeddings')
                 if model.encoder_s1 is not None:
                     s1_raw = model.compute_posthead(s1_tensor, modality='s1')
 
                 s2_raw = model.compute_posthead(s2_tensor, modality='s2')
-                    # s1_raw = _run_encoder_method(
-                    #     model.encode_s1,
-                    #     s1_tensor,
-                    #     project_hyperbolic=False,
-                    #     normalize=False,
-                    #     post_head=True
-                    # )
-                
-                # s2_raw = _run_encoder_method(
-                #     model.encode_s2,
-                #     s2_tensor,
-                #     project_hyperbolic=False,
-                #     normalize=False,
-                #     post_head=True
-                #     )
+
                 assert s2_raw is not None, "S2 raw embeddings must not be None"
                 assert (model.encoder_s1 is None) or (s1_raw.shape == s2_raw.shape), "S1 and S2 raw embeddings must have the same shape {s1_raw.shape} vs {s2_raw.shape}"
 
 
                 with capture_controller.suspend():
-                
-                # if lorentzciip model, project hyperbolic is true
+            
                     print('Extracting norm embeddings')
-                    # if _encoder_accepts_lorentz(model.encode_s2):
                     if model.encoder_s1 is not None:
                         s1_norm = model. compute_projected(s1_tensor, modality='s1')
 
                     s2_norm = model.compute_projected(s2_tensor, modality='s2')
-                        #     s1_norm = _run_encoder_method(
-                        #         model.encode_s1,
-                        #         s1_tensor,
-                        #         project_hyperbolic=True,
-                        #         normalize=False, # not used in lorentzciip
-                        #         post_head=True
-                        #     # post_head=True
-                        #     )
-                        # # print("S1 norm shape:", s1_norm.shape)
-                        # s2_norm = _run_encoder_method(
-                        #         model.encode_s2,
-                        #         s2_tensor,
-                        #         project_hyperbolic=True,
-                        #         normalize=False, # not used in lorentzciip
-                        #         post_head=True
-                        #     )
-                        # print("S2 norm shape:", s2_norm.shape)
                     assert s2_norm is not None, "S2 norm embeddings must not be None"
-                    # # else take L2 norm
-                    # else:
-                    #     if model.encoder_s1 is not None:
-                        #     s1_norm = _run_encoder_method(
-                        #         model.encode_s1,
-                        #         s1_tensor,
-                        #         project_hyperbolic=False,
-                        #         normalize=True,
-                        #         post_head=True
-                        #     )
-                        # s2_norm = _run_encoder_method(
-                        #     model.encode_s2,
-                        #     s2_tensor,
-                        #     project_hyperbolic=False,
-                        #     normalize=True,
-                        #     post_head=True
-                        # )
-                        # assert s2_norm is not None, "S2 norm embeddings must not be None"
-
-                    # print("S2 norm shape:", s2_norm.shape)
                     
-                
                     # now extract backbone embeddings 
                     print('Extracting backbone embeddings')
-
                     if model.encoder_s1 is not None:
-                        s1_backbone = model.compute_backbone(s1_tensor, modality='s1')
-                    s2_backbone = model.compute_backbone(s2_tensor, modality='s2')
-                    #         s1_backbone = _run_encoder_method(
-                    #             model.encoder_s1,
-                    #             s1_tensor,
-                    #             project_hyperbolic=False,
-                    #             normalize=False,
-                    #             post_head=False
+                        s1_backbone = model.compute_backbone(
+                            s1_tensor.float(), modality='s1'
+                        )
+                    s2_backbone = model.compute_backbone(
+                        s2_tensor.float(), modality='s2')
 
-                    #         )
-                    # s2_backbone = _run_encoder_method(
-                    #     model.encoder_s2,
-                    #     s2_tensor,
-                    #     project_hyperbolic=False,
-                    #     normalize=False,
-                    #     post_head=False
-                    # )
                     assert s2_backbone is not None, "S2 norm embeddings must not be None"
-                    # assert thatt there are no non finite values in s2_backbone
-                    # print(s2_backbone)
-                    # count the number of non finite values in s2_backbone
-                    num_non_finite = torch.sum(~torch.isfinite(s2_backbone)).item()
-                    print(f"Number of non-finite values in S2 backbone embeddings: {num_non_finite}")
-                    # how many rows in s2_backbone have non finite values
-                    num_rows_non_finite = torch.sum(~torch.isfinite(s2_backbone).any(dim=1)).item()
-                    print(f"Number of rows with non-finite values in S2 backbone embeddings: {num_rows_non_finite}")
-                    # total number of rows
-                    print(f"shape of S2 backbone embeddings: {s2_backbone.shape}")
-                    assert torch.isfinite(s2_backbone).all(), "S2 backbone embeddings contain non-finite values"
-
-                    # print("S2 backbone shape:", s2_backbone.shape)
-                    # print("S1 backbone shape:", s1_backbone.shape)
-                    # raise NotImplementedError("Stop here for debugging")
-
+                
 
 
             for handle in handles:
