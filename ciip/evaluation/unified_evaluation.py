@@ -1144,6 +1144,19 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
     base_model = getattr(adapter, "base_model", adapter)
     is_lorentz = getattr(adapter, "is_lorentz", False)
 
+    def _model_label() -> str:
+        """Derive a label for organizing outputs per model run."""
+
+        if config.model_path:
+            return Path(config.model_path).stem
+        if config.model_weights:
+            return Path(config.model_weights).stem
+        if config.checkpoint:
+            return config.checkpoint.stem
+        return config.model_type
+
+    output_root = config.output_dir / _model_label()
+
     target_modality = config.evaluation_modality.lower()
     if target_modality not in {"s1", "s2"}:
         raise ValueError("evaluation_modality must be either 's1' or 's2'")
@@ -1162,7 +1175,7 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
         ", ".join(eurosat_bands),
     )
 
-    output_dir = config.output_dir
+    output_dir = output_root
     os.makedirs(output_dir, exist_ok=True)
 
     # check if dir exists
