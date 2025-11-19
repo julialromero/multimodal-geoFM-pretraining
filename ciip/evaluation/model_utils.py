@@ -147,34 +147,14 @@ class CiipEvaluationAdapter(EvaluationAdapter):
             return self.encoder_s1, self.dtype_s1, "s1"
         raise RuntimeError("CIIP adapter does not expose any encoders")
 
-    def _encode_projected(self, images: torch.Tensor, *, project: bool) -> torch.Tensor:
-        _, dtype, stream = self._default_stream()
-        tensor = images.type(dtype)
-
-        if stream == "s1":
-            encode_fn = self.base_model.encode_s1
+    def compute_backbone(self, images: torch.Tensor, modality='s2') -> torch.Tensor:
+        # encoder, dtype, _ = self._default_stream()
+        if modality == "s1":
+            encoder = self.encoder_s1
+            dtype = self.dtype_s1
         else:
-            encode_fn = self.base_model.encode_s2
-
-        if self.is_lorentz:
-            return encode_fn(tensor, lorentz=project, normalize=False)
-
-        if project:
-            return encode_fn(tensor, normalize=True)
-        return encode_fn(tensor, normalize=False)
-
-    def compute_backbone(self, images: torch.Tensor) -> torch.Tensor:
-        print("Using compute_backbone")
-        encoder, dtype, _ = self._default_stream()
-        #print encoder
-        # print(encoder)
-        # if fc layer, replace with identity
-        # if hasattr(encoder, 'fc'):
-        #     encoder.fc = nn.Identity()
-        # # same with proj layer
-        # if hasattr(encoder, 'proj'):
-        #     encoder.proj = nn.Identity()
-        #      features = encoder(images.type(dtype))
+            encoder = self.encoder_s2
+            dtype = self.dtype_s2
 
         replaced_modules = []
         for attr in ("fc", "proj"):
@@ -182,40 +162,56 @@ class CiipEvaluationAdapter(EvaluationAdapter):
             if isinstance(module, nn.Module):
                 replaced_modules.append((attr, module))
                 setattr(encoder, attr, nn.Identity())
-
         try:
             features = encoder(images.type(dtype))
         finally:
             for attr, module in replaced_modules:
                 setattr(encoder, attr, module)
 
-
-
-        
         if isinstance(features, (tuple, list)):
             features = features[0]
         if features.ndim > 2:
             features = features.flatten(start_dim=1)
-        # print 
-        # print("Features shape:", features.shape)
-        # raise NotImplementedError("compute_backbone is not implemented yet")
         return features
 
-    def compute_posthead(self, images: torch.Tensor) -> torch.Tensor:
-        post = self._encode_projected(images, project=False)
-        if isinstance(post, (tuple, list)):
-            post = post[0]
-        if post.ndim > 2:
-            post = post.flatten(start_dim=1)
-        return post
+    def compute_posthead(self, images: torch.Tensor, modality='s2') -> torch.Tensor:
+        _, dtype, stream = self._default_stream()
+        tensor = images.type(self.dtype_s2 if modality == "s2" else self.dtype_s1)
 
-    def compute_projected(self, images: torch.Tensor) -> torch.Tensor:
-        projected = self._encode_projected(images, project=True)
-        if isinstance(projected, (tuple, list)):
-            projected = projected[0]
-        if projected.ndim > 2:
-            projected = projected.flatten(start_dim=1)
-        return projected
+        if modality == "s1":
+            encode_fn = self.base_model.encode_s1
+        else:
+            encode_fn = self.base_model.encode_s2
+
+        if self.is_lorentz:
+            return encode_fn(tensor, normalize=False, lorentz=False)
+        return encode_fn(tensor, normalize=False)
+    
+        # post = self._encode_projected(images, projected=Fakse)
+        # if isinstance(post, (tuple, list)):
+        #     post = post[0]
+        # if post.ndim > 2:
+        #     post = post.flatten(start_dim=1)
+        # return post
+
+    def compute_projected(self, images: torch.Tensor, modality='s2') -> torch.Tensor:
+        # _, dtype, stream = self._default_stream()
+        tensor = images.type(self.dtype_s2 if modality == "s2" else self.dtype_s1)
+
+        if modality == "s1":
+            encode_fn = self.base_model.encode_s1
+        else:
+            encode_fn = self.base_model.encode_s2
+
+        if self.is_lorentz:
+            return encode_fn(tensor, normalize=True, lorentz=True)
+        return encode_fn(tensor, normalize=True)
+        # projected = self._encode_projected(images, project=True)
+        # if isinstance(projected, (tuple, list)):
+        #     projected = projected[0]
+        # if projected.ndim > 2:
+        #     projected = projected.flatten(start_dim=1)
+        # return projected
 
     # Expose multimodal helpers for downstream diagnostics.
     def encode_s1(self, *args, **kwargs):  # pragma: no cover - passthrough
@@ -625,7 +621,7 @@ def build_model_from_checkpoint(checkpoint: Path) -> Tuple[nn.Module, bool]:
 
     kwargs = dict(
         embed_dim=embed_dim,
-        pre_projection_dim=pre_dim,
+        # pre_projection_dim=pre_dim,
         s1_resolution=224,
         s1_layers=(3, 4, 6, 3),
         s1_width=32,
@@ -644,7 +640,8 @@ def build_model_from_checkpoint(checkpoint: Path) -> Tuple[nn.Module, bool]:
     else:
         model = CIIP(**kwargs)
 
-    missing, unexpected = model.load_state_dict(cleaned, strict=True)
+    missing, unexpected = model.load_state_dict(cleaned, strict=False)
+    #
     if missing or unexpected:
         logging.warning("Checkpoint loaded with missing=%s, unexpected=%s", missing, unexpected)
         raise RuntimeError(

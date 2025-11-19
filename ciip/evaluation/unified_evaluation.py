@@ -42,6 +42,7 @@ from torchvision import transforms
 from ciip.eval_utils import CustomTransform
 from ciip.evaluation.model_utils import EvaluationAdapter, build_evaluation_adapter
 from ciip.model_ciip import LorentzCIIP
+from ciip.open_clip_train import data
 import os
 
 ## EUROSAT STANDARDIZATION VALUES
@@ -478,12 +479,14 @@ def _build_ssl4eo_dataset(config: ModelEvalConfig) -> torch.utils.data.Dataset:
         raise RuntimeError("SSL4EO dataset root must be provided for diagnostics")
 
     ensure_hydra_original_cwd()
+
     dataset = SSL4EODataset(
         root=str(config.ssl4eo_root.expanduser()),
         # s2_tier=str(config.ssl4eo_s2_tier),
         # s2_bands=list(config.ssl4eo_s2_bands),
-        transforms=None,
-        target_image_dimension=(config.ssl4eo_image_dimension, config.ssl4eo_image_dimension),
+        transforms={'s1': data.get_transform('s1', is_train=False), 's2': data.get_transform(config.ssl4eo_s2_tier, is_train=False)},
+        is_train=False,
+        
         s2_tier=config.neuco_modalities[0],  # use first modality as tier
     )
 
@@ -796,6 +799,13 @@ def _run_embedding_diagnostics(
         }
         assert modality_tensors["s1"]["layers"], "No S1 layer activations for CKA"
         assert modality_tensors["s2"]["layers"], "No S2 layer activations for CKA"
+
+        assert modality_tensors["s1"]["posthead"].shape[0] == modality_tensors["s2"]["posthead"].shape[0], "S1 and S2 posthead tensors have different number of samples" 
+        # asser that thwew are no nonfinite values in the tensors
+        if not torch.isfinite(modality_tensors["s1"]["posthead"]).all():
+            raise ValueError("Non-finite values found in S1 posthead tensor")
+        if not torch.isfinite(modality_tensors["s2"]["posthead"]).all():
+            raise ValueError("Non-finite values found in S2 posthead tensor")
     
         s1_layers, s1_within = compute_within_encoder_cka(modality_tensors["s1"]["layers"])
         cross_s1_layers, cross_s2_layers, cross_matrix = compute_cross_encoder_cka(modality_tensors["s1"]["layers"], modality_tensors["s2"]["layers"])
@@ -1144,30 +1154,30 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
     os.makedirs(output_dir, exist_ok=True)
 
     # check if dir exists
-    eurosat_output_dir = output_dir / "linear_probe"
-    if True: #not eurosat_output_dir.exists():
-        eurosat_loaders = _build_eurosat_loaders(
-            config, bands=eurosat_bands, modality=target_modality
-        )
-        eurosat_embeddings: Dict[str, EmbeddingBundle] = {}
-        with _use_adapter_modality(adapter, target_modality):
-            for split, loader in eurosat_loaders.items():
-                eurosat_embeddings[split] = _extract_embeddings(
-                    adapter,
-                    loader,
-                    device=device,
-                    expected_in_channels=model_channels,
-                    modality=target_modality,
-                )
-        # _run_linear_probe(config, eurosat_embeddings, output_dir=output_dir, label="eurosat")
-        _plot_eurosat_tsne(
-            eurosat_embeddings["test"],
-            output_dir=eurosat_output_dir,
-            label="eurosat",
-            max_samples=config.tsne_samples,
-            seed=config.random_seed,
-            model_title=config.model_path,
-        )
+    # eurosat_output_dir = output_dir / "linear_probe"
+    # if True: #not eurosat_output_dir.exists():
+    #     eurosat_loaders = _build_eurosat_loaders(
+    #         config, bands=eurosat_bands, modality=target_modality
+    #     )
+    #     eurosat_embeddings: Dict[str, EmbeddingBundle] = {}
+    #     with _use_adapter_modality(adapter, target_modality):
+    #         for split, loader in eurosat_loaders.items():
+    #             eurosat_embeddings[split] = _extract_embeddings(
+    #                 adapter,
+    #                 loader,
+    #                 device=device,
+    #                 expected_in_channels=model_channels,
+    #                 modality=target_modality,
+    #             )
+    #     # _run_linear_probe(config, eurosat_embeddings, output_dir=output_dir, label="eurosat")
+    #     _plot_eurosat_tsne(
+    #         eurosat_embeddings["test"],
+    #         output_dir=eurosat_output_dir,
+    #         label="eurosat",
+    #         max_samples=config.tsne_samples,
+    #         seed=config.random_seed,
+    #         model_title=config.model_path,
+    #     )
 
 
     # # first check if the output csvs already exist
@@ -1351,7 +1361,7 @@ if __name__ == "__main__":
     parser.add_argument("--model-weights", choices=["dino", "moco"], help="TorchGeo ResNet50 weight selection.")
     parser.add_argument("--croma-weights", type=Path, help="Path to the pretrained CROMA weights.")
     parser.add_argument("--croma-image-resolution", type=int, default=120, help="Input resolution expected by the CROMA model.")
-    parser.add_argument("--model-in-channels", type=int, default=13, help="Number of input channels for TorchGeo ResNet models.")
+    parser.add_argument("--model-in-channels", type=int, default=12, help="Number of input channels for TorchGeo ResNet models.")
     parser.add_argument("--model-path", type=str, help="Experiment path identifier for the model.")
     # parser.add_argument("--eurosat-root", type=Path, required=True, help="EuroSAT dataset root directory.")
     # parser.add_argument("--neuco-root", type=Path, required=True, help="NeuCo-Bench dataset root directory.")
@@ -1362,7 +1372,7 @@ if __name__ == "__main__":
     parser.add_argument("--pca-samples", type=int, default=5000, help="Samples used for PCA visualisations.")
     parser.add_argument("--ssl4eo-subset-size", type=int, default=50, help="Subset size for SSL4EO embedding extraction.")
     parser.add_argument("--ssl4eo-subset-seed", type=int, default=0, help="Subset seed for SSL4EO sampling.")
-    parser.add_argument("--neuco-modalities", nargs="*", default=["s2l2a"], help="NeuCo modalities to export.")
+    parser.add_argument("--neuco-modalities", nargs="*", default=["s2l1c"], help="NeuCo modalities to export.")
     parser.add_argument("--neuco-seasons", type=int, default=4, help="Number of seasons for NeuCo extraction.") # i believe these are averaged
     parser.add_argument(
         "--evaluation-modality",
@@ -1387,7 +1397,10 @@ if __name__ == "__main__":
 
     # if model_path arg is empty, set default
     if args.model_path is None:
-        args.model_path =  '2025_11_05-21_04_44-model_resnet50-lr_0.001-b_128-j_6-p_amp/'
+        args.model_path =  '2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp'
+        # '2025_11_18-16_14_01-model_resnet50-lr_0.001-b_2-j_6-p_amp'
+        # '2025_11_17-12_26_37-model_resnet50-lr_0.001-b_2-j_6-p_amp' # not working??
+        # '2025_11_05-21_04_44-model_resnet50-lr_0.001-b_128-j_6-p_amp/'
         # '2025_11_14-10_56_41-model_resnet50-lr_0.001-b_2-j_6-p_amp'
     args.model_root = '/local/ms-data/SSL4EO/model/'
     # '2025_11_05-21_04_44-model_resnet50-lr_0.001-b_128-j_6-p_amp/'
@@ -1404,7 +1417,7 @@ if __name__ == "__main__":
     args.checkpoint=Path(f"{checkpoint_root}/epoch_10.pt")
     args.eurosat_root=Path("/local/ms-data/EuroSAT/")
     args.neuco_root=Path("/local/ms-data/SSL4EO-S12-downstream/data")
-    args.output_dir=Path("/home/juro4948/ciip/diagnostics/unified_eval/curv_init_1_epoch10/") #dino_13bands/") #curv_init_1_epoch10/ curv_init_1
+    args.output_dir=Path("/home/juro4948/ciip/diagnostics/unified_eval/vanilla-take2_epoch10/") #dino_13bands/") #curv_init_1_epoch10/ curv_init_1
     args.ssl4eo_root=Path("/local/ms-data/SSL4EOv1.1/train")
 
 

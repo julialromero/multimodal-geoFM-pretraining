@@ -17,7 +17,7 @@ from torchvision.transforms import Resize
 import xarray as xr
 from zarr.storage import ZipStore
 from torchvision import transforms
-
+import torchvision
 ### band statistics: mean & std
 # calculated from 50k data
 ### OLD SSL4EO v1.0 STATS
@@ -97,11 +97,19 @@ class SSL4EODataset(Dataset):
         transforms=None,
         target_image_dimension: Tuple[int, int] = (224, 224),
         s2_tier: str = "s2l2a",
+        is_train: bool = True,
     ):
         self.root = root
+        self.is_train = is_train
         self.dataset_name = str(dataset_name)
-        self.transforms = transforms
+        self.s1_transforms = None
+        self.s2_transforms = None
+        if transforms is None:
+            self.s1_transforms = transforms['s1']
+            self.s2_transforms = transforms['s2']
         # self.resize_transform = #Resize(target_image_dimension)
+        if target_image_dimension is not None:
+            self.crop = torchvision.transforms.CenterCrop(target_image_dimension)
 
         self.s1_dir = os.path.join(root, "S1GRD")
         if s2_tier.lower() == "s2l1c":
@@ -151,15 +159,6 @@ class SSL4EODataset(Dataset):
             _canonicalize_band_label(b)
             for b in (s2_band_names if s2_band_names is not None else self.DEFAULT_S2_BANDS)
         ]
-        # # if len(self.s2_band_names) != len(S2L2A_MEAN):
-        # s2_means = S2L1C_MEAN if s2_tier.lower() == "s2l1c" else S2L2A_MEAN
-        # s2_stds = S2L1C_STD if s2_tier.lower() == "s2l1c" else S2L2A_STD
-        #     # raise ValueError("Unexpected number of S2 band names for provided statistics")
-
-        # self.s2_stats: Dict[str, Tuple[float, float]] = {
-        #     band: (mean, std)
-        #     for band, mean, std in zip(self.s2_band_names, s2_means, s2_stds)
-        # }
 
         self._s2_band_selection: Optional[Tuple[str, List[int]]] = self._resolve_s2_band_selection(self.s2_paths[0])
 
@@ -191,10 +190,30 @@ class SSL4EODataset(Dataset):
         # s1_tensor = self.resize_transform(s1_tensor)
         # s2_tensor = self.resize_transform(s2_tensor)
 
+        # CenterCrop supports leading batch dims; shape stays (P, C, H, W)
+        if hasattr(self, 'crop'):
+            s1_tensor = self.crop(s1_tensor)
+            s2_tensor = self.crop(s2_tensor)
+            
+
         # Optional transforms (should also support (P, C, H, W))
-        if self.transforms is not None:
-            s1_tensor = self.transforms(s1_tensor)
-            s2_tensor = self.transforms(s2_tensor)
+        if self.s1_transforms is not None:
+            if self.is_train:
+                i, j, h, w = transforms.RandomCrop.get_params(s1_tensor, output_size=(224, 224))
+                s1_tensor = transforms.functional.crop(s1_tensor, i, j, h, w)
+                s2_tensor = transforms.functional.crop(s2_tensor, i, j, h, w)
+                # ---- 2. Joint Horizontal Flip ----
+            if self.is_train and random.random() < 0.5:
+                s1 = transforms.functional.hflip(s1)
+                s2 = transforms.functional.hflip(s2)
+
+            # ---- 3. Joint Vertical Flip ----
+            if self.is_train and random.random() < 0.5:
+                s1 = transforms.functional.vflip(s1)
+                s2 = transforms.functional.vflip(s2)
+                
+            s1_tensor = self.s1_transforms(s1_tensor)
+            s2_tensor = self.s2_transforms(s2_tensor)
 
         # Normalize channel-wise; supports (P,C,H,W) or (C,H,W)
         # s1_tensor = self.normalize_s1(s1_tensor)
@@ -1042,11 +1061,32 @@ def get_dataset_fn(data_path, dataset_type):
         raise ValueError(f"Unsupported dataset type: {dataset_type}")
     
 
+
+import random
+class BandwiseJitter(torch.nn.Module):
+    def __init__(self, sigma=0.02, kind="multiplicative", p=0.8):
+        super().__init__()
+        assert kind in ("multiplicative", "additive")
+        self.sigma = sigma
+        self.kind = kind
+        self.p = p
+
+    def forward(self, x):
+        if random.random() > self.p:
+            return x
+        C, H, W = x.shape
+        eps = torch.randn(C, 1, 1, device=x.device, dtype=x.dtype) * self.sigma
+        if self.kind == "multiplicative":
+            return x * (1.0 + eps)
+        else:
+            return x + eps
+        
+
 def get_transform(modality, is_train):
     if modality == "s1":
         if is_train:
             return transforms.Compose([
-                transforms.RandomCrop(224),
+                
                 transforms.Normalize(mean=S1GRD_MEAN, std=S1GRD_STD),
             ])
         else:
@@ -1057,7 +1097,11 @@ def get_transform(modality, is_train):
     elif modality == "s2a":
         if is_train:
             return transforms.Compose([
-                transforms.RandomCrop(224),
+                transforms.RandomApply(
+                    [transforms.GaussianBlur(kernel_size=3)],
+                    p=0.3,
+                ),
+                BandwiseJitter(sigma=0.02, kind="multiplicative", p=0.8),
                 transforms.Normalize(mean=S2L2A_MEAN, std=S2L2A_STD),
             ])
         else:
@@ -1066,9 +1110,14 @@ def get_transform(modality, is_train):
                 transforms.Normalize(mean=S2L2A_MEAN, std=S2L2A_STD),
             ])
     elif modality == "s2c":
+        print("Using S2 13 band L1C normalization.")
         if is_train:
             return transforms.Compose([
-                transforms.RandomCrop(224),
+                transforms.RandomApply(
+                    [transforms.GaussianBlur(kernel_size=3)],
+                    p=0.3,
+                ),
+                BandwiseJitter(sigma=0.02, kind="multiplicative", p=0.8),
                 transforms.Normalize(mean=S2L1C_MEAN, std=S2L1C_STD),
             ])
         else:
@@ -1103,6 +1152,8 @@ def get_data(args, preprocess_fns=None):
         else:
             s1_preprocess = get_transform("s1", is_train=True)
             s2_preprocess = get_transform(args.dataset.s2_tier, is_train=True)
+
+            assert s1_preprocess is not None and s2_preprocess is not None
                 
             data['train'] = get_dataset_fn(args.dataset.train_data, args.dataset.dataset_type)(
                 args, is_train=True, transforms={"s1": s1_preprocess, "s2": s2_preprocess})
