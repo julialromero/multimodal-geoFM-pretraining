@@ -59,22 +59,22 @@ class EvaluationAdapter(nn.Module):
         self.dtype_s1: torch.dtype = torch.float32
         self._active_modality: str = "s2"
 
-    # These helpers are intentionally thin wrappers so that the evaluation
-    # pipeline can treat all models uniformly.
-    def compute_backbone(
-        self, images: torch.Tensor, modality: str = "s2"
-    ) -> torch.Tensor:  # pragma: no cover - interface
-        raise NotImplementedError
+    # # These helpers are intentionally thin wrappers so that the evaluation
+    # # pipeline can treat all models uniformly.
+    # def compute_backbone(
+    #     self, images: torch.Tensor, modality: str = "s2"
+    # ) -> torch.Tensor:  # pragma: no cover - interface
+    #     raise NotImplementedError
 
-    def compute_posthead(
-        self, images: torch.Tensor, modality: str = "s2"
-    ) -> torch.Tensor:  # pragma: no cover - interface
-        raise NotImplementedError
+    # def compute_posthead(
+    #     self, images: torch.Tensor, modality: str = "s2"
+    # ) -> torch.Tensor:  # pragma: no cover - interface
+    #     raise NotImplementedError
 
-    def compute_projected(
-        self, images: torch.Tensor, modality: str = "s2"
-    ) -> torch.Tensor:  # pragma: no cover - interface
-        raise NotImplementedError
+    # def compute_projected(
+    #     self, images: torch.Tensor, modality: str = "s2"
+    # ) -> torch.Tensor:  # pragma: no cover - interface
+    #     raise NotImplementedError
 
     def compute_embeddings(self, images: Any) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Return backbone, post-head and projected embeddings for ``images``."""
@@ -84,7 +84,7 @@ class EvaluationAdapter(nn.Module):
         projected = self.compute_projected(images)
         return backbone, posthead, projected
 
-    def prepare_inputs(self, batch: Any, *, device: torch.device) -> Any:
+    def prepare_inputs(self, batch: Any, *, device: torch.device, modality='s2') -> Any:
         """Prepare a batch prior to embedding extraction.
 
         The default implementation expects a tensor containing Sentinel-2 data.
@@ -98,7 +98,8 @@ class EvaluationAdapter(nn.Module):
         if tensor.ndim == 5:  # (B, T, C, H, W)
             tensor = tensor.mean(dim=1)
 
-        active_modality = self.get_active_modality()
+        active_modality = modality
+        # active_modality = self.get_active_modality()
         dtype_attr = f"dtype_{active_modality}"
         input_dtype = getattr(self, dtype_attr, self.dtype_s2)
         if device.type != "cuda" and input_dtype in {torch.float16, torch.bfloat16}:
@@ -306,11 +307,11 @@ class TorchGeoResNetAdapter(EvaluationAdapter):
             features = features.flatten(start_dim=1)
         return features
 
-    def compute_posthead(self, images: torch.Tensor, modality: str = "s2") -> torch.Tensor:
-        return None
+    # def compute_posthead(self, images: torch.Tensor, modality: str = "s2") -> torch.Tensor:
+    #     return None
 
-    def compute_projected(self, images: torch.Tensor, modality: str = "s2") -> torch.Tensor:
-        return None
+    # def compute_projected(self, images: torch.Tensor, modality: str = "s2") -> torch.Tensor:
+    #     return None
 
     def encode_s2(  # pragma: no cover - compatibility wrapper
         self,
@@ -380,17 +381,27 @@ class CromaEvaluationAdapter(EvaluationAdapter):
         self._last_outputs: Dict[str, torch.Tensor] = {}
         self._last_inputs: Optional[Dict[str, Optional[torch.Tensor]]] = None
 
-    def prepare_inputs(self, batch: Any, *, device: torch.device) -> Dict[str, Optional[torch.Tensor]]:
+    def prepare_inputs(self, batch: Any, *, device: torch.device, modality: Optional[str]) -> Dict[str, Optional[torch.Tensor]]:
+        print(type(batch))
         if isinstance(batch, dict):
             sar_tensor = self._extract_modality(batch, {"sar", "s1", "sentinel1"})
             optical_tensor = self._extract_modality(batch, {"optical", "s2", "s2l1c", "s2l2a", "sentinel2"})
         else:
-            if self.get_active_modality() == "s1":
-                sar_tensor = batch
-                optical_tensor = None
+            if modality:
+                if modality.lower() == "s1":
+                    sar_tensor = batch
+                    optical_tensor = None
+                else:
+                    sar_tensor = None
+                    optical_tensor = batch
             else:
-                sar_tensor = None
-                optical_tensor = batch
+                if self.get_active_modality() == "s1":
+                    sar_tensor = batch
+                    optical_tensor = None
+                else:
+                    sar_tensor = None
+                    optical_tensor = batch
+            
 
         optical_prepared = (
             self._prepare_optical(optical_tensor, device) if optical_tensor is not None else None
@@ -400,11 +411,12 @@ class CromaEvaluationAdapter(EvaluationAdapter):
         return {"optical": optical_prepared, "sar": sar_prepared}
 
     def compute_embeddings(
-        self, inputs: Dict[str, Optional[torch.Tensor]]
+        self, inputs: Dict[str, Optional[torch.Tensor]],
+        modality: str = "s2"
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         outputs = self._encode_modalities(inputs, include_joint=True)
 
-        modality = self.get_active_modality()
+        # modality = self.get_active_modality()
         if modality == "s1":
             sar_encodings = outputs.get("sar_encodings")
             sar_gap = outputs.get("sar_gap")
@@ -425,22 +437,22 @@ class CromaEvaluationAdapter(EvaluationAdapter):
 
     def compute_backbone(self, images: Any, modality: str = "s2") -> torch.Tensor:
         prepared = self._ensure_prepared_inputs(images, modality)
-        backbone, _, _ = self.compute_embeddings(prepared)
+        backbone, _, _ = self.compute_embeddings(prepared, modality)
         return backbone
 
-    def compute_posthead(self, images: Any, modality: str = "s2") -> torch.Tensor:
-        prepared = self._ensure_prepared_inputs(images, modality)
-        _, posthead, _ = self.compute_embeddings(prepared)
-        if posthead is None:
-            raise RuntimeError("Post-head embeddings unavailable for CROMA.")
-        return posthead
+    # def compute_posthead(self, images: Any, modality: str = "s2") -> torch.Tensor:
+    #     prepared = self._ensure_prepared_inputs(images, modality)
+    #     _, posthead, _ = self.compute_embeddings(prepared, modality)
+    #     if posthead is None:
+    #         raise RuntimeError("Post-head embeddings unavailable for CROMA.")
+    #     return posthead
 
-    def compute_projected(self, images: Any, modality: str = "s2") -> torch.Tensor:
-        prepared = self._ensure_prepared_inputs(images, modality)
-        _, _, projected = self.compute_embeddings(prepared)
-        if projected is None:
-            raise RuntimeError("Projected embeddings unavailable for CROMA.")
-        return projected
+    # def compute_projected(self, images: Any, modality: str = "s2") -> torch.Tensor:
+    #     prepared = self._ensure_prepared_inputs(images, modality)
+    #     _, _, projected = self.compute_embeddings(prepared, modality)
+    #     if projected is None:
+    #         raise RuntimeError("Projected embeddings unavailable for CROMA.")
+    #     return projected
 
     def _ensure_prepared_inputs(
         self, images: Any, modality: str
@@ -453,6 +465,7 @@ class CromaEvaluationAdapter(EvaluationAdapter):
                     "CROMA adapters expect tensors or modality dictionaries for embedding extraction."
                 )
             candidate = {"optical": None, "sar": None}
+            print(modality)
             if modality.lower() == "s1":
                 candidate["sar"] = images
             else:

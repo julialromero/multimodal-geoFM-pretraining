@@ -322,7 +322,7 @@ def _extract_embeddings(
         if isinstance(image, dict) and not getattr(adapter, "supports_multimodal_dict", False):
             image = image[next(iter(image))]
 
-        prepared_inputs = adapter.prepare_inputs(image, device=device)
+        prepared_inputs = adapter.prepare_inputs(image, device=device, modality='s2')
 
         with torch.no_grad():
             backbone, post, projected = adapter.compute_embeddings(prepared_inputs)
@@ -1341,7 +1341,7 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
 
     retrieval_s1 = s1_ssl4eo
     retrieval_s2 = s2_ssl4eo
-    if config.model_type == "croma":
+    if config.model_type == "croma" or config.model_type == 'torchgeo_resnet50':
         logging.info("Using backbone embeddings for CROMA cross-modal retrieval")
 
         def _use_backbone(bundle: Optional[ModalityEmbeddings]) -> Optional[ModalityEmbeddings]:
@@ -1388,7 +1388,7 @@ if __name__ == "__main__":
     parser.add_argument("--disable-ssl4eo", action="store_true", help="Skip SSL4EO diagnostics even if a root is provided.")
     parser.add_argument("--tsne-samples", type=int, default=1500, help="Samples used for t-SNE visualisations.")
     parser.add_argument("--pca-samples", type=int, default=5000, help="Samples used for PCA visualisations.")
-    parser.add_argument("--ssl4eo-subset-size", type=int, default=70, help="Subset size for SSL4EO embedding extraction.")
+    parser.add_argument("--ssl4eo-subset-size", type=int, default=10, help="Subset size for SSL4EO embedding extraction.")
     parser.add_argument("--ssl4eo-subset-seed", type=int, default=0, help="Subset seed for SSL4EO sampling.")
     parser.add_argument("--neuco-modalities", nargs="*", default=["s2l1c"], help="NeuCo modalities to export.")
     parser.add_argument("--neuco-seasons", type=int, default=4, help="Number of seasons for NeuCo extraction.") # i believe these are averaged
@@ -1434,13 +1434,13 @@ if __name__ == "__main__":
         checkpoint_root = Path(args.model_root) / args.model_path / "checkpoints"
         # args.output_dir = Path("diagnostics/output")
 
-        args.checkpoint=Path(f"{checkpoint_root}/epoch_20.pt")
+        args.checkpoint=Path(f"{checkpoint_root}/epoch_40.pt")
 
     else:
         args.checkpoint = None
     args.eurosat_root=Path("/local/ms-data/EuroSAT/")
     args.neuco_root=Path("/local/ms-data/SSL4EO-S12-downstream/data")
-    args.output_dir=Path("/home/juro4948/ciip/diagnostics/unified_eval/vanillaciip-epoch20/") #dino_13bands/") #curv_init_1_epoch10/ curv_init_1
+    args.output_dir=Path("/home/juro4948/ciip/diagnostics/unified_eval/vanillaciip-epoch40/") #dino_13bands/") #curv_init_1_epoch10/ curv_init_1
     args.ssl4eo_root=Path("/local/ms-data/SSL4EOv1.1/train")
 
 

@@ -610,24 +610,31 @@ def extract_embeddings_for_dataset(
                     )
 
             with ctx:
-                print('Extractoring raw embeddings')
-                if model.encoder_s1 is not None:
-                    s1_raw = model.compute_posthead(s1_tensor, modality='s1')
+                print('Extracting raw embeddings')
 
-                s2_raw = model.compute_posthead(s2_tensor, modality='s2')
+                # icheck if model has attribute compute_posthead 
+                has_compute_posthead = hasattr(model, "compute_posthead") and inspect.ismethod(getattr(model, "compute_posthead"))
+                if has_compute_posthead:
+                    if model.encoder_s1 is not None:
+                        s1_raw = model.compute_posthead(s1_tensor, modality='s1')
 
-                assert s2_raw is not None, "S2 raw embeddings must not be None"
-                assert (model.encoder_s1 is None) or (s1_raw.shape == s2_raw.shape), "S1 and S2 raw embeddings must have the same shape {s1_raw.shape} vs {s2_raw.shape}"
+                    s2_raw = model.compute_posthead(s2_tensor, modality='s2')
+
+                    assert s2_raw is not None, "S2 raw embeddings must not be None"
+                    assert (model.encoder_s1 is None) or (s1_raw.shape == s2_raw.shape), "S1 and S2 raw embeddings must have the same shape {s1_raw.shape} vs {s2_raw.shape}"
 
 
                 with capture_controller.suspend():
-            
-                    print('Extracting norm embeddings')
-                    if model.encoder_s1 is not None:
-                        s1_norm = model. compute_projected(s1_tensor, modality='s1')
+                    
+                    has_compute_posthead = hasattr(model, "compute_projected") and inspect.ismethod(getattr(model, "compute_projected"))
+                    if has_compute_posthead:
 
-                    s2_norm = model.compute_projected(s2_tensor, modality='s2')
-                    assert s2_norm is not None, "S2 norm embeddings must not be None"
+                        print('Extracting norm embeddings')
+                        if model.encoder_s1 is not None:
+                            s1_norm = model. compute_projected(s1_tensor, modality='s1')
+
+                        s2_norm = model.compute_projected(s2_tensor, modality='s2')
+                        assert s2_norm is not None, "S2 norm embeddings must not be None"
                     
                     # now extract backbone embeddings 
                     print('Extracting backbone embeddings')
