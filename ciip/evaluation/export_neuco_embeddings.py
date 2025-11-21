@@ -509,10 +509,19 @@ class E2SChallengeDataset(Dataset):
         data = np.concatenate(list(data.values()), axis=-3)
         data = data.astype(np.float32) 
         data = torch.from_numpy(data)
+
+        # if there are 5 dimensions, remove the first dimension
+        if data.ndim == 5 and data.shape[0] == 1:
+            data = data.squeeze(0)
         
         # Transform
         if self.transform is not None:
+            # print("Applying transform...")
+            
             data = self.transform(data)
+
+            if data.ndim == 5 and data.shape[1] == 1:
+                data = data.squeeze(1)
             
         if not self.concat:
             data = {m: data[..., start_ind_of_modality[m]: start_ind_of_modality[m] + n_bands_per_modality[m], :, :] for m in self.modalities}
@@ -525,6 +534,8 @@ class E2SChallengeDataset(Dataset):
             return data
 
 def collate_fn(batch):
+    print("Collating batch of size:", len(batch))
+    print(batch.shape if isinstance(batch, torch.Tensor) else "Batch is a list.")
     if isinstance(batch, dict) or isinstance(batch, torch.Tensor):
         # Single sample
         return batch
@@ -555,7 +566,44 @@ class InputResizer(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.adaptive_pool(x)
 
-class Normalize:
+class SSL4EONormalize:
+    """
+    Normalizes image tensor for SSL4EO-S12: (img - mean) / std per channel.
+    """
+
+    def __init__(self):
+        super().__init__()
+        # if modality not in MODALITY_STATS:
+        #     raise ValueError(f"Unknown modality '{modality}' for SSL4EONormalize.")
+        # mean, std = MODALITY_STATS[modality] # returns lists of bandwise mean and std
+        # # bandwise mean and std as tensors
+        # self.mean = torch.tensor(mean).view(-1, 1, 1)
+        # self.std = torch.tensor(std).view(-1, 1, 1)
+
+    def __call__(self, img: torch.Tensor) -> torch.Tensor:
+        # get number of channels
+        # ifmore than 4 dims and ffirst dim is 1, squeeze it
+        C = img.shape[-3]
+        if C == 13:
+            modality = 's2l1c'
+        elif C == 12:
+            modality = 's2l2a'
+        elif C == 2:
+            modality = 's1'
+        else:
+            raise ValueError(f"Cannot infer modality from number of channels: {C}")
+
+        mean, std = MODALITY_STATS[modality] # returns lists of bandwise mean and std
+        # bandwise mean and std as tensors
+        self.mean = torch.tensor(mean).view(-1, 1, 1)
+        self.std = torch.tensor(std).view(-1, 1, 1)
+
+
+        img = img.float()
+        return (img - self.mean.to(img.device)) / self.std.to(img.device)
+    
+
+class Divideby10000Normalize:
     """
     Normalizes image tensor for DINO: scales to [0,1] range by dividing by 10000.
     """
@@ -569,7 +617,7 @@ class TemporalMean(nn.Module):
     Averages over the time dimension (first dim).
     """
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x.mean(dim=1, keepdim=True)
+        return x.mean(dim=0, keepdim=True)
 
 
 import pandas as pd
@@ -716,9 +764,13 @@ def main() -> None:
     modalities = args.modalities  # e.g., ["s2l1c"]
     resize_hw = tuple(args.resize) if args.resize is not None else None
 
+
+    
     transform = transforms.Compose([
-        Normalize(),     # scale to [0,1]
+        SSL4EONormalize(),     # scale to [0,1]
+        #Divideby10000Normalize(),     # scale to [0,1]
         TemporalMean(),  # average over seasonal timesteps -> (T=1)
+
     ])
 
     dataset = E2SChallengeDataset(

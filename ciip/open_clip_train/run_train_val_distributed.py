@@ -83,8 +83,7 @@ def get_latest_checkpoint(path: str, remote : bool):
 @hydra.main(config_path="configs", config_name=CONF)
 # def main(args):
 def main(args: DictConfig, start_epoch=0):
-    # args = parse_args(args)
-
+    
     if torch.cuda.is_available():
         # This enables tf32 on Ampere GPUs which is only 8% slower than
         # float16 and almost as accurate as float32
@@ -432,25 +431,25 @@ def main(args: DictConfig, start_epoch=0):
             logging.info(f"Saved config to {config_file}")
 
 
-    if args.dataset.use_transforms:
-    #   transforms = v2.Compose([
-    #       v2.RandomResizedCrop(size=(args.model.s1_resolution, args.model.s2_resolution), antialias=True),
-    #       v2.RandomHorizontalFlip(p=0.5),
-    #       v2.RandomVerticalFlip(p=0.5),
-    #       v2.GaussianBlur(3),
-    #   ])
-        assert args.model.s1_resolution != args.model.s2_resolution, 'S1 target resolution is not the same as S2 target resolution'
-        # transforms = PairGeom(out_size=args.model.s1_resolution)
-        # transforms = transforms.PairAugmented(
-        #     pair_geom=transforms.PairGeom(out_size=args.model.s1_resolution)
+    # if args.dataset.use_transforms:
+    # #   transforms = v2.Compose([
+    # #       v2.RandomResizedCrop(size=(args.model.s1_resolution, args.model.s2_resolution), antialias=True),
+    # #       v2.RandomHorizontalFlip(p=0.5),
+    # #       v2.RandomVerticalFlip(p=0.5),
+    # #       v2.GaussianBlur(3),
+    # #   ])
+    #     assert args.model.s1_resolution != args.model.s2_resolution, 'S1 target resolution is not the same as S2 target resolution'
+    #     # transforms = PairGeom(out_size=args.model.s1_resolution)
+    #     # transforms = transforms.PairAugmented(
+    #     #     pair_geom=transforms.PairGeom(out_size=args.model.s1_resolution)
 
-        # )
-        raise NotImplementedError('Transforms not yet supported.')
+    #     # )
+    #     raise NotImplementedError('Transforms not yet supported.')
         
-    else:
-        transforms = None
+    # else:
+    #     transforms = None
 
-    data = get_data(args, transforms)
+    data = get_data(args)
     assert len(data), 'At least one train or eval dataset must be specified.'
 
     # create scheduler if train

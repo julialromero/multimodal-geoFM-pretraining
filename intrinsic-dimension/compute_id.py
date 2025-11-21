@@ -14,11 +14,11 @@ import skdim.id as id
 from torchvision import transforms as T
 from ciip.open_clip_train.data import get_transform
 # --- Your existing evaluation helpers (used only for the data loader) ---
-from ciip.evaluation.unified_evaluation import (
-    ModelEvalConfig,
+# from ciip.evaluation.unified_evaluation import (
+#     ModelEvalConfig,
     # _build_eurosat_loaders,
     # _resolve_eurosat_bands,
-)
+# )
 from s2geo_dataset import S2Geo
 S2_100K_ROOT = Path("/local/ms-data/S2_100K")
 from ciip.evaluation.model_utils import build_model_from_checkpoint
@@ -82,7 +82,6 @@ S2_WAVELENGTHS_UM_OPTICAL_12: List[float] = [
 
 def build_s2_100k_loader(
     in_chans: int,
-    target_size: int,
     batch_size: int = 64,
     num_workers: int = 4,
     # rgb_mode: bool = False,
@@ -111,7 +110,7 @@ def build_s2_100k_loader(
 
     # 2) Wrap to format samples like your EuroSAT loader did
     class _S2GeoWrapped(torch.utils.data.Dataset):
-        def __init__(self, base, target_size, in_chans, rgb_mode):
+        def __init__(self, base,  in_chans, rgb_mode):
             self.base = base
             self.in_chans = in_chans
             self.rgb_mode = rgb_mode
@@ -145,7 +144,7 @@ def build_s2_100k_loader(
 
             return {"image": x.float(), "label": int(y)}
 
-    ds = _S2GeoWrapped(base, target_size=target_size, in_chans=in_chans, rgb_mode=rgb_mode)
+    ds = _S2GeoWrapped(base, in_chans=in_chans, rgb_mode=rgb_mode)
 
     loader = DataLoader(
         ds,
@@ -187,6 +186,39 @@ class RandomConvFeatures(nn.Module):
         h = self.conv(x)
         return h.mean(dim=(2, 3))  # global average pooling
 
+### CROMA:
+import importlib.util
+
+_CROMA_MODULE: Optional[ModuleType] = None
+from types import ModuleType
+def _load_croma_module() -> ModuleType:
+    """Dynamically import the CROMA helper without requiring package installation."""
+
+    global _CROMA_MODULE
+    if _CROMA_MODULE is not None:
+        return _CROMA_MODULE
+
+    # print( Path(__file__).resolve().parents[0])
+    print( Path(__file__).resolve().parents[1])
+    module_path = Path(__file__).resolve().parents[1] / "comparison" / "CROMA-main" / "use_croma.py"
+    
+    print(module_path)
+    if not module_path.exists():
+        raise FileNotFoundError(
+            "CROMA weights requested but 'use_croma.py' was not found. "
+            "Expected it under comparison/CROMA-main/use_croma.py."
+        )
+
+    spec = importlib.util.spec_from_file_location("croma_use_croma", module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Unable to import CROMA utilities from '{module_path}'.")
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _CROMA_MODULE = module
+    return module
+
+
 
 # ---------------------------------------------------------------------------
 # Model spec / registry
@@ -199,7 +231,6 @@ class ModelSpec:
     name: str
     in_chans: int
     rgb_mode: bool  # True means expect 3 channels (B4/B3/B2)
-    target_size: int  # spatial size to which images should be resized/cropped
     builder: Callable[[], nn.Module]
     feature_fn: FeatureFn
     transform: Optional[Callable[[torch.Tensor], torch.Tensor]] = None
@@ -310,34 +341,31 @@ class CromaNormalize(nn.Module):
         self.use_8_bit = use_8_bit
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (P,C,H,W) or (B,C,H,W)
+        # taken from SatMAE and SeCo
         x = x.float()
+
         imgs = []
-        for c in range(x.shape[1]):
-            ch = x[:, c, :, :]       # (P,H,W)
-            min_value = ch.mean() - 2 * ch.std(unbiased=False)
-            max_value = ch.mean() + 2 * ch.std(unbiased=False)
+        for channel in range(x.shape[1]):
+            min_value = x[:, channel, :, :].mean() - 2 * x[:, channel, :, :].std()
+            max_value = x[:, channel, :, :].mean() + 2 * x[:, channel, :, :].std()
 
             if self.use_8_bit:
-                img = (ch - min_value) / (max_value - min_value) * 255.0
-                img = torch.clamp(img, 0, 255).unsqueeze(1).to(torch.uint8)
+                img = (x[:, channel, :, :] - min_value) / (max_value - min_value) * 255.0
+                img = torch.clip(img, 0, 255).unsqueeze(dim=1).to(torch.uint8)
+                imgs.append(img)
             else:
-                img = (ch - min_value) / (max_value - min_value)
-                img = torch.clamp(img, 0, 1).unsqueeze(1)
-            imgs.append(img)
+                img = (x[:, channel, :, :] - min_value) / (max_value - min_value)
+                img = torch.clip(img, 0, 1).unsqueeze(dim=1)
+                imgs.append(img)
 
-        out = torch.cat(imgs, dim=1)
-        if self.use_8_bit:
-            out = out.float() / 255.0  # final [0,1]
-
-        return out
+        return torch.cat(imgs, dim=1)
     
 def _croma_optical_gap_feature_fn(model: nn.Module, x: torch.Tensor) -> torch.Tensor:
     """CROMA: use optical branch GAP embedding."""
     # x: (B, 12, H, W) with values in [0, 1] at 120x120
     # print device of model and x
     # print(f"CROMA model device: {next(model.parameters()).device}, x device: {x.device}")
-    out: Dict[str, torch.Tensor] = model(x_optical=x)
+    out: Dict[str, torch.Tensor] = model(optical_images=x)
     if "optical_GAP" not in out:
         raise KeyError("CROMA forward did not return 'optical_GAP'.")
     return out["optical_GAP"]  # (B, D)
@@ -407,32 +435,38 @@ class S2ScaleTransform(nn.Module):
 def build_model_specs() -> List[ModelSpec]:
     specs: List[ModelSpec] = []
 
-    # 1. Random Conv Filters (RCF) – 13-band, 512-dim features
-    specs.append(
-        ModelSpec(
-            name="RCF_13ch",
-            in_chans=13,
-            rgb_mode=False,
-            target_size=224,
-            builder=lambda: RandomConvFeatures(in_chans=13, out_dim=512),
-            transform=T.Compose([
-                    T.CenterCrop((224, 224)),
-                    S2ScaleTransform(scale=10000.0),
-                ]),
-            feature_fn=lambda m, x: m(x),
-        )
-    )
+    # # 1. Random Conv Filters (RCF) – 13-band, 512-dim features
+    # specs.append(
+    #     ModelSpec(
+    #         name="RCF_13ch",
+    #         in_chans=13,
+    #         rgb_mode=False,
+    #         builder=lambda: RandomConvFeatures(in_chans=13, out_dim=512),
+    #         transform=T.Compose([
+    #                 T.CenterCrop((224, 224)),
+    #                 S2ScaleTransform(scale=10000.0),
+    #             ]),
+    #         feature_fn=lambda m, x: m(x),
+    #     )
+    # )
 
-    # 2. CROMA optical encoder – 12 optical bands, 120x120, [0,1]
+    # # 2. CROMA optical encoder – 12 optical bands, 120x120, [0,1]
+    # module = _load_croma_module()
+    # PretrainedCROMA = getattr(module, "PretrainedCROMA")
     # specs.append(
     #     ModelSpec(
     #         name="CROMA_optical",
     #         in_chans=12,
     #         rgb_mode=False,
-    #         target_size=120,
-    #         builder=lambda: croma_base(
-    #             weights=CROMABase_Weights.CROMA_VIT, modalities=['optical'], #CROMA_BASE_S1S2  # TODO: confirm exact enum
+    #         builder=lambda: PretrainedCROMA(
+    #             pretrained_path='/home/juro4948/ciip/comparison/CROMA-main/CROMA_base.pt',
+    #             size="base",
+    #             modality="optical",
+    #             image_resolution=120,
     #         ),
+    #         # croma_base(
+    #         #     weights=CROMABase_Weights.CROMA_VIT, modalities=['optical'], #CROMA_BASE_S1S2  # TODO: confirm exact enum
+    #         # ),
     #         transform = nn.Sequential(
     #             T.Resize((120, 120)),
     #             CromaNormalize(use_8_bit=False),  # or True if you want the 8-bit variant
@@ -441,8 +475,7 @@ def build_model_specs() -> List[ModelSpec]:
     #     )
     # )
 
-    from torchgeo.models import CROMABase_Weights
-    # list(CROMABase_Weights)
+    
 
     # 3. DOFA base – 13 bands, use pre-trained base weights
     specs.append(
@@ -450,7 +483,6 @@ def build_model_specs() -> List[ModelSpec]:
             name="DOFA_base_S2_13ch",
             in_chans=13,
             rgb_mode=False,
-            target_size=224,
             builder=lambda: dofa_base_patch16_224(
                 weights=DOFABase16_Weights.DOFA_MAE,
             ),
@@ -471,7 +503,6 @@ def build_model_specs() -> List[ModelSpec]:
             name="ScaleMAE_large_RGB",
             in_chans=3,
             rgb_mode=True,
-            target_size=224,
             builder=lambda: scalemae_large_patch16(
                 weights=ScaleMAELarge16_Weights.FMOW_RGB
             ),
@@ -484,13 +515,12 @@ def build_model_specs() -> List[ModelSpec]:
         )
     )
 
-    # # 5–8. ResNet baselines (MoCo S2 ALL / RGB + ImageNet)
+    # 5–8. ResNet baselines (MoCo S2 ALL / RGB + ImageNet)
     specs.append(
         ModelSpec(
             name="ResNet18_S2_ALL_MOCO",
             in_chans=13,
             rgb_mode=False,
-            target_size=224,
             builder=lambda: resnet18(weights=ResNet18_Weights.SENTINEL2_ALL_MOCO),
             transform = T.Compose([
                 T.CenterCrop((224, 224)),
@@ -505,7 +535,6 @@ def build_model_specs() -> List[ModelSpec]:
             name="ResNet50_S2_ALL_MOCO",
             in_chans=13,
             rgb_mode=False,
-            target_size=224,
             builder=lambda: resnet50(weights=ResNet50_Weights.SENTINEL2_ALL_MOCO),
             transform = T.Compose([
                 T.CenterCrop((224, 224)),
@@ -520,7 +549,6 @@ def build_model_specs() -> List[ModelSpec]:
             name="ResNet18_S2_RGB_MOCO",
             in_chans=3,
             rgb_mode=True,
-            target_size=224,
             builder=lambda: resnet18(weights=ResNet18_Weights.SENTINEL2_RGB_MOCO),
             transform = T.Compose([
                 T.CenterCrop((224, 224)),
@@ -535,7 +563,6 @@ def build_model_specs() -> List[ModelSpec]:
             name="ResNet50_S2_RGB_MOCO",
             in_chans=3,
             rgb_mode=True,
-            target_size=224,
             builder=lambda: resnet50(weights=ResNet50_Weights.SENTINEL2_RGB_MOCO),
             transform = T.Compose([
                 T.CenterCrop((224, 224)),
@@ -552,7 +579,6 @@ def build_model_specs() -> List[ModelSpec]:
             name="ResNet152_ImageNet_RGB",
             in_chans=3,
             rgb_mode=True,
-            target_size=224,
             builder=lambda: resnet152(weights=ResNet152_Weights.IMAGENET1K_V1),
             transform = T.Compose([
                 T.CenterCrop((224, 224)),
@@ -569,7 +595,6 @@ def build_model_specs() -> List[ModelSpec]:
             name="ViTSmall16_S2_ALL_MOCO",
             in_chans=13,
             rgb_mode=False,
-            target_size=224,
             builder=lambda: vit_small_patch16_224(
                 weights=ViTSmall16_Weights.SENTINEL2_ALL_MOCO
             ),
@@ -582,24 +607,44 @@ def build_model_specs() -> List[ModelSpec]:
         )
     )
 
-    specs.append(
-        ModelSpec(
-            name="VanillaCIIP, Epoch10",
-            in_chans=13,
-            rgb_mode=False,
-            target_size=224,
-            builder=lambda: build_model_from_checkpoint("/local/ms-data/SSL4EO/model/2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints/epoch_10.pt")[0], # first returned is model, second is is_loretnz
-            feature_fn=_ciip_feature_fn,
-            transform = get_transform('s2a', is_train=False)
-        )
-    )
+    # specs.append(
+    #     ModelSpec(
+    #         name="VanillaCIIP, Epoch10",
+    #         in_chans=13,
+    #         rgb_mode=False,
+    #         builder=lambda: build_model_from_checkpoint("/local/ms-data/SSL4EO/model/2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints/epoch_10.pt")[0], # first returned is model, second is is_loretnz
+    #         feature_fn=_ciip_feature_fn,
+    #         transform = get_transform('s2a', is_train=False)
+    #     )
+    # )
+
+    # specs.append(
+    #     ModelSpec(
+    #         name="VanillaCIIP, Epoch10",
+    #         in_chans=13,
+    #         rgb_mode=False,
+    #         builder=lambda: build_model_from_checkpoint("/local/ms-data/SSL4EO/model/2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints/epoch_10.pt")[0], # first returned is model, second is is_loretnz
+    #         feature_fn=_ciip_feature_fn,
+    #         transform = get_transform('s2a', is_train=False)
+    #     )
+    # )
 
     # specs.append(
     #     ModelSpec(
     #         name="VanillaCIIP, Epoch40",
     #         in_chans=13,
     #         rgb_mode=False,
-    #         target_size=224,
+    #         builder=lambda: build_model_from_checkpoint("/local/ms-data/SSL4EO/model/2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints/epoch_40.pt")[0], # first returned is model, second is is_loretnz
+    #         feature_fn=_ciip_feature_fn,
+    #         transform = get_transform('s2a', is_train=False)
+    #     )
+    # )
+
+    # specs.append(
+    #     ModelSpec(
+    #         name="VanillaCIIP, Epoch40",
+    #         in_chans=13,
+    #         rgb_mode=False,
     #         builder=lambda: build_model_from_checkpoint("/local/ms-data/SSL4EO/model/2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints/epoch_40.pt")[0], # first returned is model, second is is_loretnz
     #         feature_fn=_ciip_feature_fn,
     #     )
@@ -610,7 +655,6 @@ def build_model_specs() -> List[ModelSpec]:
     #         name="Hyperbolic CIIP, Curv=1, Epoch10",
     #         in_chans=13,
     #         rgb_mode=False,
-    #         target_size=224,
     #         builder=lambda: build_model_from_checkpoint('/local/ms-data/SSL4EO/model/2025_11_05-21_04_44-model_resnet50-lr_0.001-b_128-j_6-p_amp/checkpoints/epoch_10.pt')[0], # first returned is model, second is is_loretnz
     #         feature_fn=_ciip_feature_fn,
     #     )
@@ -621,7 +665,6 @@ def build_model_specs() -> List[ModelSpec]:
     #         name="Hyperbolic CIIP, Curv=0.1, Epoch10",
     #         in_chans=13,
     #         rgb_mode=False,
-    #         target_size=224,
     #         builder=lambda: build_model_from_checkpoint('/local/ms-data/SSL4EO/model/2025_11_07-09_24_18-model_resnet50-lr_0.001-b_128-j_6-p_amp/checkpoints/epoch_10.pt')[0], # first returned is model, second is is_loretnz
     #         feature_fn=_ciip_feature_fn,
     #     )
@@ -632,7 +675,6 @@ def build_model_specs() -> List[ModelSpec]:
     #         name="VanillaCIIP, Epoch25",
     #         in_chans=13,
     #         rgb_mode=False,
-    #         target_size=224,
     #         builder=lambda: build_model_from_checkpoint("/local/ms-data/SSL4EO/model/2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints/epoch_25.pt")[0], # first returned is model, second is is_loretnz
     #         feature_fn=_ciip_feature_fn,
     #     )
@@ -643,7 +685,6 @@ def build_model_specs() -> List[ModelSpec]:
     #         name="Hyperbolic CIIP, Curv=1, Epoch24",
     #         in_chans=13,
     #         rgb_mode=False,
-    #         target_size=224,
     #         builder=lambda: build_model_from_checkpoint('/local/ms-data/SSL4EO/model/2025_11_05-21_04_44-model_resnet50-lr_0.001-b_128-j_6-p_amp/checkpoints/epoch_24.pt')[0], # first returned is model, second is is_loretnz
     #         feature_fn=_ciip_feature_fn,
     #     )
@@ -654,7 +695,6 @@ def build_model_specs() -> List[ModelSpec]:
     #         name="Hyperbolic CIIP, Curv=0.1, v1.1/12bands, Epoch10",
     #         in_chans=12,
     #         rgb_mode=False,
-    #         target_size=224,
     #         builder=lambda: build_model_from_checkpoint('/local/ms-data/SSL4EO/model/2025_11_13-08_33_13-model_resnet50-lr_0.001-b_2-j_6-p_amp/checkpoints/epoch_10.pt')[0], # first returned is model, second is is_loretnz
     #         feature_fn=_ciip_feature_fn,
     #     )
@@ -665,7 +705,6 @@ def build_model_specs() -> List[ModelSpec]:
     #         name="Hyperbolic CIIP, Curv=0.1, v1.1/12bands, Epoch40",
     #         in_chans=12,
     #         rgb_mode=False,
-    #         target_size=224,
     #         builder=lambda: build_model_from_checkpoint('/local/ms-data/SSL4EO/model/2025_11_14-10_56_41-model_resnet50-lr_0.001-b_2-j_6-p_amp/checkpoints/epoch_40.pt')[0], # first returned is model, second is is_loretnz
     #         feature_fn=_ciip_feature_fn,
     #     )
@@ -676,7 +715,6 @@ def build_model_specs() -> List[ModelSpec]:
     #         name="Random ResNet (CIIP), v1.1/12bands, Epoch0",
     #         in_chans=12,
     #         rgb_mode=False,
-    #         target_size=224,
     #         builder=lambda: build_model_from_checkpoint('/local/ms-data/SSL4EO/model/2025_11_13-08_33_13-model_resnet50-lr_0.001-b_2-j_6-p_amp/checkpoints/epoch_0.pt')[0], # first returned is model, second is is_loretnz
     #         feature_fn=_ciip_feature_fn,
     #     )
@@ -687,7 +725,6 @@ def build_model_specs() -> List[ModelSpec]:
     #         name="Random ResNet (CIIP), Epoch0",
     #         in_chans=13,
     #         rgb_mode=False,
-    #         target_size=224,
     #         builder=lambda: build_model_from_checkpoint('/local/ms-data/SSL4EO/model/2025_10_09-11_04_30-model_resnet50-lr_0.001-b_128-j_6-p_amp/checkpoints/epoch_0.pt')[0], # first returned is model, second is is_loretnz
     #         feature_fn=_ciip_feature_fn,
     #     )
@@ -701,9 +738,8 @@ def build_model_specs() -> List[ModelSpec]:
 # ---------------------------------------------------------------------------
 def build_s2_like_loader(
     in_chans: int,
-    target_size: int,
     batch_size: int = 64,
-    num_workers: int = 4,
+    num_workers: int = 12,
     rgb_mode: bool = False,
 ) -> DataLoader:
     """
@@ -721,9 +757,8 @@ def build_s2_like_loader(
 
     loader = build_s2_100k_loader(
         in_chans=in_chans,
-        target_size=target_size,
-        batch_size=64,
-        num_workers=4,
+        batch_size=batch_size,
+        num_workers=num_workers,
     )
 
 
@@ -755,45 +790,11 @@ def extract_embeddings_model(
             if isinstance(batch, (list, tuple)):
                 x = batch[0]
             else:
-                # print(batch.k
-                # eys())
                 image, labels = batch['image'], batch['label']
-            # print(x)
             image = image.to(device)
             model = model.to(device)
 
-            # check if the band length matches the normalization transform dimensions         
-            # if transform is not None:
-                # normalize_transform = None
-                # if hasattr(transform, 'transforms'):  # It's a Compose object
-                #     for t in transform.transforms:
-                #         if hasattr(t, 'mean') and hasattr(t, 'std'):  # Found Normalize
-                #             normalize_transform = t
-                #             break
-                # if normalize_transform is not None:
-                #     if in_chans != len(normalize_transform.mean):
-                #         print(f"Adjusting transform normalization for in_chans={in_chans}")
-                #         # adjust mean and std
-                #         mean = transform.mean
-                #         std = transform.std
-                #         if in_chans == 12 and len(mean) == 13:
-                #             # remove B10
-                #             mean = [mean[i] for i in range(13) if i != 10]
-                #             std = [std[i] for i in range(13) if i != 10]
-                #         else:
-                #             raise RuntimeError(f"Cannot adjust transform for in_chans={in_chans} and mean/std length={len(transform.mean)}")
-                #         transform.mean = mean
-                #         transform.std = std
-                #     else:
-                #         pass
-                #         # print('Transform mean/std length matches in_chans, no adjustment needed.')
-                #         # raise RuntimeError(f"Transform mean/std length matches in_chans={in_chans}, no adjustment needed.")
-
             if transform:
-            #     print('Applying transform during feature extraction.')
-            #     print(f"Input image shape before transform: {image.shape}")
-            #     print(transform)
-            #     print(in_chans)
                 image = transform(image)
                 
             else:
@@ -802,13 +803,8 @@ def extract_embeddings_model(
             # if band dim differs,
             if in_chans != image.shape[1]:
                 # adjust 2nd dim
-                # print(f"Adjusting input channels from {image.shape[1]} to {in_chans}")
                 B10 = torch.zeros((1, 1, *image.shape[2:]), dtype=image.dtype, device=image.device)
                 image = torch.cat([image[:, :10, :, :], B10.repeat(image.shape[0], 1, 1, 1), image[:, 10:, :, :]], dim=1)
-                # B10 = torch.zeros((1, *image.shape[1:]), dtype=image.dtype, device=image.device)
-                # image = torch.cat([image[:10], B10, image[10:]], dim=0)
-                # image = torch.tensor(image)
-            # print(f"Input image shape to model: {image.shape}")
             z = feature_fn(model, image)  # (B, D)
 
             if b_idx == 0:
@@ -837,13 +833,36 @@ def compute_global_id(Z: np.ndarray) -> float:
     global_id = model.fit_transform(Z)
     return float(global_id)
 
+def compute_tle(Z: np.ndarray) -> float:
+    """
+    Compute global intrinsic dimension using TLE.
+    """
+    tle = id.TLE()
+    tle_pw = tle.fit_transform_pw(Z, n_neighbors=20)  # pointwise IDs
 
+    # print("TLE pw shape:", tle_pw.shape)
+    # print("NaNs in TLE pw:", np.isnan(tle_pw).sum())
+    # print("Infs in TLE pw:", np.isinf(tle_pw).sum())
+    # print("Finite TLE pw range:",
+    #     np.nanmin(tle_pw), np.nanmax(tle_pw))
+    
+    # count number that are below 0.00001
+    num_below_threshold = np.sum(tle_pw < 0)
+    print("Dropping TLE pw below 0.00001:", num_below_threshold)
+
+    # drop below 0
+    tle_pw = tle_pw[tle_pw >= 0]
+
+    # global TLE ignoring NaNs
+    global_tle = np.nanmean(tle_pw)
+    print("Global TLE (nanmean):", global_tle)
+    return float(global_tle)
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main() -> None:
     # device = torch.device("cuda")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = 'cuda' #torch.device("cuda" if torch.cuda.is_available() else "cpu")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     specs = build_model_specs()
@@ -858,9 +877,8 @@ def main() -> None:
         # try:
         loader = build_s2_like_loader(
             in_chans=spec.in_chans,
-            target_size=spec.target_size,
             batch_size=64,
-            num_workers=6,
+            num_workers=12,
             rgb_mode=spec.rgb_mode,
         )
 
@@ -888,6 +906,36 @@ def main() -> None:
      
         print(f"  Extracted {Z.shape[0]} embeddings with dimension {Z.shape[1]}.")
 
+        Z = Z.astype(np.float64)
+
+
+        # duplicate samples will cause issues
+        uniques = np.unique(Z, axis=0)
+        print("N:", len(Z), "unique:", len(uniques))
+
+        print(f'Removing duplicates: {len(Z) - len(uniques)} samples removed.')
+
+        # remove duplicates
+        Z = uniques
+
+        var_per_dim = Z.var(axis=0)
+        print("Min var:", var_per_dim.min(), "Max var:", var_per_dim.max())
+        print("Dims with ~0 variance:", np.sum(var_per_dim < 1e-10))
+
+        # Remove invalid samples
+        embeddings = torch.from_numpy(Z)
+        norms = torch.norm(embeddings, dim=1)
+        mask_valid = (norms > 1e-6) & torch.isfinite(norms)
+        embeddings = embeddings[mask_valid]
+
+        
+
+        # Check for duplicate/constant vectors
+        unique_embeddings = torch.unique(embeddings, dim=0)
+        if unique_embeddings.size(0) < 0.9 * embeddings.size(0):
+            print("⚠️ Warning: >10% duplicate or constant vectors detected!")
+
+
         try:
             gid = compute_global_id(Z)
             results[spec.name] = gid
@@ -908,7 +956,9 @@ def main() -> None:
             mom_results[spec.name] = mom_lid
             print(f"  Global MoM ID: {mom_lid:.4f}")
 
-            tle_lid = id.TLE().fit_transform(Z, n_neighbors=20)
+            # tle_lid = id.TLE().fit_transform(Z, n_neighbors=20)
+            # 
+            tle_lid = compute_tle(Z)
             tle_results[spec.name] = tle_lid
             print(f"  Global TLE ID: {tle_lid:.4f}")
 
@@ -932,26 +982,26 @@ def main() -> None:
     for name, gid in tle_results.items():
         print(f"{name:30s}: {gid:.4f}")
 
-    # saved path
-    # save all to same txt file
-    with open(OUTPUT_DIR / "global_id_results.txt", "w") as f:
-        f.write("=== Global IDs (FisherS) ===\n")
-        for name, gid in results.items():
-            f.write(f"{name:30s}: {gid:.4f}\n")
+    # # saved path
+    # # save all to same txt file
+    # with open(OUTPUT_DIR / "global_id_results_new.txt", "w") as f:
+    #     f.write("=== Global IDs (FisherS) ===\n")
+    #     for name, gid in results.items():
+    #         f.write(f"{name:30s}: {gid:.4f}\n")
 
-        f.write("\n=== Global IDs (MLE) ===\n")
-        for name, gid in mle_results.items():
-            f.write(f"{name:30s}: {gid:.4f}\n")
+    #     f.write("\n=== Global IDs (MLE) ===\n")
+    #     for name, gid in mle_results.items():
+    #         f.write(f"{name:30s}: {gid:.4f}\n")
 
-        f.write("\n=== Global IDs (MoM) ===\n")
-        for name, gid in mom_results.items():
-            f.write(f"{name:30s}: {gid:.4f}\n")
+    #     f.write("\n=== Global IDs (MoM) ===\n")
+    #     for name, gid in mom_results.items():
+    #         f.write(f"{name:30s}: {gid:.4f}\n")
 
-        f.write("\n=== Global IDs (TLE) ===\n")
-        for name, gid in tle_results.items():
-            f.write(f"{name:30s}: {gid:.4f}\n")
+    #     f.write("\n=== Global IDs (TLE) ===\n")
+    #     for name, gid in tle_results.items():
+    #         f.write(f"{name:30s}: {gid:.4f}\n")
 
-    print(f"\nResults saved to {OUTPUT_DIR / 'global_id_results.txt'}")
+    # print(f"\nResults saved to {OUTPUT_DIR / 'global_id_results_new.txt'}")
 
 
 if __name__ == "__main__":

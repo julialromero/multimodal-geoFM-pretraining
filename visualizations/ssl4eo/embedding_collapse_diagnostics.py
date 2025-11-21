@@ -279,44 +279,44 @@ def plot_projection(
 
 
 def _prepare_cka_tensor(tensor: torch.Tensor, take: Optional[int] = None) -> Optional[torch.Tensor]:
-    # print dim before
+    # # print dim before
     # print("Preparing CKA tensor with shape:", tensor.shape)
-    if tensor.dim() != 2:
-        tensor = tensor.flatten(start_dim=1)
-    if tensor.shape[0] < 2:
-        return None
-    if take is not None and take > 0:
-        tensor = tensor[:take]
+    # if tensor.dim() != 2:
+    #     tensor = tensor.flatten(start_dim=1)
+    # if tensor.shape[0] < 2:
+    #     return None
+    # if take is not None and take > 0:
+    #     tensor = tensor[:take]
     # print("Prepared CKA tensor with shape:", tensor.shape)
-    return tensor.to(dtype=torch.float64)
+    return tensor.to(dtype=torch.float32)
 
 
-def compute_linear_cka(
-    x: torch.Tensor,
-    y: torch.Tensor,
-    eps: float = 1e-12,
-) -> Optional[float]:
-    """Compute linear CKA similarity between two activation matrices."""
+# def compute_linear_cka(
+#     x: torch.Tensor,
+#     y: torch.Tensor,
+#     eps: float = 1e-12,
+# ) -> Optional[float]:
+#     """Compute linear CKA similarity between two activation matrices."""
 
-    # print shape of x and y
-    # print("Computing CKA between shapes:", x.shape, y.shape)
-    # if there are 3 dims:
+#     # print shape of x and y
+#     # print("Computing CKA between shapes:", x.shape, y.shape)
+#     # if there are 3 dims:
 
 
-    count = min(x.shape[0], y.shape[0])
-    if count < 2:
-        return None
-    x = x[:count] - x[:count].mean(dim=0, keepdim=True)
-    y = y[:count] - y[:count].mean(dim=0, keepdim=True)
-    cov_xy = x.t().matmul(y)
-    cov_xx = x.t().matmul(x)
-    cov_yy = y.t().matmul(y)
-    numerator = torch.linalg.norm(cov_xy, ord="fro") ** 2
-    denom = torch.linalg.norm(cov_xx, ord="fro") * torch.linalg.norm(cov_yy, ord="fro")
-    denom_value = float(denom.item()) if isinstance(denom, torch.Tensor) else float(denom)
-    if denom_value <= eps:
-        return None
-    return float((numerator / (denom + eps)).item())
+#     count = min(x.shape[0], y.shape[0])
+#     if count < 2:
+#         return None
+#     x = x[:count] - x[:count].mean(dim=0, keepdim=True)
+#     y = y[:count] - y[:count].mean(dim=0, keepdim=True)
+#     cov_xy = x.t().matmul(y)
+#     cov_xx = x.t().matmul(x)
+#     cov_yy = y.t().matmul(y)
+#     numerator = torch.linalg.norm(cov_xy, ord="fro") ** 2
+#     denom = torch.linalg.norm(cov_xx, ord="fro") * torch.linalg.norm(cov_yy, ord="fro")
+#     denom_value = float(denom.item()) if isinstance(denom, torch.Tensor) else float(denom)
+#     if denom_value <= eps:
+#         return None
+#     return float((numerator / (denom + eps)).item())
 
 
 def _layer_sort_key(name: str) -> Tuple[int, int, str]:
@@ -331,6 +331,9 @@ def _layer_sort_key(name: str) -> Tuple[int, int, str]:
 
 
 def compute_within_encoder_cka(layer_features: Dict[str, torch.Tensor]) -> Tuple[List[str], Optional[np.ndarray]]:
+    import CKA
+    cuda_cka = CKA.CudaCKA(device='cuda:1')
+
     ordered = layer_features #_order_layers(layer_features)
     prepared: Dict[str, torch.Tensor] = {}
     for name in ordered:
@@ -346,10 +349,12 @@ def compute_within_encoder_cka(layer_features: Dict[str, torch.Tensor]) -> Tuple
         x = prepared[name_i]
         matrix[i, i] = 1.0
         for j in range(i + 1, size):
-            value = compute_linear_cka(x, prepared[names[j]])
+            # assert that dtype matches
+            assert x.dtype == prepared[names[j]].dtype, "Mismatched dtypes in CKA computation: {} vs {}".format(x.dtype, prepared[names[j]].dtype)  
+            value = cuda_cka.linear_CKA(x, prepared[names[j]])
             if value is None:
-                continue
-            matrix[i, j] = matrix[j, i] = np.clip(value, 0.0, 1.0)
+                raise ValueError("CKA computation returned None")
+            matrix[i, j] = matrix[j, i] = np.clip(value.cpu(), 0.0, 1.0)
     return names, matrix
 
 
@@ -357,6 +362,8 @@ def compute_cross_encoder_cka(
     s1_layers: Dict[str, torch.Tensor],
     s2_layers: Dict[str, torch.Tensor],
 ) -> Tuple[List[str], List[str], Optional[np.ndarray]]:
+    import CKA
+    cuda_cka = CKA.CudaCKA(device='cuda:1')
     names_s1 = s1_layers #_order_layers(s1_layers)
     names_s2 = s2_layers #_order_layers(s2_layers)
     prepared_s1 = {name: _prepare_cka_tensor(s1_layers[name]) for name in names_s1}
@@ -370,10 +377,10 @@ def compute_cross_encoder_cka(
     matrix = np.full((len(names_1), len(names_2)), np.nan, dtype=np.float32)
     for i, name_i in enumerate(names_1):
         for j, name_j in enumerate(names_2):
-            value = compute_linear_cka(prepared_s1[name_i], prepared_s2[name_j])
+            value = cuda_cka.linear_CKA(prepared_s1[name_i], prepared_s2[name_j])
             if value is None:
-                continue
-            matrix[i, j] = np.clip(value, 0.0, 1.0)
+                raise ValueError("CKA computation returned None")
+            matrix[i, j] = np.clip(value.cpu(), 0.0, 1.0)
     return names_1, names_2, matrix
 
 
@@ -445,6 +452,17 @@ def _register_layer_hooks(
 
     print('REGISTERING LAYER HOOKS')
 
+    # handle wrappers like CromaEvaluationAdapter
+    # if model is torchgeoresnetadapter
+    real_model = model
+    # if model.__class__.__name__ == "TorchGeoResNetAdapter" or model.__class__.__name__ == "CIIPEvaluationAdapter":
+    #     real_model = model
+    # else:
+    #     if hasattr(model, "base_model"):
+    #         real_model = model.base_model
+    #     else:
+    #         real_model = model
+
     def _make_layer_hook(key: str, name: str):
         cache = layer_caches[key].setdefault(name, [])
 
@@ -455,89 +473,51 @@ def _register_layer_hooks(
             if not isinstance(tensor, torch.Tensor):
                 return
             tensor = tensor.detach()
-            if tensor.dim() > 2:
-                tensor = F.adaptive_avg_pool2d(tensor, (1, 1))
-            tensor = tensor.flatten(start_dim=1).to(device="cpu", dtype=torch.float32)
+
+
+            # if tensor.dim() == 4:
+            #     tensor = F.adaptive_avg_pool2d(tensor, (1,1))
+            # elif tensor.dim() == 3:
+            #     # ViT case
+            #     tensor = tensor.mean(dim=1, keepdim=True)
+
+            tensor = tensor.flatten(start_dim=1) #.to(device="cpu", dtype=torch.float32)
+            # set dtype to cuda (not cpu)  float32
+            tensor = tensor.to(device="cuda:1", dtype=torch.float32)
             cache.append(tensor)
 
         return hook
-
-    # def _attach_layers(encoder: Optional[nn.Module], key: str) -> None:
-    #     if encoder is None:
-    #         return
-    #     layer_names = [
-    #         "conv1",
-    #         "bn1",
-    #         "relu",
-    #         "maxpool",
-    #         "layer1",
-    #         "layer2",
-    #         "layer3",
-    #         "layer4",
-    #         "avgpool",
-    #         "fc",
-    #     ]
-    #     for name in layer_names:
-    #         module = getattr(encoder, name, None)
-    #         if not isinstance(module, nn.Module):
-    #             continue
-    #         # try:
-    #         handles.append(module.register_forward_hook(_make_layer_hook(key, name)))
-    #         # except Exception:
-    #         #     continue
 
     def _attach_layers(encoder: Optional[nn.Module], key: str) -> None:
         if encoder is None:
             return
 
-        # Pick which kinds of modules you want to capture.
-        # This covers all useful points: conv/bn/relu/pools/linear + block activations.
-        WHITELIST = (
-            nn.Conv2d,
-            nn.BatchNorm2d,
-            nn.ReLU,
-            nn.MaxPool2d,
-            nn.AdaptiveAvgPool2d,
-            nn.AvgPool2d,
-            nn.Linear,
-        )
+        # for name, module in encoder.named_modules():
+        #     print("Module name:", name, "Type:", type(module))
+  
 
         for name, module in encoder.named_modules():
-            # skip the top-level module itself (empty name)
-            if not name:
-                continue
-
-            # Option A: capture every whitelisted submodule (includes block relus like layer3.5.relu)
-            if isinstance(module, WHITELIST):
+            if isinstance(module, (nn.Linear, nn.Conv2d, nn.LayerNorm, nn.BatchNorm2d, nn.ReLU)):
                 handles.append(module.register_forward_hook(_make_layer_hook(key, name)))
     
-    # if ciip model
-    if hasattr(model, "encoder_s1") and hasattr(model, "encoder_s2") and model.encoder_s1 is not None:
-        encoder_s1 = getattr(model, "encoder_s1", None)
-        assert encoder_s1 is not None, f"Model must have an S1 encoder: {model}"
-        if encoder_s1 is not None:
-            for attr in ("proj", "projection_head", "fc"):
-                module = getattr(encoder_s1, attr, None)
-                if isinstance(module, nn.Module):
-                    break
-            # print("Attaching layers for S1 encoder")
-            # print(encoder_s1)
-            _attach_layers(encoder_s1, "s1")
+    # print(real_model)
+    # print(real_model.encoder_s2)
+    encoder_s1 = getattr(real_model, "encoder_s1", None)
+    encoder_s2 = getattr(real_model, "encoder_s2")
 
-        encoder_s2 = getattr(model, "encoder_s2", None)
-        assert encoder_s2 is not None, f"Model must have an S2 encoder: {model}"
-        if encoder_s2 is not None:
-            for attr in ("proj", "projection_head", "fc"):
-                module = getattr(encoder_s2, attr, None)
-                if isinstance(module, nn.Module):
-                    break
-            _attach_layers(encoder_s2, "s2")
+    # print(real_model)
 
-    # if model is torchgeo resnet, attach layers differently
-    elif model.__class__.__name__.lower() == "torchgeoresnetadapter":
-        # print("Attaching layers for TorchGeoResNetAdapter")
-        encoder = getattr(model, "encoder_s2", None)
-        _attach_layers(encoder, "s2")
+    print('ENCODER S1:', encoder_s1)
+    print('ENCODER S2:', encoder_s2)
+
+    if encoder_s1 is not None:
+        _attach_layers(encoder_s1, "s1")
+
+    if encoder_s2 is not None:
+        _attach_layers(encoder_s2, "s2")
+
+
+    # raise NotImplementedError("Debugging.")
 
     # print("Registered layer hooks for embedding extraction.")
     # print("Layers for S1 encoder:", list(layer_caches["s1"].keys()))
@@ -624,36 +604,48 @@ def extract_embeddings_for_dataset(
             s2_backbone = None
 
             with ctx:
-                print('Extracting raw embeddings')
+                # print(model)
+                assert has_posthead == has_projected, "Model must have both posthead and projected methods or re-implement."
 
                 if has_posthead:
+                    print('Extracting raw embeddings')
                     if model.encoder_s1 is not None:
                         s1_raw = model.compute_posthead(s1_tensor, modality='s1')
-
                     s2_raw = model.compute_posthead(s2_tensor, modality='s2')
 
+                    assert s2_raw is not None, "S2 raw embedding extraction returned None"
+                    
+           
+                    with capture_controller.suspend():
+                        # now extract backbone embeddings
+                        print('Extracting backbone embeddings')
+                        if model.encoder_s1 is not None:
+                            s1_backbone = model.compute_backbone(
+                                s1_tensor.float(), modality='s1'
+                            )
+                        s2_backbone = model.compute_backbone(
+                        s2_tensor.float(), modality='s2')
 
-                with capture_controller.suspend():
-
-                    if has_projected:
-
+                        
                         print('Extracting norm embeddings')
                         if model.encoder_s1 is not None:
                             s1_norm = model.compute_projected(s1_tensor, modality='s1')
 
                         s2_norm = model.compute_projected(s2_tensor, modality='s2')
 
-                    # now extract backbone embeddings
+
+                else:
                     print('Extracting backbone embeddings')
                     if model.encoder_s1 is not None:
                         s1_backbone = model.compute_backbone(
                             s1_tensor.float(), modality='s1'
                         )
+                        assert s1_backbone is not None, "S1 backbone extraction returned None"
                     s2_backbone = model.compute_backbone(
                         s2_tensor.float(), modality='s2')
+
+
                 
-
-
             for handle in handles:
                 handle.remove()
 
@@ -693,9 +685,6 @@ def extract_embeddings_for_dataset(
             return torch.cat(list_tensors, dim=0)
         return torch.stack(list_tensors, dim=0)
     
-    # print(layer_cache["s1"].items())
-    # print(layer_cache["s2"].items())
-
     s1_layers = {name: torch.cat(tensors, dim=0) for name, tensors in layer_cache["s1"].items() if tensors}
     s2_layers = {name: torch.cat(tensors, dim=0) for name, tensors in layer_cache["s2"].items() if tensors}
 
@@ -764,7 +753,7 @@ def _plot_cka(ax, matrix: Optional[np.ndarray], x_labels: List[str], y_labels: L
         ax.set_xticks([])
         ax.set_yticks([])
         return
-    im = ax.imshow(matrix, vmin=0.0, vmax=1.0, aspect="auto", cmap="viridis", origin='lower')
+    im = ax.imshow(matrix, vmin=0.0, vmax=1.0, aspect="auto", cmap="magma", origin='lower')
     ax.set_title(title)
     # assert contents of
     assert [a == b for (a, b) in zip(x_labels, y_labels)], f"{x_labels} \n\n {y_labels}"
@@ -784,44 +773,15 @@ def _plot_cka(ax, matrix: Optional[np.ndarray], x_labels: List[str], y_labels: L
     ax.figure.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="Linear CKA")
 
 
-def plot_epoch_diagnostics_s2only(epoch_diag: EpochDiagnostics, output_dir: Path, label: str) -> Path:
+def plot_epoch_diagnostics_s2only(epoch_diag: EpochDiagnostics, output_dir: Path, label: str, plot_even_odd=True) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 2x2 layout: [S2 singular values | summary], [S2 within-CKA | empty]
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig, axes = plt.subplots(1, 4, figsize=(16, 4))
+    
 
-    # Embedding dim for S2
-    if epoch_diag.s2.raw is None:
-        embedding_dim_s2 = 0
-    elif epoch_diag.s2.raw.ndim == 2:
-        embedding_dim_s2 = epoch_diag.s2.raw.shape[1]
-    else:
-        embedding_dim_s2 = epoch_diag.s2.raw.view(epoch_diag.s2.raw.shape[0], -1).shape[1]
-
-    # Top-left: S2 singular values
-    _plot_singular_values(
-        axes[0, 0],
-        epoch_diag.s2_singular_values,
-        modality="S2",
-        embedding_dim=embedding_dim_s2,
-        label='posthead-raw'
-    )
-
-    # Top-right: summary text
-    axes[0, 1].axis("off")
-    axes[0, 1].text(
-        0.5,
-        0.5,
-        f"{label}:\nEpoch {epoch_diag.epoch}\n"
-        f"Samples: {len(epoch_diag.ids)}*64={len(epoch_diag.ids)*64}",
-        ha="center",
-        va="center",
-        transform=axes[0, 1].transAxes,
-    )
-
-    # Bottom-left: S2 within-encoder CKA
+    # Left: S2 within-encoder CKA
     _plot_cka(
-        axes[1, 0],
+        axes[0],
         epoch_diag.s2_within_cka,
         epoch_diag.s2_layers,
         epoch_diag.s2_layers,
@@ -830,61 +790,147 @@ def plot_epoch_diagnostics_s2only(epoch_diag: EpochDiagnostics, output_dir: Path
         ylabel="Layer",
     )
 
-    # Bottom-right: empty
-    axes[1, 1].axis("off")
+    if plot_even_odd:
+        odd_idx, even_idx = _split_odd_even_indices(epoch_diag.s2_layers)
 
-    fig.suptitle(f"Embedding diagnostics — {epoch_diag.label}")
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
+        _plot_cka_subset(
+            axes[1],
+            epoch_diag.s2_within_cka,
+            epoch_diag.s2_layers,
+            odd_idx,
+            title="S2 within-encoder (odd layers)",
+        )
+
+        _plot_cka_subset(
+            axes[2],
+            epoch_diag.s2_within_cka,
+            epoch_diag.s2_layers,
+            even_idx,
+            title="S2 within-encoder (even layers)",
+        )
+    else:
+        axes[1].axis("off")
+        axes[2].axis("off")
+
+    for ax in axes[:3]:      # last one is the text box
+        ax.set_aspect('equal', adjustable='box')
+
+
+    # Right: summary text
+    axes[3].axis("off")
+    axes[3].text(0.5, 0.5,
+        f"{label}:\nEpoch {epoch_diag.epoch}\n"
+        f"Samples: {len(epoch_diag.ids)}*64={len(epoch_diag.ids)*64}",
+        ha="center",
+        va="center",
+        transform=axes[3].transAxes,  # ← BUG: Using axes[1] instead of axes[3]
+        fontsize=14,
+    )
+
+    fig.suptitle(f"S2 Embedding diagnostics — {epoch_diag.label}")
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
 
     output_path = output_dir / "embedding_diagnostics.png"
     fig.savefig(output_path, dpi=200)
     plt.close(fig)
     return output_path
 
-def plot_epoch_diagnostics(epoch_diag: EpochDiagnostics, output_dir: Path, label: str) -> Path:
+
+def _split_odd_even_indices(layer_names: list[str]) -> tuple[list[int], list[int]]:
+    """
+    Return indices for 'odd' and 'even' layers.
+
+    For ResNet-like models we mimic the paper:
+      - odd  = bn3 outputs inside bottlenecks
+      - even = post-residual ReLUs (block outputs)
+
+    If we don't find such names, we fall back to index parity.
+    """
+    odd_idx: list[int] = []
+    even_idx: list[int] = []
+
+    for i, name in enumerate(layer_names):
+        # bn3 inside a bottleneck
+        if "bn3" in name:
+            odd_idx.append(i)
+        # post-residual relu – often something like 'layer3.5.relu'
+        elif name.endswith("relu") and "layer" in name:
+            even_idx.append(i)
+
+    # Fallback: use index parity if name-based detection fails
+    if not odd_idx or not even_idx:
+        odd_idx = [i for i in range(len(layer_names)) if i % 2 == 1]
+        even_idx = [i for i in range(len(layer_names)) if i % 2 == 0]
+
+    return odd_idx, even_idx
+
+def _plot_cka_subset(ax, full_matrix: np.ndarray, layer_names: list[str],
+                    indices: list[int], title: str) -> None:
+    if full_matrix is None or full_matrix.size == 0 or not indices:
+        ax.text(0.5, 0.5, "CKA unavailable", ha="center", va="center",
+                transform=ax.transAxes, color="gray")
+        ax.set_title(title)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        return
+
+    sub_mat = full_matrix[np.ix_(indices, indices)]
+    # re-use your existing helper
+    sub_names = [layer_names[i] for i in indices]
+    _plot_cka(ax, sub_mat, sub_names, sub_names,
+              title=title, xlabel="Layer #", ylabel="Layer #")
+
+def plot_epoch_diagnostics(epoch_diag: EpochDiagnostics, output_dir: Path, label: str, plot_even_odd) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
 
-    if epoch_diag.s1.raw is None:
-        embedding_dim_s1 = 0
-    elif epoch_diag.s1.raw.ndim == 2:
-        embedding_dim_s1 = epoch_diag.s1.raw.shape[1]
-    else:
-        embedding_dim_s1 = epoch_diag.s1.raw.view(epoch_diag.s1.raw.shape[0], -1).shape[1]
+    # 2x4 layout: Top row = S1, Bottom row = S2, Cross-encoder in top-right
+    fig, axes = plt.subplots(2, 4, figsize=(20, 10))
 
-    if epoch_diag.s2.raw is None:
-        embedding_dim_s2 = 0
-    elif epoch_diag.s2.raw.ndim == 2:
-        embedding_dim_s2 = epoch_diag.s2.raw.shape[1]
-    else:
-        embedding_dim_s2 = epoch_diag.s2.raw.view(epoch_diag.s2.raw.shape[0], -1).shape[1]
+    print(
+        f'Plotting CKA matrices:\n'
+        f'  S1 layers={epoch_diag.s1_layers}\n'
+        f'  S2 layers={epoch_diag.s2_layers}'
+    )
 
-
-    _plot_singular_values(axes[0, 0], epoch_diag.s1_singular_values, modality="S1", embedding_dim=embedding_dim_s1, label='posthead-raw')
-    _plot_singular_values(axes[0, 1], epoch_diag.s2_singular_values, modality="S2", embedding_dim=embedding_dim_s2, label='posthead-raw')
-    axes[0, 2].axis("off")
-    axes[0, 2].text(0.5, 0.5, f"{label}:/nEpoch {epoch_diag.epoch}\n{epoch_diag.label}\nSamples: {len(epoch_diag.ids)}*64={len(epoch_diag.ids)*64}", ha="center", va="center", transform=axes[0, 2].transAxes)
-
+    # === TOP ROW (S1 ENCODER) ===
+    
+    # [0,0]: S1 full
     _plot_cka(
-        axes[1, 0],
+        axes[0, 0],
         epoch_diag.s1_within_cka,
         epoch_diag.s1_layers,
         epoch_diag.s1_layers,
-        title="S1 within-encoder",
+        title="S1 within-encoder (all layers)",
         xlabel="Layer",
         ylabel="Layer",
     )
+
+    # [0,1] & [0,2]: S1 odd/even (if enabled)
+    if plot_even_odd:
+        s1_odd_idx, s1_even_idx = _split_odd_even_indices(epoch_diag.s1_layers)
+
+        _plot_cka_subset(
+            axes[0, 1],
+            epoch_diag.s1_within_cka,
+            epoch_diag.s1_layers,
+            s1_odd_idx,
+            title="S1 within-encoder (odd layers)",
+        )
+
+        _plot_cka_subset(
+            axes[0, 2],
+            epoch_diag.s1_within_cka,
+            epoch_diag.s1_layers,
+            s1_even_idx,
+            title="S1 within-encoder (even layers)",
+        )
+    else:
+        axes[0, 1].axis("off")
+        axes[0, 2].axis("off")
+
+    # [0,3]: Cross-encoder
     _plot_cka(
-        axes[1, 1],
-        epoch_diag.s2_within_cka,
-        epoch_diag.s2_layers,
-        epoch_diag.s2_layers,
-        title="S2 within-encoder",
-        xlabel="Layer",
-        ylabel="Layer",
-    )
-    _plot_cka(
-        axes[1, 2],
+        axes[0, 3],
         epoch_diag.cross_cka,
         epoch_diag.cross_s2_layers,
         epoch_diag.cross_s1_layers,
@@ -893,12 +939,67 @@ def plot_epoch_diagnostics(epoch_diag: EpochDiagnostics, output_dir: Path, label
         ylabel="S1 layer",
     )
 
-    fig.suptitle(f"Embedding diagnostics — {epoch_diag.label}")
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    # === BOTTOM ROW (S2 ENCODER) ===
+    
+    # [1,0]: S2 full
+    _plot_cka(
+        axes[1, 0],
+        epoch_diag.s2_within_cka,
+        epoch_diag.s2_layers,
+        epoch_diag.s2_layers,
+        title="S2 within-encoder (all layers)",
+        xlabel="Layer",
+        ylabel="Layer",
+    )
+
+    # [1,1] & [1,2]: S2 odd/even (if enabled)
+    if plot_even_odd:
+        s2_odd_idx, s2_even_idx = _split_odd_even_indices(epoch_diag.s2_layers)
+
+        _plot_cka_subset(
+            axes[1, 1],
+            epoch_diag.s2_within_cka,
+            epoch_diag.s2_layers,
+            s2_odd_idx,
+            title="S2 within-encoder (odd layers)",
+        )
+
+        _plot_cka_subset(
+            axes[1, 2],
+            epoch_diag.s2_within_cka,
+            epoch_diag.s2_layers,
+            s2_even_idx,
+            title="S2 within-encoder (even layers)",
+        )
+    else:
+        axes[1, 1].axis("off")
+        axes[1, 2].axis("off")
+
+    # [1,3]: Summary text
+    axes[1, 3].axis("off")
+    axes[1, 3].text(
+        0.5, 0.5,
+        f"{label}:\nEpoch {epoch_diag.epoch}\n"
+        f"Samples: {len(epoch_diag.ids)}*64={len(epoch_diag.ids)*64}",
+        ha="center",
+        va="center",
+        transform=axes[1, 3].transAxes,
+        fontsize=14,
+        bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgray", alpha=0.8)
+    )
+
+    fig.suptitle(
+        f"Embedding diagnostics — {epoch_diag.label}\n"
+        f"Epoch {epoch_diag.epoch} | Samples: {len(epoch_diag.ids)}*64={len(epoch_diag.ids)*64}",
+        fontsize=16
+    )
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+
     output_path = output_dir / "embedding_diagnostics.png"
-    fig.savefig(output_path, dpi=200)
+    fig.savefig(output_path, dpi=200, bbox_inches='tight')
     plt.close(fig)
     return output_path
+
 
 
 def _build_subset(dataset: torch.utils.data.Dataset, subset_size: int, seed: int) -> torch.utils.data.Dataset:

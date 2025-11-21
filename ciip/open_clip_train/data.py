@@ -18,6 +18,7 @@ import xarray as xr
 from zarr.storage import ZipStore
 from torchvision import transforms
 import torchvision
+import torchvision.transforms.functional as F
 ### band statistics: mean & std
 # calculated from 50k data
 ### OLD SSL4EO v1.0 STATS
@@ -85,358 +86,514 @@ def _transpose_spatial_first(da: xr.DataArray, band_dim: Optional[str]) -> xr.Da
     return da
 
 DEFAULT_S2_BANDS = ["1", "2", "3", "4", "5", "6", "7", "8", "8A", "9", "11", "12"]
+from pathlib import Path
+from typing import Optional, Callable, Dict, Any
+
+from pathlib import Path
+from typing import Optional, Callable, Dict, Any
+
+import numpy as np
+import xarray as xr
+import torch
+from torch.utils.data import Dataset
+
+
+from pathlib import Path
+from typing import Optional, Callable, Dict, Any
+
+import numpy as np
+import xarray as xr
+import torch
+from torch.utils.data import Dataset
+
+
+from pathlib import Path
+from typing import Optional, Callable, Dict, Any
+
+import numpy as np
+import xarray as xr
+import torch
+from torch.utils.data import Dataset
+
+import torchvision.transforms as T
+
 class SSL4EODataset(Dataset):
-    """Indexes SSL4EO v1.1 by (location file, season). Each __getitem__ returns ALL 'sample' patches in that file, concatenable into batch."""
-
-
     def __init__(
         self,
-        root: str,
-        dataset_name: str = "bands",
-        seasons: Optional[int] = None,
-        transforms=None,
-        target_image_dimension: Tuple[int, int] = (224, 224),
-        s2_tier: str = "s2l2a",
+        root: str | Path,
+        seasons: list[int] = [0, 1, 2, 3],
+        transforms: Optional[Any] = None,
+        num_samples_per_file: int = 64,
+        num_timestamps: int = 4,
+        s2_tier: str = "S2L2A",
         is_train: bool = True,
     ):
-        self.root = root
+        self.root = Path(root)
         self.is_train = is_train
-        self.dataset_name = str(dataset_name)
-        self.s1_transforms = None
-        self.s2_transforms = None
-        if transforms is None:
-            self.s1_transforms = transforms['s1']
-            self.s2_transforms = transforms['s2']
-        # self.resize_transform = #Resize(target_image_dimension)
-        if target_image_dimension is not None:
-            self.crop = torchvision.transforms.CenterCrop(target_image_dimension)
+        self.seasons = seasons
+        self.transforms = transforms
+        self.s1_transforms = transforms["s1"]
+        self.s2_transforms = transforms["s2"]
 
-        self.s1_dir = os.path.join(root, "S1GRD")
-        if s2_tier.lower() == "s2l1c":
-            self.s2_dir = os.path.join(root, "S2L1C")
-            s2_band_names = ["1", "2", "3", "4", "5", "6", "7", "8", "8A", "9", "10", "11", "12"]
-        else:
-            self.s2_dir = os.path.join(root, "S2L2A")
-            s2_band_names = DEFAULT_S2_BANDS
+        self.num_samples_per_file = num_samples_per_file
+        self.num_timestamps = num_timestamps
 
-        if not os.path.isdir(self.s1_dir):
-            raise FileNotFoundError(f"S1GRD directory not found at {self.s1_dir}")
-        if not os.path.isdir(self.s2_dir):
-            raise FileNotFoundError(f"S2 directory not found at {self.s2_dir}")
-
-        s1_tiles = {os.path.basename(p): p for p in glob.glob(os.path.join(self.s1_dir, "*.zarr"))}
-        s1_tiles.update({os.path.basename(p): p for p in glob.glob(os.path.join(self.s1_dir, "*.zarr.zip"))})
-        s2_tiles = {os.path.basename(p): p for p in glob.glob(os.path.join(self.s2_dir, "*.zarr"))}
-        s2_tiles.update({os.path.basename(p): p for p in glob.glob(os.path.join(self.s2_dir, "*.zarr.zip"))})
-
-        common_tiles = sorted(set(s1_tiles) & set(s2_tiles))
-        if not common_tiles:
-            raise RuntimeError(f"No matching S1/S2 tiles found under {root}")
-
-        self.sample_names = common_tiles
-        self.s1_paths = [s1_tiles[name] for name in common_tiles]
-        self.s2_paths = [s2_tiles[name] for name in common_tiles]
-        self.num_locations = len(self.sample_names)
-
-        # seasons & samples-per-file
-        self.available_seasons = self._infer_dim(self.s2_paths[0], dim_name="time", default=1)
-        self.samples_per_file = self._infer_dim(self.s2_paths[0], dim_name="sample", default=1)
-
-        if seasons is None:
-            self.seasons = self.available_seasons
-        else:
-            if seasons > self.available_seasons:
-                raise ValueError(
-                    f"Requested {seasons} seasons but tiles only provide {self.available_seasons}"
-                )
-            self.seasons = seasons
-
-        # Length = files * seasons (NOT multiplied by samples_per_file)
-        self.length = self.num_locations * self.seasons
-
-        # bands & stats
-        self.s2_band_names = [
-            _canonicalize_band_label(b)
-            for b in (s2_band_names if s2_band_names is not None else self.DEFAULT_S2_BANDS)
-        ]
-
-        self._s2_band_selection: Optional[Tuple[str, List[int]]] = self._resolve_s2_band_selection(self.s2_paths[0])
-
-        logging.debug(
-            "Loaded SSL4EO v1.1 dataset with %d tiles, %d seasons, %d samples/file",
-            self.num_locations, self.seasons, self.samples_per_file
+        assert len(self.seasons) == self.num_timestamps, (
+            f"len(seasons)={len(self.seasons)} must equal num_timestamps={self.num_timestamps}"
         )
+
+        self.s1_dir = self.root / "S1GRD"
+        if s2_tier in ["s2l2a", "S2L2A"]:
+            self.s2_dir = self.root / "S2L2A"
+        elif s2_tier in ["s2l1c", "S2L1C"]:
+            self.s2_dir = self.root / "S2L1C"
+        else:
+            raise ValueError(f"Unsupported s2_tier: {s2_tier}")
+                
+
+        print("S1 dir:", self.s1_dir)
+        print("S2 dir:", self.s2_dir)
+
+        assert self.s1_dir.exists(), f"Missing directory: {self.s1_dir}"
+        assert self.s2_dir.exists(), f"Missing directory: {self.s2_dir}"
+
+        # Shared filenames between S1 and S2
+        self.file_names = sorted(p.name for p in self.s2_dir.glob("*.zarr.zip"))
+        self.num_files = len(self.file_names)
+        assert self.num_files > 0, f"No zarr files found in {self.s2_dir}"
+
+        # Index by file (location), NOT by sample
+        self._len = self.num_files
+        print("Number of files (dataset length):", self._len)
 
     def __len__(self) -> int:
-        return self.length
+        return self._len
 
-    def __getitem__(self, idx: int):
-        if idx < 0 or idx >= self.length:
-            raise IndexError("Index out of range")
+    # -----------------------------------------------------
+    def _open_zarr_pair(self, file_idx: int):
+        """Open matching S1 and S2 zarr datasets for the given file index."""
+        fname = self.file_names[file_idx]
+        s1_path = self.s1_dir / fname
+        s2_path = self.s2_dir / fname
 
-        # Index files (locations) first, then season
-        location_idx = idx // self.seasons
-        season_idx = idx % self.seasons
+        assert s1_path.exists(), f"Missing file: {s1_path}"
+        assert s2_path.exists(), f"Missing file: {s2_path}"
 
-        # Load full stack of per-file samples for this season → (P, C, H, W)
-        s1_array = self._load_zarr_slice(self.s1_paths[location_idx], season_idx, band_selection=None, expect_bands=2)
-        s2_array = self._load_zarr_slice(self.s2_paths[location_idx], season_idx, band_selection=self._s2_band_selection, expect_bands=len(self.s2_band_names))
+        ds_s1 = xr.open_zarr(s1_path)
+        ds_s2 = xr.open_zarr(s2_path)
+        return ds_s1, ds_s2
 
-        # Torch tensors: (P, C, H, W)
-        s1_tensor = torch.from_numpy(s1_array).float()
-        s2_tensor = torch.from_numpy(s2_array).float()
+    # -----------------------------------------------------
+    def _apply_transforms(
+        self,
+        s1: torch.Tensor,  # (P, 2, H, W)
+        s2: torch.Tensor,  # (P, 12, H, W)
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Apply joint spatial transforms + per-modality transforms.
 
-        # # Resize supports leading batch dims; shape stays (P, C, H, W)
-        # s1_tensor = self.resize_transform(s1_tensor)
-        # s2_tensor = self.resize_transform(s2_tensor)
+        s1, s2: (P, C, H, W) where P = num_samples_per_file (64).
+        We apply the SAME crop/flip to all 64 samples and both modalities,
+        then apply s1_transforms/s2_transforms per sample.
+        """
+        if self.transforms is None:
+            return s1, s2
 
-        # CenterCrop supports leading batch dims; shape stays (P, C, H, W)
-        if hasattr(self, 'crop'):
-            s1_tensor = self.crop(s1_tensor)
-            s2_tensor = self.crop(s2_tensor)
-            
+        P, C1, H, W = s1.shape
+        _, C2, H2, W2 = s2.shape
+        assert C1 == 2, f"Expected 2 S1 channels, got {C1}"
+        assert C2 == 12 or C2 == 13, f"Expected 12 S2 channels, got {C2}"
+        assert (H, W) == (H2, W2)
 
-        # Optional transforms (should also support (P, C, H, W))
-        if self.s1_transforms is not None:
-            if self.is_train:
-                i, j, h, w = transforms.RandomCrop.get_params(s1_tensor, output_size=(224, 224))
-                s1_tensor = transforms.functional.crop(s1_tensor, i, j, h, w)
-                s2_tensor = transforms.functional.crop(s2_tensor, i, j, h, w)
-                # ---- 2. Joint Horizontal Flip ----
-            if self.is_train and random.random() < 0.5:
-                s1 = transforms.functional.hflip(s1)
-                s2 = transforms.functional.hflip(s2)
+        s1_tensor = s1
+        s2_tensor = s2
 
-            # ---- 3. Joint Vertical Flip ----
-            if self.is_train and random.random() < 0.5:
-                s1 = transforms.functional.vflip(s1)
-                s2 = transforms.functional.vflip(s2)
-                
-            s1_tensor = self.s1_transforms(s1_tensor)
-            s2_tensor = self.s2_transforms(s2_tensor)
-
-        # Normalize channel-wise; supports (P,C,H,W) or (C,H,W)
-        # s1_tensor = self.normalize_s1(s1_tensor)
-        # s2_tensor = self.normalize_s2(s2_tensor, self.s2_stats, self.s2_band_names)
-
-        # Return (P,C,H,W) for both; collate_fn will flatten P into batch
-        # print('returning samples_per_file:', s1_tensor.shape[0])
-        # print range of each tensor
-        # print("s1_tensor range:", s1_tensor.min().item(), s1_tensor.max().item())
-        # print("s2_tensor range:", s2_tensor.min().item(), s2_tensor.max().item())
-        # raise ValueError("Debugging - remove this")
-        return s1_tensor, s2_tensor
-
-    # ---------- helpers ----------
-
-    def _get_data_array(self, ds: xr.Dataset, sample_path: str) -> xr.DataArray:
-        requested = str(self.dataset_name).strip()
-        if requested:
-            if requested in ds.data_vars:
-                return ds[requested]
-            requested_lower = requested.lower()
-            for name in ds.data_vars:
-                if name.lower() == requested_lower:
-                    return ds[name]
-        if ds.data_vars:
-            if len(ds.data_vars) == 1:
-                (name,) = ds.data_vars
-                return ds[name]
-            available = sorted(ds.data_vars)
-            raise KeyError(
-                f"Dataset '{self.dataset_name}' not found in {sample_path}. "
-                f"Available datasets: {available}"
+        if self.is_train:
+            # Use first sample to get crop params, then apply to all P
+            i, j, h, w = T.RandomCrop.get_params(s1_tensor[0], output_size=(224, 224))
+            s1_tensor = torch.stack(
+                [F.crop(s1_tensor[p], i, j, h, w) for p in range(P)],
+                dim=0,
             )
-        raise KeyError(
-            f"Dataset '{self.dataset_name}' not found in {sample_path} and no data variables present"
+            s2_tensor = torch.stack(
+                [F.crop(s2_tensor[p], i, j, h, w) for p in range(P)],
+                dim=0,
+            )
+
+            # Joint horizontal flip
+            if random.random() < 0.5:
+                s1_tensor = torch.flip(s1_tensor, dims=[3])  # flip W
+                s2_tensor = torch.flip(s2_tensor, dims=[3])
+
+            # Joint vertical flip
+            if random.random() < 0.5:
+                s1_tensor = torch.flip(s1_tensor, dims=[2])  # flip H
+                s2_tensor = torch.flip(s2_tensor, dims=[2])
+
+        # Apply modality-specific transforms per patch
+        s1_out = torch.stack(
+            [self.s1_transforms(s1_tensor[p]) for p in range(P)],
+            dim=0,
+        )
+        s2_out = torch.stack(
+            [self.s2_transforms(s2_tensor[p]) for p in range(P)],
+            dim=0,
         )
 
-    def _infer_dim(self, sample_path: str, dim_name: str, default: int) -> int:
-        def _extract(ds: xr.Dataset) -> int:
-            da = self._get_data_array(ds, sample_path)
-            return int(da.sizes.get(dim_name, default))
-        if sample_path.endswith(".zarr.zip"):
-            with ZipStore(sample_path, mode="r") as store:
-                ds = _open_zarr_dataset(store)
-                try:
-                    return _extract(ds)
-                finally:
-                    ds.close()
-        ds = _open_zarr_dataset(sample_path)
-        try:
-            return _extract(ds)
-        finally:
-            ds.close()
+        return s1_out, s2_out
 
-    def _resolve_s2_band_selection(self, sample_path: str) -> Optional[Tuple[str, List[int]]]:
-        def _compute(ds: xr.Dataset) -> Optional[Tuple[str, List[int]]]:
-            da = self._get_data_array(ds, sample_path)
-            for candidate in ("band", "bands", "variable", "channels"):
-                if candidate in da.dims:
-                    coord = da.coords.get(candidate)
-                    if coord is None:
-                        continue
-                    available = [_canonicalize_band_label(v) for v in coord.values]
-                    indices: List[int] = []
-                    for desired in self.s2_band_names:
-                        if desired not in available:
-                            raise ValueError(f"Band '{desired}' not found in tile ({available})")
-                        indices.append(available.index(desired))
-                    return candidate, indices
-            return None
+    # -----------------------------------------------------
+    def __getitem__(self, file_idx: int) -> Dict[str, Any]:
+        """Index by file: return all 64 samples for one random season."""
+        # Random time index (shared across modalities for this file)
+        time_idx = np.random.randint(0, self.num_timestamps)
+        season_name = self.seasons[time_idx]
 
-        if sample_path.endswith(".zarr.zip"):
-            with ZipStore(sample_path, mode="r") as store:
-                ds = _open_zarr_dataset(store)
-                try:
-                    return _compute(ds)
-                finally:
-                    ds.close()
-        ds = _open_zarr_dataset(sample_path)
-        try:
-            return _compute(ds)
-        finally:
-            ds.close()
+        ds_s1, ds_s2 = self._open_zarr_pair(file_idx)
 
-    def _load_zarr_slice(
-        self,
-        sample_path: str,
-        season_idx: int,
-        band_selection: Optional[Tuple[str, List[int]]] = None,
-        expect_bands: Optional[int] = None,
-    ) -> np.ndarray:
-        """Return array shaped (P, C, H, W), where P=samples_per_file."""
-        def _extract(ds: xr.Dataset) -> np.ndarray:
-            da = self._get_data_array(ds, sample_path)
+        # Expect (sample=64, time=4, band=C, y, x)
+        arr_s1 = ds_s1["bands"].values
+        arr_s2 = ds_s2["bands"].values
 
-            # Select season (time)
-            if "time" in da.dims:
-                if season_idx >= int(da.sizes["time"]):
-                    raise IndexError(
-                        f"Requested season {season_idx} but tile only has {int(da.sizes['time'])}"
-                    )
-                da = da.isel(time=season_idx)
+        P, T, C_s1, H, W = arr_s1.shape
+        P2, T2, C_s2, H2, W2 = arr_s2.shape
 
-            # Select S2 bands (if requested)
-            band_dim = None
-            if band_selection is not None:
-                band_dim, indices = band_selection
-                if band_dim in da.dims:
-                    da = da.isel({band_dim: indices})
+        assert P == self.num_samples_per_file, f"Expected {self.num_samples_per_file} samples/file, got {P}"
+        assert P2 == P and T2 == T and (H2, W2) == (H, W)
+        assert C_s1 == 2, f"Unexpected S1 channel count: {C_s1}"
+        assert C_s2 == 12 or C_s2 == 13, f"Unexpected S2 channel count: {C_s2}"
 
-            # We now expect dims to include (sample) optionally, plus band/y/x
-            # Transpose to (band, sample?, y, x)
-            da = _transpose_spatial_first(da, band_dim)
-            # If sample dim missing, pretend it's 1 with expand at front later
-            has_sample = ("sample" in da.dims)
+        # Take ALL samples at this random time_idx: (P, C, H, W)
+        s1_np = arr_s1[:, time_idx]  # (P, C1, H, W)
+        s2_np = arr_s2[:, time_idx]  # (P, C2, H, W)
 
-            # Convert to numpy with (band, sample?, y, x)
-            arr = np.asarray(da.values, dtype=np.float32)
-            # Enforce (band, sample, y, x)
-            if has_sample:
-                # figure axes
-                # After _transpose_spatial_first, dims should be ('band','sample','y','x') or ('band','y','x','sample')
-                # Be robust:
-                dims = list(da.dims)
-                # Move to ('band','sample','y','x')
-                for target_order in [
-                    ("band","sample","y","x"),
-                    ("band","y","x","sample"),
-                ]:
-                    if tuple(dims) == target_order:
-                        break
-                # Reorder if needed
-                desired = ("band","sample","y","x")
-                if tuple(dims) != desired:
-                    perm = [dims.index(k) for k in desired]
-                    arr = np.transpose(arr, perm)
-                # arr: (C, P, H, W) -> (P, C, H, W)
-                arr = np.transpose(arr, (1,0,2,3))
-            else:
-                # arr: (C, H, W) -> (1, C, H, W)
-                arr = arr[None, ...]
+        s1 = torch.from_numpy(s1_np.astype("float32"))
+        s2 = torch.from_numpy(s2_np.astype("float32"))
 
-            if expect_bands is not None and arr.shape[1] != expect_bands:
-                raise ValueError(f"Expected {expect_bands} bands, got {arr.shape[1]} in {sample_path}")
+        s1, s2 = self._apply_transforms(s1, s2)
 
-            # Make contiguous
-            arr = np.ascontiguousarray(arr, dtype=np.float32)
-            return arr
+        return {
+            "s1": s1,  # (P, 2, 224, 224)
+            "s2": s2,  # (P, 12, 224, 224)
+            # optional metadata if you want:
+            # "file_idx": file_idx,
+            # "time_idx": time_idx,
+            # "season": season_name,
+        }
 
-        if sample_path.endswith(".zarr.zip"):
-            with ZipStore(sample_path, mode="r") as store:
-                ds = _open_zarr_dataset(store)
-                try:
-                    return _extract(ds)
-                finally:
-                    ds.close()
-        ds = _open_zarr_dataset(sample_path)
-        try:
-            return _extract(ds)
-        finally:
-            ds.close()
 
-    # -------- normalization that supports (P,C,H,W) or (C,H,W) --------
 
-    # def normalize_s1(self, x: torch.Tensor) -> torch.Tensor:
-    #     # Bring to (P,C,H,W)
-    #     if x.ndim == 3:
-    #         x = x.unsqueeze(0)
-    #     C = x.shape[1]
-    #     mean = torch.tensor(S1GRD_MEAN[:C], dtype=x.dtype, device=x.device).view(1, C, 1, 1)
-    #     std  = torch.tensor(S1GRD_STD[:C],  dtype=x.dtype, device=x.device).view(1, C, 1, 1)
-    #     y = (x - mean) / std
-    #     return y[0] if y.shape[0] == 1 else y
 
-    # def normalize_s2(
-    #     self,
-    #     x: torch.Tensor,
-    #     s2_stats: Dict[str, Tuple[float, float]],
-    #     s2_bands: Sequence[str],
-    # ) -> torch.Tensor:
-    #     # Bring to (P,C,H,W)
-    #     if x.ndim == 3:
-    #         x = x.unsqueeze(0)
-    #     C = x.shape[1]
-    #     means = [s2_stats[b][0] for b in s2_bands[:C]]
-    #     stds  = [s2_stats[b][1] for b in s2_bands[:C]]
-    #     mean = torch.tensor(means, dtype=x.dtype, device=x.device).view(1, C, 1, 1)
-    #     std  = torch.tensor(stds,  dtype=x.dtype, device=x.device).view(1, C, 1, 1)
-    #     y = (x - mean) / std
-    #     return y[0] if y.shape[0] == 1 else y
+# class SSL4EODataset(Dataset):
+#     """Indexes SSL4EO v1.1 by (location file, season). Each __getitem__ returns ALL 'sample' patches in that file, concatenable into batch."""
 
-    # -------- utilities --------
 
-    def int_to_filepath(self, idx: int) -> Tuple[int, int]:
-        if idx < 0 or idx >= self.length:
-            raise ValueError("Integer idx must be in range [0, n)")
-        location_idx = idx // self.seasons
-        season_idx = idx % self.seasons
-        return location_idx, season_idx
+#     def __init__(
+#         self,
+#         root: str,
+#         dataset_name: str = "bands",
+#         seasons: Optional[int] = None,
+#         transforms=None,
+#         # target_image_dimension: Tuple[int, int] = (224, 224),
+#         s2_tier: str = "s2l2a",
+#         is_train: bool = True,
+#     ):
+#         self.root = root
+#         self.is_train = is_train
+#         self.dataset_name = str(dataset_name)
+#         self.s1_transforms = None
+#         self.s2_transforms = None
+#         if transforms is not None:
+#             print(transforms)
+#             self.s1_transforms = transforms['s1']
+#             self.s2_transforms = transforms['s2']
+#         # self.resize_transform = #Resize(target_image_dimension)
+#         # if target_image_dimension is not None:
+#         #     self.crop = torchvision.transforms.CenterCrop(target_image_dimension)
 
-    def get_sample_uid(self, idx: int) -> Tuple[str, str]:
-        location_idx, season_idx = self.int_to_filepath(idx)
-        name = self.sample_names[location_idx]
-        uid = f"{name}_season{season_idx}"
-        return uid, self.s1_paths[location_idx]
+#         self.s1_dir = os.path.join(root, "S1GRD")
+#         if s2_tier.lower() == "s2l1c":
+#             self.s2_dir = os.path.join(root, "S2L1C")
+#             s2_band_names = ["1", "2", "3", "4", "5", "6", "7", "8", "8A", "9", "10", "11", "12"]
+#         else:
+#             self.s2_dir = os.path.join(root, "S2L2A")
+#             s2_band_names = DEFAULT_S2_BANDS
+
+#         if not os.path.isdir(self.s1_dir):
+#             raise FileNotFoundError(f"S1GRD directory not found at {self.s1_dir}")
+#         if not os.path.isdir(self.s2_dir):
+#             raise FileNotFoundError(f"S2 directory not found at {self.s2_dir}")
+
+#         s1_tiles = {os.path.basename(p): p for p in glob.glob(os.path.join(self.s1_dir, "*.zarr"))}
+#         s1_tiles.update({os.path.basename(p): p for p in glob.glob(os.path.join(self.s1_dir, "*.zarr.zip"))})
+#         s2_tiles = {os.path.basename(p): p for p in glob.glob(os.path.join(self.s2_dir, "*.zarr"))}
+#         s2_tiles.update({os.path.basename(p): p for p in glob.glob(os.path.join(self.s2_dir, "*.zarr.zip"))})
+
+#         common_tiles = sorted(set(s1_tiles) & set(s2_tiles))
+#         if not common_tiles:
+#             raise RuntimeError(f"No matching S1/S2 tiles found under {root}")
+
+#         self.sample_names = common_tiles
+#         self.s1_paths = [s1_tiles[name] for name in common_tiles]
+#         self.s2_paths = [s2_tiles[name] for name in common_tiles]
+#         self.num_locations = len(self.sample_names)
+
+#         # seasons & samples-per-file
+#         self.available_seasons = self._infer_dim(self.s2_paths[0], dim_name="time", default=1)
+#         self.samples_per_file = self._infer_dim(self.s2_paths[0], dim_name="sample", default=1)
+
+#         if seasons is None:
+#             self.seasons = self.available_seasons
+#         else:
+#             if seasons > self.available_seasons:
+#                 raise ValueError(
+#                     f"Requested {seasons} seasons but tiles only provide {self.available_seasons}"
+#                 )
+#             self.seasons = seasons
+
+#         # Length = files * seasons (NOT multiplied by samples_per_file)
+#         # self.num_samples = self.num_locations * self.seasons * 64
+#         self.length = self.num_locations * self.seasons
+
+#         # bands & stats
+#         self.s2_band_names = [
+#             _canonicalize_band_label(b)
+#             for b in (s2_band_names if s2_band_names is not None else self.DEFAULT_S2_BANDS)
+#         ]
+
+#         self._s2_band_selection: Optional[Tuple[str, List[int]]] = self._resolve_s2_band_selection(self.s2_paths[0])
+
+#         logging.info(
+#             "Loaded SSL4EO v1.1 dataset with %d tiles, %d seasons, %d samples/file",
+#             self.num_locations, self.seasons, self.samples_per_file
+#         )
+
+#     def __len__(self) -> int:
+#         return self.length
+
+#     def __getitem__(self, idx: int):
+#         if idx < 0 or idx >= self.length:
+#             raise IndexError("Index out of range")
+
+#         # Index files (locations) first, then season
+#         location_idx = idx // self.seasons
+#         season_idx = idx % self.seasons
+
+#         # Load full stack of per-file samples for this season → (P, C, H, W)
+#         s1_array = self._load_zarr_slice(self.s1_paths[location_idx], season_idx, band_selection=None, expect_bands=2)
+#         s2_array = self._load_zarr_slice(self.s2_paths[location_idx], season_idx, band_selection=self._s2_band_selection, expect_bands=len(self.s2_band_names))
+
+#         # Torch tensors: (P, C, H, W)
+#         s1_tensor = torch.from_numpy(s1_array).float()
+#         s2_tensor = torch.from_numpy(s2_array).float()
+
+#         # Optional transforms (should also support (P, C, H, W))
+#         if self.s1_transforms is not None:
+#             if self.is_train:
+#                 i, j, h, w = transforms.RandomCrop.get_params(s1_tensor, output_size=(224, 224))
+#                 s1_tensor = transforms.functional.crop(s1_tensor, i, j, h, w)
+#                 s2_tensor = transforms.functional.crop(s2_tensor, i, j, h, w)
+#                 # ---- 2. Joint Horizontal Flip ----
+#             if self.is_train and random.random() < 0.5:
+#                 s1 = transforms.functional.hflip(s1_tensor)
+#                 s2 = transforms.functional.hflip(s1_tensor)
+
+#             # ---- 3. Joint Vertical Flip ----
+#             if self.is_train and random.random() < 0.5:
+#                 s1 = transforms.functional.vflip(s1_tensor)
+#                 s2 = transforms.functional.vflip(s1_tensor)
+                
+#             s1_tensor = self.s1_transforms(s1_tensor)
+#             s2_tensor = self.s2_transforms(s2_tensor)
+            
+
+#         # Normalize channel-wise; supports (P,C,H,W) or (C,H,W)
+#         # s1_tensor = self.normalize_s1(s1_tensor)
+#         # s2_tensor = self.normalize_s2(s2_tensor, self.s2_stats, self.s2_band_names)
+
+#         # Return (P,C,H,W) for both; collate_fn will flatten P into batch
+#         # print('returning samples_per_file:', s1_tensor.shape[0])
+#         # print range of each tensor
+#         # print("s1_tensor range:", s1_tensor.min().item(), s1_tensor.max().item())
+#         # print("s2_tensor range:", s2_tensor.min().item(), s2_tensor.max().item())
+#         # raise ValueError("Debugging - remove this")
+#         return s1_tensor, s2_tensor
+
+#     # ---------- helpers ----------
+
+#     def _get_data_array(self, ds: xr.Dataset, sample_path: str) -> xr.DataArray:
+#         requested = str(self.dataset_name).strip()
+#         if requested:
+#             if requested in ds.data_vars:
+#                 return ds[requested]
+#             requested_lower = requested.lower()
+#             for name in ds.data_vars:
+#                 if name.lower() == requested_lower:
+#                     return ds[name]
+#         if ds.data_vars:
+#             if len(ds.data_vars) == 1:
+#                 (name,) = ds.data_vars
+#                 return ds[name]
+#             available = sorted(ds.data_vars)
+#             raise KeyError(
+#                 f"Dataset '{self.dataset_name}' not found in {sample_path}. "
+#                 f"Available datasets: {available}"
+#             )
+#         raise KeyError(
+#             f"Dataset '{self.dataset_name}' not found in {sample_path} and no data variables present"
+#         )
+
+#     def _infer_dim(self, sample_path: str, dim_name: str, default: int) -> int:
+#         def _extract(ds: xr.Dataset) -> int:
+#             da = self._get_data_array(ds, sample_path)
+#             return int(da.sizes.get(dim_name, default))
+#         if sample_path.endswith(".zarr.zip"):
+#             with ZipStore(sample_path, mode="r") as store:
+#                 ds = _open_zarr_dataset(store)
+#                 try:
+#                     return _extract(ds)
+#                 finally:
+#                     ds.close()
+#         ds = _open_zarr_dataset(sample_path)
+#         try:
+#             return _extract(ds)
+#         finally:
+#             ds.close()
+
+#     def _resolve_s2_band_selection(self, sample_path: str) -> Optional[Tuple[str, List[int]]]:
+#         def _compute(ds: xr.Dataset) -> Optional[Tuple[str, List[int]]]:
+#             da = self._get_data_array(ds, sample_path)
+#             for candidate in ("band", "bands", "variable", "channels"):
+#                 if candidate in da.dims:
+#                     coord = da.coords.get(candidate)
+#                     if coord is None:
+#                         continue
+#                     available = [_canonicalize_band_label(v) for v in coord.values]
+#                     indices: List[int] = []
+#                     for desired in self.s2_band_names:
+#                         if desired not in available:
+#                             raise ValueError(f"Band '{desired}' not found in tile ({available})")
+#                         indices.append(available.index(desired))
+#                     return candidate, indices
+#             return None
+
+#         if sample_path.endswith(".zarr.zip"):
+#             with ZipStore(sample_path, mode="r") as store:
+#                 ds = _open_zarr_dataset(store)
+#                 try:
+#                     return _compute(ds)
+#                 finally:
+#                     ds.close()
+#         ds = _open_zarr_dataset(sample_path)
+#         try:
+#             return _compute(ds)
+#         finally:
+#             ds.close()
+
+#     def _load_zarr_slice(
+#         self,
+#         sample_path: str,
+#         season_idx: int,
+#         band_selection: Optional[Tuple[str, List[int]]] = None,
+#         expect_bands: Optional[int] = None,
+#     ) -> np.ndarray:
+#         """Return array shaped (P, C, H, W), where P=samples_per_file."""
+#         def _extract(ds: xr.Dataset) -> np.ndarray:
+#             da = self._get_data_array(ds, sample_path)
+
+#             # Select season (time)
+#             if "time" in da.dims:
+#                 if season_idx >= int(da.sizes["time"]):
+#                     raise IndexError(
+#                         f"Requested season {season_idx} but tile only has {int(da.sizes['time'])}"
+#                     )
+#                 da = da.isel(time=season_idx)
+
+#             # Select S2 bands (if requested)
+#             band_dim = None
+#             if band_selection is not None:
+#                 band_dim, indices = band_selection
+#                 if band_dim in da.dims:
+#                     da = da.isel({band_dim: indices})
+
+#             # We now expect dims to include (sample) optionally, plus band/y/x
+#             # Transpose to (band, sample?, y, x)
+#             da = _transpose_spatial_first(da, band_dim)
+#             # If sample dim missing, pretend it's 1 with expand at front later
+#             has_sample = ("sample" in da.dims)
+
+#             # Convert to numpy with (band, sample?, y, x)
+#             arr = np.asarray(da.values, dtype=np.float32)
+#             # Enforce (band, sample, y, x)
+#             if has_sample:
+#                 # figure axes
+#                 # After _transpose_spatial_first, dims should be ('band','sample','y','x') or ('band','y','x','sample')
+#                 # Be robust:
+#                 dims = list(da.dims)
+#                 # Move to ('band','sample','y','x')
+#                 for target_order in [
+#                     ("band","sample","y","x"),
+#                     ("band","y","x","sample"),
+#                 ]:
+#                     if tuple(dims) == target_order:
+#                         break
+#                 # Reorder if needed
+#                 desired = ("band","sample","y","x")
+#                 if tuple(dims) != desired:
+#                     perm = [dims.index(k) for k in desired]
+#                     arr = np.transpose(arr, perm)
+#                 # arr: (C, P, H, W) -> (P, C, H, W)
+#                 arr = np.transpose(arr, (1,0,2,3))
+#             else:
+#                 # arr: (C, H, W) -> (1, C, H, W)
+#                 arr = arr[None, ...]
+
+#             if expect_bands is not None and arr.shape[1] != expect_bands:
+#                 raise ValueError(f"Expected {expect_bands} bands, got {arr.shape[1]} in {sample_path}")
+
+#             # Make contiguous
+#             arr = np.ascontiguousarray(arr, dtype=np.float32)
+#             return arr
+
+#         if sample_path.endswith(".zarr.zip"):
+#             with ZipStore(sample_path, mode="r") as store:
+#                 ds = _open_zarr_dataset(store)
+#                 try:
+#                     return _extract(ds)
+#                 finally:
+#                     ds.close()
+#         ds = _open_zarr_dataset(sample_path)
+#         try:
+#             return _extract(ds)
+#         finally:
+#             ds.close()
+
+   
+#     # -------- utilities --------
+
+#     def int_to_filepath(self, idx: int) -> Tuple[int, int]:
+#         if idx < 0 or idx >= self.length:
+#             raise ValueError("Integer idx must be in range [0, n)")
+#         location_idx = idx // self.seasons
+#         season_idx = idx % self.seasons
+#         return location_idx, season_idx
+
+#     def get_sample_uid(self, idx: int) -> Tuple[str, str]:
+#         location_idx, season_idx = self.int_to_filepath(idx)
+#         name = self.sample_names[location_idx]
+#         uid = f"{name}_season{season_idx}"
+#         return uid, self.s1_paths[location_idx]
     
 from torch.utils.data._utils.collate import default_collate
 
-def collate_concat_samples(batch):
-    """
-    batch: list of length B of tuples:
-      s1: (P, C, H, W), s2: (P, C, H, W)
-    returns:
-      s1_cat: (B*P, C, H, W), s2_cat: (B*P, C, H, W)
-    """
-    s1_list, s2_list = zip(*batch)  # lists of (P,C,H,W)
-    # print shape
-    # print("Collate batch size:", len(batch))
-    # print(s1_list[0].shape) 
-    s1_cat = torch.cat(s1_list, dim=0)
-    s2_cat = torch.cat(s2_list, dim=0)
-    # print("s1_cat shape:", s1_cat.shape)
-    return s1_cat, s2_cat
+def collate_fn(batch):
+    # batch is a list of dicts, each with s1:(64,2,H,W), s2:(64,12,H,W)
+    if isinstance(batch, list) and isinstance(batch[0], dict):
+        return {
+            k: torch.concat([b[k] for b in batch], dim=0)
+            for k in batch[0].keys()
+        }
+
 
 # snapshot_download(repo_id="embed2scale/SSL4EO-S12-v1.1", repo_type="dataset", local_dir="/local/ms-data/SSL4EOv1.1", allow_patterns=["*/S2L1C/**.zarr.zip"], max_workers=16, resume_download=True )
 # class SSL4EODataset(Dataset):
@@ -534,8 +691,7 @@ def collate_concat_samples(batch):
 #         s1_tensor = torch.from_numpy(s1_array).float()
 #         s2_tensor = torch.from_numpy(s2_array).float()
 
-#         s1_tensor = self.resize_transform(s1_tensor)
-#         s2_tensor = self.resize_transform(s2_tensor)
+
 
 #         if self.transforms is not None:
 #             s1_tensor = self.transforms(s1_tensor)
@@ -960,7 +1116,56 @@ def generate_splits(dataset, val_frac, seed=None):
 
     return Subset(dataset, train_indices), Subset(dataset, val_indices)
 
+def plot_pixel_value_distributions(dataset, band_names=['0', '1'], modality='s1', title='Pixel Value Distribution'):
+    import matplotlib.pyplot as plt
+    print(f'Plotting pixel value distributions for {modality}...')
 
+    # Collect pixel values for each band
+    band_values = {band: [] for band in band_names}
+
+    # print length of dataset
+    print(f'Number of samples in dataset: {len(dataset)}')
+
+    if modality == 's1':
+        for s1, s2 in dataset:
+            # s2: (P, C, H, W)
+            s1_np = s1.numpy()
+            for i, band in enumerate(band_names):
+                band_data = s1_np[:, i, :, :].flatten()
+                band_values[band].extend(band_data.tolist())
+    else:
+        for s1, s2 in dataset:
+            # s2: (P, C, H, W)
+            s2_np = s2.numpy()
+            for i, band in enumerate(band_names):
+                band_data = s2_np[:, i, :, :].flatten()
+                band_values[band].extend(band_data.tolist())
+
+    # Plot histograms
+    print(f'Generating histograms for {modality}...')
+    num_bands = len(band_names)
+    cols = 4
+    rows = (num_bands + cols - 1) // cols
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 4, rows * 3))
+    axes = axes.flatten()
+
+    for i, band in enumerate(band_names):
+        axes[i].hist(band_values[band], bins=50, color='blue', alpha=0.7)
+        axes[i].set_title(f'Band {band} Pixels |  {title}')
+        axes[i].set_xlabel('Pixel Value')
+        axes[i].set_ylabel('Frequency')
+
+    # Remove any unused subplots
+    for j in range(i + 1, len(axes)):
+        fig.delaxes(axes[j])
+    # plt.title(title) 
+
+    plt.tight_layout()
+    # save plot to output dir
+    plt.savefig(f'pixel_value_distribution_{modality}.png', bbox_inches='tight')
+    print(f'Saved pixel value distribution plot for {modality} to pixel_value_distribution_{modality}.png')
+    plt.close()
+    
 
 def get_ssl4eo_dataset(args, is_train, transforms):
     root = args.dataset.root
@@ -971,21 +1176,36 @@ def get_ssl4eo_dataset(args, is_train, transforms):
     else:
         default_bands = ["1", "2", "3", "4", "5", "6", "7", "8", "8A", "9", "10", "11", "12"]
 
+    # dataset = SSL4EODataset(
+    #     root, # root file path
+    #     'bands', #args.dataset.s2_tier,
+    #     seasons=4,
+    #     transforms=None,  # transforms
+    #     target_image_dimension=(args.dataset.dimension, args.dataset.dimension)
+    # )
+    # # sample 2000 samples to plot pixel distribution
+    # data_sample = Subset(dataset, np.random.choice(range(len(dataset)), size=30, replace=False))
+
+
+    # # plot histogram of pixel values
+    # plot_pixel_value_distributions(data_sample, band_names=['0','1'], modality='s1', title='s1 without transforms')
+    # plot_pixel_value_distributions(data_sample, band_names=default_bands, modality='s2', title='s2 without transforms')
+
     
     dataset = SSL4EODataset(
-        root, # root file path
-        'bands', #args.dataset.s2_tier,
-        seasons=4,
-        transforms=transforms,  # transforms
-        target_image_dimension=(args.dataset.dimension, args.dataset.dimension)
-
-        # root: str,
-        # dataset_name: str = "bands",
-        # seasons: Optional[int] = None,
-        # transforms=None,
-        # target_image_dimension: Tuple[int, int] = (224, 224),
-        # s2_band_names: Optional[Sequence[str]] = None,
+        root,
+        # seasons=1,
+        transforms=transforms,  
+        s2_tier = "S2L2A",
+        is_train=True
     )
+
+    # sample 2000 samples to plot pixel distribution
+    # data_sample = Subset(dataset, np.random.choice(range(len(dataset)), size=30, replace=False))
+    # # plot histogram of pixel values
+    # plot_pixel_value_distributions(data_sample, band_names=['0','1'], modality='s1', title='s1 with transforms')
+    # plot_pixel_value_distributions(data_sample, band_names=default_bands, modality='s2', title='s2 with transforms')
+
 
     return dataset_to_datainfo(args, dataset, is_train)
 
@@ -1004,7 +1224,7 @@ def dataset_to_datainfo(args, dataset, is_train):
         sampler=sampler,
         # drop_last=is_train,
         drop_last=True,
-        collate_fn=collate_concat_samples,
+        collate_fn=collate_fn,
         
     )
     dataloader.num_samples = num_samples
@@ -1075,7 +1295,9 @@ class BandwiseJitter(torch.nn.Module):
         if random.random() > self.p:
             return x
         C, H, W = x.shape
-        eps = torch.randn(C, 1, 1, device=x.device, dtype=x.dtype) * self.sigma
+        # jitter per band, handle the batch dimension -> each file contains 64 images 
+        eps = torch.randn( C, 1, 1, device=x.device, dtype=x.dtype) * self.sigma
+        # eps = torch.randn(C, 1, 1, device=x.device, dtype=x.dtype) * self.sigma
         if self.kind == "multiplicative":
             return x * (1.0 + eps)
         else:
@@ -1086,7 +1308,6 @@ def get_transform(modality, is_train):
     if modality == "s1":
         if is_train:
             return transforms.Compose([
-                
                 transforms.Normalize(mean=S1GRD_MEAN, std=S1GRD_STD),
             ])
         else:
@@ -1094,7 +1315,7 @@ def get_transform(modality, is_train):
                 transforms.CenterCrop(224),
                 transforms.Normalize(mean=S1GRD_MEAN, std=S1GRD_STD),
             ])
-    elif modality == "s2a":
+    elif modality == "s2a" or modality == "s2l2a":
         if is_train:
             return transforms.Compose([
                 transforms.RandomApply(
@@ -1109,7 +1330,7 @@ def get_transform(modality, is_train):
                 transforms.CenterCrop(224),
                 transforms.Normalize(mean=S2L2A_MEAN, std=S2L2A_STD),
             ])
-    elif modality == "s2c":
+    elif modality == "s2c" or modality == "s2l1c":
         print("Using S2 13 band L1C normalization.")
         if is_train:
             return transforms.Compose([
@@ -1152,6 +1373,7 @@ def get_data(args, preprocess_fns=None):
         else:
             s1_preprocess = get_transform("s1", is_train=True)
             s2_preprocess = get_transform(args.dataset.s2_tier, is_train=True)
+
 
             assert s1_preprocess is not None and s2_preprocess is not None
                 
