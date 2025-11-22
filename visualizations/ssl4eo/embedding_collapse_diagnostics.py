@@ -653,6 +653,8 @@ def extract_embeddings_for_dataset(
     # print len of dataset
     print("Extracting embeddings for num files (64 images per file)", len(indices))
     with torch.no_grad():
+        # Keep hooks active across the entire extraction loop so CKA receives
+        # activations from every sample before we clean them up.
         try:
             for dataset_idx in indices:
                 sample = base_dataset[dataset_idx]
