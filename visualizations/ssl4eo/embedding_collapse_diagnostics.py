@@ -653,108 +653,109 @@ def extract_embeddings_for_dataset(
     # print len of dataset
     print("Extracting embeddings for num files (64 images per file)", len(indices))
     with torch.no_grad():
-        for dataset_idx in indices:
-            sample = base_dataset[dataset_idx]
-            if isinstance(sample, dict):
-                s1_img = sample.get("s1")
-                s2_img = sample.get("s2")
-                uid = sample.get("uid") or sample.get("id") or sample.get("file_name")
-            else:
-                s1_img, s2_img = sample  # type: ignore[misc]
-                uid = str(dataset_idx)
-            if s1_img is None or s2_img is None:
-                continue
+        try:
+            for dataset_idx in indices:
+                sample = base_dataset[dataset_idx]
+                if isinstance(sample, dict):
+                    s1_img = sample.get("s1")
+                    s2_img = sample.get("s2")
+                    uid = sample.get("uid") or sample.get("id") or sample.get("file_name")
+                else:
+                    s1_img, s2_img = sample  # type: ignore[misc]
+                    uid = str(dataset_idx)
+                if s1_img is None or s2_img is None:
+                    continue
 
-            # S1 tensor shape with unsqueeze(0): torch.Size([1, 64, 2, 224, 224])
-            # without unsqueeze(0): S1 shape=torch.Size([64, 2, 224, 224])
-            s1_tensor = _to_tensor(s1_img).to(device=device, dtype=input_dtype)
-            s2_tensor = _to_tensor(s2_img).to(device=device, dtype=input_dtype)
+                # S1 tensor shape with unsqueeze(0): torch.Size([1, 64, 2, 224, 224])
+                # without unsqueeze(0): S1 shape=torch.Size([64, 2, 224, 224])
+                s1_tensor = _to_tensor(s1_img).to(device=device, dtype=input_dtype)
+                s2_tensor = _to_tensor(s2_img).to(device=device, dtype=input_dtype)
 
-            # print shapes
-            # print(f"Processing sample UID={uid}: S1 shape={s1_tensor.shape}, S2 shape={s2_tensor.shape}")
+                # print shapes
+                # print(f"Processing sample UID={uid}: S1 shape={s1_tensor.shape}, S2 shape={s2_tensor.shape}")
 
-            ctx = (
-                    torch.cuda.amp.autocast(enabled=False)
-                    if s2_tensor.is_cuda
-                    else contextlib.nullcontext()
-                    )
+                ctx = (
+                        torch.cuda.amp.autocast(enabled=False)
+                        if s2_tensor.is_cuda
+                        else contextlib.nullcontext()
+                        )
 
-            s1_raw = None
-            s2_raw = None
-            s1_norm = None
-            s2_norm = None
-            s1_backbone = None
-            s2_backbone = None
+                s1_raw = None
+                s2_raw = None
+                s1_norm = None
+                s2_norm = None
+                s1_backbone = None
+                s2_backbone = None
 
-            with ctx:
-                # print(model)
-                assert has_posthead == has_projected, "Model must have both posthead and projected methods or re-implement."
+                with ctx:
+                    # print(model)
+                    assert has_posthead == has_projected, "Model must have both posthead and projected methods or re-implement."
 
-                if has_posthead:
-                    # print('Extracting raw embeddings')
-                    if model.encoder_s1 is not None:
-                        s1_raw = model.compute_posthead(s1_tensor, modality='s1')
-                    s2_raw = model.compute_posthead(s2_tensor, modality='s2')
+                    if has_posthead:
+                        # print('Extracting raw embeddings')
+                        if model.encoder_s1 is not None:
+                            s1_raw = model.compute_posthead(s1_tensor, modality='s1')
+                        s2_raw = model.compute_posthead(s2_tensor, modality='s2')
 
-                    assert s2_raw is not None, "S2 raw embedding extraction returned None"
-                    
-           
-                    with capture_controller.suspend():
-                        # now extract backbone embeddings
+                        assert s2_raw is not None, "S2 raw embedding extraction returned None"
+
+
+                        with capture_controller.suspend():
+                            # now extract backbone embeddings
+                            # print('Extracting backbone embeddings')
+                            if model.encoder_s1 is not None:
+                                s1_backbone = model.compute_backbone(
+                                    s1_tensor.float(), modality='s1'
+                                )
+                            s2_backbone = model.compute_backbone(
+                            s2_tensor.float(), modality='s2')
+
+
+                            # print('Extracting norm embeddings')
+                            if model.encoder_s1 is not None:
+                                s1_norm = model.compute_projected(s1_tensor, modality='s1')
+
+                            s2_norm = model.compute_projected(s2_tensor, modality='s2')
+
+
+                    else:
                         # print('Extracting backbone embeddings')
                         if model.encoder_s1 is not None:
                             s1_backbone = model.compute_backbone(
                                 s1_tensor.float(), modality='s1'
                             )
+                            assert s1_backbone is not None, "S1 backbone extraction returned None"
                         s2_backbone = model.compute_backbone(
-                        s2_tensor.float(), modality='s2')
-
-                        
-                        # print('Extracting norm embeddings')
-                        if model.encoder_s1 is not None:
-                            s1_norm = model.compute_projected(s1_tensor, modality='s1')
-
-                        s2_norm = model.compute_projected(s2_tensor, modality='s2')
+                            s2_tensor.float(), modality='s2')
 
 
-                else:
-                    # print('Extracting backbone embeddings')
-                    if model.encoder_s1 is not None:
-                        s1_backbone = model.compute_backbone(
-                            s1_tensor.float(), modality='s1'
-                        )
-                        assert s1_backbone is not None, "S1 backbone extraction returned None"
-                    s2_backbone = model.compute_backbone(
-                        s2_tensor.float(), modality='s2')
 
+                if s1_raw is not None:
+                    if s1_raw.squeeze(0).dim() != 2:
+                        raise ValueError("Extracted S1 embeddings must be 2D after squeezing")
+                    s1_vectors.append(s1_raw.squeeze(0).cpu().to(torch.float32))
+                if s1_norm is not None:
+                    if s1_norm.squeeze(0).dim() != 2:
+                        raise ValueError("Extracted normalized S1 embeddings must be 2D after squeezing")
+                    s1_norm_vectors.append(s1_norm.squeeze(0).cpu().to(torch.float32))
 
-                
+                if s2_raw is not None:
+                    if s2_raw.squeeze(0).dim() != 2:
+                        raise ValueError("Extracted S2 embeddings must be 2D after squeezing")
+                    s2_vectors.append(s2_raw.squeeze(0).cpu().to(torch.float32))
+                if s2_norm is not None:
+                    if s2_norm.squeeze(0).dim() != 2:
+                        raise ValueError("Extracted normalized S2 embeddings must be 2D after squeezing")
+                    s2_norm_vectors.append(s2_norm.squeeze(0).cpu().to(torch.float32))
+
+                if model.encoder_s1 is not None and s1_backbone is not None:
+                    s1_backbone_vectors.append(s1_backbone.squeeze(0).cpu().to(torch.float32))
+                if s2_backbone is not None:
+                    s2_backbone_vectors.append(s2_backbone.squeeze(0).cpu().to(torch.float32))
+                sample_ids.append(str(uid))
+        finally:
             for handle in handles:
                 handle.remove()
-
-            if s1_raw is not None:
-                if s1_raw.squeeze(0).dim() != 2:
-                    raise ValueError("Extracted S1 embeddings must be 2D after squeezing")
-                s1_vectors.append(s1_raw.squeeze(0).cpu().to(torch.float32))
-            if s1_norm is not None:
-                if s1_norm.squeeze(0).dim() != 2:
-                    raise ValueError("Extracted normalized S1 embeddings must be 2D after squeezing")
-                s1_norm_vectors.append(s1_norm.squeeze(0).cpu().to(torch.float32))
-
-            if s2_raw is not None:
-                if s2_raw.squeeze(0).dim() != 2:
-                    raise ValueError("Extracted S2 embeddings must be 2D after squeezing")
-                s2_vectors.append(s2_raw.squeeze(0).cpu().to(torch.float32))
-            if s2_norm is not None:
-                if s2_norm.squeeze(0).dim() != 2:
-                    raise ValueError("Extracted normalized S2 embeddings must be 2D after squeezing")
-                s2_norm_vectors.append(s2_norm.squeeze(0).cpu().to(torch.float32))
-
-            if model.encoder_s1 is not None and s1_backbone is not None:
-                s1_backbone_vectors.append(s1_backbone.squeeze(0).cpu().to(torch.float32))
-            if s2_backbone is not None:
-                s2_backbone_vectors.append(s2_backbone.squeeze(0).cpu().to(torch.float32))
-            sample_ids.append(str(uid))
 
     
 
