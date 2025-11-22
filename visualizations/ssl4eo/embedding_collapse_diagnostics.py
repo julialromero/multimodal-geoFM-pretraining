@@ -332,7 +332,7 @@ def _layer_sort_key(name: str) -> Tuple[int, int, str]:
 
 def compute_within_encoder_cka(layer_features: Dict[str, torch.Tensor]) -> Tuple[List[str], Optional[np.ndarray]]:
     import CKA
-    cuda_cka = CKA.CudaCKA(device='cuda:1')
+    cuda_cka = CKA.CudaCKA(device='cpu')
 
     ordered = layer_features #_order_layers(layer_features)
     prepared: Dict[str, torch.Tensor] = {}
@@ -363,7 +363,7 @@ def compute_cross_encoder_cka(
     s2_layers: Dict[str, torch.Tensor],
 ) -> Tuple[List[str], List[str], Optional[np.ndarray]]:
     import CKA
-    cuda_cka = CKA.CudaCKA(device='cuda:1')
+    cuda_cka = CKA.CudaCKA(device='cpu')
     names_s1 = s1_layers #_order_layers(s1_layers)
     names_s2 = s2_layers #_order_layers(s2_layers)
     prepared_s1 = {name: _prepare_cka_tensor(s1_layers[name]) for name in names_s1}
@@ -452,78 +452,161 @@ def _register_layer_hooks(
 
     print('REGISTERING LAYER HOOKS')
 
-    # handle wrappers like CromaEvaluationAdapter
-    # if model is torchgeoresnetadapter
-    real_model = model
-    # if model.__class__.__name__ == "TorchGeoResNetAdapter" or model.__class__.__name__ == "CIIPEvaluationAdapter":
-    #     real_model = model
-    # else:
-    #     if hasattr(model, "base_model"):
-    #         real_model = model.base_model
-    #     else:
-    #         real_model = model
-
+    
     def _make_layer_hook(key: str, name: str):
         cache = layer_caches[key].setdefault(name, [])
 
-        def hook(module: nn.Module, inputs, output):  # type: ignore[override]
+        def hook(module, inputs, output):
             if not controller.enabled:
                 return
             tensor = output[0] if isinstance(output, (list, tuple)) else output
             if not isinstance(tensor, torch.Tensor):
                 return
             tensor = tensor.detach()
-
-
-            # if tensor.dim() == 4:
-            #     tensor = F.adaptive_avg_pool2d(tensor, (1,1))
-            # elif tensor.dim() == 3:
-            #     # ViT case
-            #     tensor = tensor.mean(dim=1, keepdim=True)
-
-            tensor = tensor.flatten(start_dim=1) #.to(device="cpu", dtype=torch.float32)
-            # set dtype to cuda (not cpu)  float32
-            tensor = tensor.to(device="cuda:1", dtype=torch.float32)
+            tensor = tensor.flatten(start_dim=1)
+            tensor = tensor.to(dtype=torch.float32)
             cache.append(tensor)
 
         return hook
 
-    def _attach_layers(encoder: Optional[nn.Module], key: str) -> None:
-        if encoder is None:
-            return
+    def _make_block_hook(layer_key: str, layer_name: str):
+        base = _make_layer_hook(layer_key, layer_name)
 
-        # for name, module in encoder.named_modules():
-        #     print("Module name:", name, "Type:", type(module))
-  
+        def block_hook(module, inputs, output):
+            # Capture block output
+            return base(module, inputs, output)
 
+        return block_hook
+
+    def _attach_layers_resnet(encoder: nn.Module, key: str):
         for name, module in encoder.named_modules():
-            if isinstance(module, (nn.Linear, nn.Conv2d, nn.LayerNorm, nn.BatchNorm2d, nn.ReLU)):
-                handles.append(module.register_forward_hook(_make_layer_hook(key, name)))
-    
-    # print(real_model)
-    # print(real_model.encoder_s2)
+            # Treat any 'Bottleneck' with a bn3 as a bottleneck block
+            if module.__class__.__name__ == "Bottleneck" and hasattr(module, "bn3"):
+                bn3_name = f"{name}.bn3"
+                handles.append(
+                    module.bn3.register_forward_hook(
+                        _make_layer_hook(key, bn3_name)
+                    )
+                )
+
+                block_out_name = f"{name}.block_out"
+                handles.append(
+                    module.register_forward_hook(
+                        _make_block_hook(key, block_out_name)
+                    )
+                )
+
+
+    def _attach_layers_croma_vit(vit: nn.Module, key: str):
+        """
+        Collect activations at the 3 relevant points per sublayer:
+        1. after LayerNorm
+        2. after SelfAttention or FFN core
+        3. after residual addition
+        """
+
+        transformer = vit.transformer
+
+        for layer_idx, (attn, ffn) in enumerate(transformer.layers):
+
+            # ===== Attention sublayer =====
+
+            # 1. LN
+            handles.append(
+                attn.input_norm.register_forward_hook(
+                    _make_layer_hook(key, f"layer{layer_idx}.attn.ln")
+                )
+            )
+
+            # 2. Core attention output (after projection)
+            handles.append(
+                attn.to_out.register_forward_hook(
+                    _make_layer_hook(key, f"layer{layer_idx}.attn.core")
+                )
+            )
+
+            # 3. Residual after attention
+            def make_attn_residual_hook(idx):
+                def attn_res_hook(module, inputs, output):
+                    # output is the tensor returned by self_attn(...)+x inside BaseTransformer
+                    return _make_layer_hook(key, f"layer{idx}.attn.residual")(module, inputs, output)
+                return attn_res_hook
+
+            handles.append(
+                attn.register_forward_hook(make_attn_residual_hook(layer_idx))
+            )
+
+            # ===== FFN sublayer =====
+
+            # 1. LN before FFN
+            handles.append(
+                ffn.input_norm.register_forward_hook(
+                    _make_layer_hook(key, f"layer{layer_idx}.ffn.ln")
+                )
+            )
+
+            # 2. Core MLP output
+            handles.append(
+                ffn.net.register_forward_hook(
+                    _make_layer_hook(key, f"layer{layer_idx}.ffn.core")
+                )
+            )
+
+            # 3. Residual after FFN
+            def make_ffn_residual_hook(idx):
+                def ffn_res_hook(module, inputs, output):
+                    return _make_layer_hook(key, f"layer{idx}.ffn.residual")(module, inputs, output)
+                return ffn_res_hook
+
+            handles.append(
+                ffn.register_forward_hook(make_ffn_residual_hook(layer_idx))
+            )
+
+        
+    real_model = model
     encoder_s1 = getattr(real_model, "encoder_s1", None)
     encoder_s2 = getattr(real_model, "encoder_s2")
 
-    # print(real_model)
 
     print('ENCODER S1:', encoder_s1)
     print('ENCODER S2:', encoder_s2)
 
-    if encoder_s1 is not None:
-        _attach_layers(encoder_s1, "s1")
+    print('ENCODER S1 TYPE:', type(encoder_s1))
+    print('ENCODER S2 TYPE:', type(encoder_s2))
 
+    # if the encoders are resnets
+    if encoder_s1 is not None:
+        # if type is resnet
+        if 'ResNet' in str(type(encoder_s1)):
+            print('Attaching ResNet S1 layers')
+            _attach_layers_resnet(encoder_s1, "s1")
+        elif 'ViT' in str(type(encoder_s1)):
+            print('Attaching CromaViT S1 layers')
+            _attach_layers_croma_vit(encoder_s1, "s1")
+        else:
+            raise NotImplementedError(f"Layer hooks not implemented for S1 encoder type: {type(encoder_s1)}")
     if encoder_s2 is not None:
-        _attach_layers(encoder_s2, "s2")
+        if 'ResNet' in str(type(encoder_s2)):
+            print('Attaching ResNet S2 layers')
+            _attach_layers_resnet(encoder_s2, "s2")
+        elif 'ViT' in str(type(encoder_s2)):
+            print('Attaching CromaViT S2 layers')
+            _attach_layers_croma_vit(encoder_s2, "s2")
+        else:
+            raise NotImplementedError(f"Layer hooks not implemented for S2 encoder type: {type(encoder_s2)}")
+            
+
+    # if encoder_s2 is not None:
+    #     _attach_layers(encoder_s2, "s2")
 
 
     # raise NotImplementedError("Debugging.")
 
-    # print("Registered layer hooks for embedding extraction.")
-    # print("Layers for S1 encoder:", list(layer_caches["s1"].keys()))
-    # print("Layers for S2 encoder:", list(layer_caches["s2"].keys()))
-    # print("Total hooks registered:", len(handles))
-    # print("Hook handles:", handles)
+    print("Registered layer hooks for embedding extraction.")
+    print("Layers for S1 encoder:", list(layer_caches["s1"].keys()))
+    print("Layers for S2 encoder:", list(layer_caches["s2"].keys()))
+    print("Total hooks registered:", len(handles))
+    print("Hook handles:", handles)
 
     return layer_caches, handles, controller
 
@@ -588,7 +671,7 @@ def extract_embeddings_for_dataset(
             s2_tensor = _to_tensor(s2_img).to(device=device, dtype=input_dtype)
 
             # print shapes
-            print(f"Processing sample UID={uid}: S1 shape={s1_tensor.shape}, S2 shape={s2_tensor.shape}")
+            # print(f"Processing sample UID={uid}: S1 shape={s1_tensor.shape}, S2 shape={s2_tensor.shape}")
 
             ctx = (
                     torch.cuda.amp.autocast(enabled=False)
@@ -608,7 +691,7 @@ def extract_embeddings_for_dataset(
                 assert has_posthead == has_projected, "Model must have both posthead and projected methods or re-implement."
 
                 if has_posthead:
-                    print('Extracting raw embeddings')
+                    # print('Extracting raw embeddings')
                     if model.encoder_s1 is not None:
                         s1_raw = model.compute_posthead(s1_tensor, modality='s1')
                     s2_raw = model.compute_posthead(s2_tensor, modality='s2')
@@ -618,7 +701,7 @@ def extract_embeddings_for_dataset(
            
                     with capture_controller.suspend():
                         # now extract backbone embeddings
-                        print('Extracting backbone embeddings')
+                        # print('Extracting backbone embeddings')
                         if model.encoder_s1 is not None:
                             s1_backbone = model.compute_backbone(
                                 s1_tensor.float(), modality='s1'
@@ -627,7 +710,7 @@ def extract_embeddings_for_dataset(
                         s2_tensor.float(), modality='s2')
 
                         
-                        print('Extracting norm embeddings')
+                        # print('Extracting norm embeddings')
                         if model.encoder_s1 is not None:
                             s1_norm = model.compute_projected(s1_tensor, modality='s1')
 
@@ -635,7 +718,7 @@ def extract_embeddings_for_dataset(
 
 
                 else:
-                    print('Extracting backbone embeddings')
+                    # print('Extracting backbone embeddings')
                     if model.encoder_s1 is not None:
                         s1_backbone = model.compute_backbone(
                             s1_tensor.float(), modality='s1'
@@ -777,6 +860,14 @@ def plot_epoch_diagnostics_s2only(epoch_diag: EpochDiagnostics, output_dir: Path
     output_dir.mkdir(parents=True, exist_ok=True)
 
     fig, axes = plt.subplots(1, 4, figsize=(16, 4))
+
+    print("Total S2 layers:", len(epoch_diag.s2_layers))
+    # print("Odd idx:", s2_odd_idx)
+    # print("Even idx:", s2_even_idx)
+    # print("Odd CKA submatrix shape:",
+    #     epoch_diag.s2_within_cka[np.ix_(s2_odd_idx, s2_odd_idx)].shape)
+    # print("Even CKA submatrix shape:",
+    #     epoch_diag.s2_within_cka[np.ix_(s2_even_idx, s2_even_idx)].shape)
     
 
     # Left: S2 within-encoder CKA
@@ -792,6 +883,27 @@ def plot_epoch_diagnostics_s2only(epoch_diag: EpochDiagnostics, output_dir: Path
 
     if plot_even_odd:
         odd_idx, even_idx = _split_odd_even_indices(epoch_diag.s2_layers)
+        # print("S2 odd layers:", len(odd_idx))
+        # print("S2 even layers:", len(even_idx))
+        # print(epoch_diag.s2_layers.shape)
+
+        # check if 
+        print("Full CKA shape:", epoch_diag.s2_within_cka.shape)
+        print("Odd submatrix shape:",
+            epoch_diag.s2_within_cka[np.ix_(odd_idx, odd_idx)].shape)
+        print("Even submatrix shape:",
+            epoch_diag.s2_within_cka[np.ix_(even_idx, even_idx)].shape)
+        
+        # check if the odd and even submatrices are identical
+        if epoch_diag.s2_within_cka is not None:
+            odd_submatrix = epoch_diag.s2_within_cka[np.ix_(odd_idx, odd_idx)]
+            even_submatrix = epoch_diag.s2_within_cka[np.ix_(even_idx, even_idx)]
+            print("Odd submatrix:\n", odd_submatrix)
+            print("Even submatrix:\n", even_submatrix)
+            # asseert they are not identical
+            if np.array_equal(odd_submatrix, even_submatrix):
+                print("Warning: Odd and even submatrices are identical!")
+
 
         _plot_cka_subset(
             axes[1],
@@ -835,34 +947,196 @@ def plot_epoch_diagnostics_s2only(epoch_diag: EpochDiagnostics, output_dir: Path
     plt.close(fig)
     return output_path
 
+def _split_vit_hook_indices(layer_names: list[str]) -> dict[str, list[int]]:
+    """
+    Group CROMA ViT layer names into 3 hook types:
+      - 'ln'        : *input_norm* of attn or ffn
+      - 'core'      : self-attn or FFN output (before residual add)
+      - 'residual'  : post-residual sublayer output
+
+    Assumes names like:
+      layer0.attn.ln, layer0.ffn.ln
+      layer0.attn.core, layer0.ffn.core
+      layer0.attn.residual, layer0.ffn.residual
+    """
+    groups = {"ln": [], "core": [], "residual": []}
+
+    for i, name in enumerate(layer_names):
+        if name.endswith(".ln") or ".ln." in name:
+            groups["ln"].append(i)
+        elif name.endswith(".core") or ".core." in name:
+            groups["core"].append(i)
+        elif name.endswith(".residual") or ".residual." in name:
+            groups["residual"].append(i)
+
+    return groups
+
+
+
+def plot_epoch_diagnostics_transformer(
+    epoch_diag: EpochDiagnostics, output_dir: Path, label: str
+) -> Path:
+    """
+    Plot CKA diagnostics for CROMA-style Transformer encoders.
+
+    Layout (2x4):
+      Row 0 (S1): [all] [LN hooks] [core hooks] [residual hooks]
+      Row 1 (S2): [all] [LN hooks] [core hooks] [residual hooks]
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    fig, axes = plt.subplots(2, 4, figsize=(20, 10))
+
+    print(
+        f"Plotting Transformer CKA matrices:\n"
+        f"  S1 layers={epoch_diag.s1_layers}\n"
+        f"  S2 layers={epoch_diag.s2_layers}"
+    )
+
+    # === S1 ENCODER ROW ===
+
+    # [0,0]: S1 full (all hooks)
+    _plot_cka(
+        axes[0, 0],
+        epoch_diag.s1_within_cka,
+        epoch_diag.s1_layers,
+        epoch_diag.s1_layers,
+        title="S1 within-encoder (all hooks)",
+        xlabel="Layer",
+        ylabel="Layer",
+    )
+
+    if epoch_diag.s1_within_cka is not None and epoch_diag.s1_layers:
+        s1_groups = _split_vit_hook_indices(epoch_diag.s1_layers)
+
+        # [0,1]: LN hooks
+        _plot_cka_subset(
+            axes[0, 1],
+            epoch_diag.s1_within_cka,
+            epoch_diag.s1_layers,
+            s1_groups["ln"],
+            title="S1 within-encoder (LN hooks)",
+        )
+
+        # [0,2]: core hooks (attn/FFN)
+        _plot_cka_subset(
+            axes[0, 2],
+            epoch_diag.s1_within_cka,
+            epoch_diag.s1_layers,
+            s1_groups["core"],
+            title="S1 within-encoder (core hooks)",
+        )
+
+        # [0,3]: residual hooks
+        _plot_cka_subset(
+            axes[0, 3],
+            epoch_diag.s1_within_cka,
+            epoch_diag.s1_layers,
+            s1_groups["residual"],
+            title="S1 within-encoder (residual hooks)",
+        )
+    else:
+        for j in range(1, 4):
+            axes[0, j].axis("off")
+
+    # === S2 ENCODER ROW ===
+
+    # [1,0]: S2 full (all hooks)
+    _plot_cka(
+        axes[1, 0],
+        epoch_diag.s2_within_cka,
+        epoch_diag.s2_layers,
+        epoch_diag.s2_layers,
+        title="S2 within-encoder (all hooks)",
+        xlabel="Layer",
+        ylabel="Layer",
+    )
+
+    if epoch_diag.s2_within_cka is not None and epoch_diag.s2_layers:
+        s2_groups = _split_vit_hook_indices(epoch_diag.s2_layers)
+
+        # [1,1]: LN hooks
+        _plot_cka_subset(
+            axes[1, 1],
+            epoch_diag.s2_within_cka,
+            epoch_diag.s2_layers,
+            s2_groups["ln"],
+            title="S2 within-encoder (LN hooks)",
+        )
+
+        # [1,2]: core hooks
+        _plot_cka_subset(
+            axes[1, 2],
+            epoch_diag.s2_within_cka,
+            epoch_diag.s2_layers,
+            s2_groups["core"],
+            title="S2 within-encoder (core hooks)",
+        )
+
+        # [1,3]: residual hooks
+        _plot_cka_subset(
+            axes[1, 3],
+            epoch_diag.s2_within_cka,
+            epoch_diag.s2_layers,
+            s2_groups["residual"],
+            title="S2 within-encoder (residual hooks)",
+        )
+    else:
+        for j in range(1, 4):
+            axes[1, j].axis("off")
+
+    fig.suptitle(
+        f"Transformer embedding diagnostics — {epoch_diag.label}\n"
+        f"Epoch {epoch_diag.epoch} | Samples: {len(epoch_diag.ids)}*64={len(epoch_diag.ids)*64}",
+        fontsize=16,
+    )
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+
+    output_path = output_dir / "embedding_diagnostics_transformer.png"
+    fig.savefig(output_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return output_path
 
 def _split_odd_even_indices(layer_names: list[str]) -> tuple[list[int], list[int]]:
     """
-    Return indices for 'odd' and 'even' layers.
+    Return indices for 'odd' and 'even' layers in a ResNet-like model.
 
-    For ResNet-like models we mimic the paper:
-      - odd  = bn3 outputs inside bottlenecks
-      - even = post-residual ReLUs (block outputs)
-
-    If we don't find such names, we fall back to index parity.
+    We follow Kornblith et al.:
+      - "odd"  = bn3 outputs inside bottlenecks
+      - "even" = post-residual block outputs (our `.block_out` hooks)
     """
     odd_idx: list[int] = []
     even_idx: list[int] = []
 
     for i, name in enumerate(layer_names):
-        # bn3 inside a bottleneck
-        if "bn3" in name:
+        if name.endswith(".bn3"):
             odd_idx.append(i)
-        # post-residual relu – often something like 'layer3.5.relu'
-        elif name.endswith("relu") and "layer" in name:
+        elif name.endswith(".block_out"):
             even_idx.append(i)
 
-    # Fallback: use index parity if name-based detection fails
     if not odd_idx or not even_idx:
-        odd_idx = [i for i in range(len(layer_names)) if i % 2 == 1]
-        even_idx = [i for i in range(len(layer_names)) if i % 2 == 0]
+        raise ValueError(
+            f"Could not find both .bn3 and .block_out layers in names:\n{layer_names}"
+        )
 
     return odd_idx, even_idx
+
+
+    # for i, name in enumerate(layer_names):
+    #     # bn3 inside a bottleneck
+    #     if "bn3" in name:
+    #         odd_idx.append(i)
+    #     # post-residual relu – often something like 'layer3.5.relu'
+    #     elif name.endswith("relu") and "layer" in name:
+    #         even_idx.append(i)
+
+    # # Fallback: use index parity if name-based detection fails
+    # if not odd_idx or not even_idx:
+    #     # raise NotImplementedError("Fallback to index parity not implemented.")
+    #     odd_idx = [i for i in range(len(layer_names)) if i % 2 == 1]
+    #     even_idx = [i for i in range(len(layer_names)) if i % 2 == 0]
+
+    # return odd_idx, even_idx
 
 def _plot_cka_subset(ax, full_matrix: np.ndarray, layer_names: list[str],
                     indices: list[int], title: str) -> None:
@@ -908,6 +1182,10 @@ def plot_epoch_diagnostics(epoch_diag: EpochDiagnostics, output_dir: Path, label
     # [0,1] & [0,2]: S1 odd/even (if enabled)
     if plot_even_odd:
         s1_odd_idx, s1_even_idx = _split_odd_even_indices(epoch_diag.s1_layers)
+
+        print("Odd:", [epoch_diag.s1_layers[i] for i in s1_odd_idx])
+        print("Even:", [epoch_diag.s1_layers[i] for i in s1_even_idx])
+
 
         _plot_cka_subset(
             axes[0, 1],
@@ -1001,15 +1279,14 @@ def plot_epoch_diagnostics(epoch_diag: EpochDiagnostics, output_dir: Path, label
     return output_path
 
 
-
-def _build_subset(dataset: torch.utils.data.Dataset, subset_size: int, seed: int) -> torch.utils.data.Dataset:
-    total = len(dataset)
-    if subset_size <= 0 or subset_size >= total:
-        indices = list(range(total))
-    else:
-        rng = np.random.default_rng(seed)
-        indices = sorted(rng.choice(total, size=subset_size, replace=False).tolist())
-    return torch.utils.data.Subset(dataset, indices)
+# def _build_subset(dataset: torch.utils.data.Dataset, subset_size: int, seed: int) -> torch.utils.data.Dataset:
+#     total = len(dataset)
+#     if subset_size <= 0 or subset_size >= total:
+#         indices = list(range(total))
+#     else:
+#         rng = np.random.default_rng(seed)
+#         indices = sorted(rng.choice(total, size=subset_size, replace=False).tolist())
+#     return torch.utils.data.Subset(dataset, indices)
 
 
 # def run_single_epoch_diagnostics(args: argparse.Namespace) -> EpochDiagnostics:

@@ -330,7 +330,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
         if not args.model.skip_scheduler:
             scheduler(step)
 
-        s1, s2 = batch
+        s1, s2 = batch['s1'], batch['s2']
         s1 = s1.to(device=device, dtype=input_dtype, non_blocking=True)
         s2 = s2.to(device=device, dtype=input_dtype, non_blocking=True)
 
@@ -433,10 +433,11 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                         losses = loss(**inputs, **inputs_no_accum, output_dict=True)
                         # logging.info(f"Losses for batch {i_accum}, inner pass {j + 1}/{args.train.accum_freq}: {losses}")
                         
-                        total_loss = sum(losses.values()) / args.train.accum_freq
-                        losses["loss"] = total_loss
+                        raw_total_loss = sum(losses.values())
+                        losses["loss"] = raw_total_loss
 
-                    backward(total_loss, scaler)
+                    scaled_loss = raw_total_loss / args.train.accum_freq
+                    backward(scaled_loss, scaler)
 
                 del inputs
                 del inputs_no_accum
@@ -466,7 +467,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
 
         # Note: we clamp to 4.6052 = ln(100), as in the original paper.
         with torch.no_grad():
-            unwrap_model(model).logit_scale.clamp_(0, math.log(100))
+            unwrap_model(model).logit_scale.clamp_(0, math.log(40))
 
         batch_time_m.update(time.time() - end)
         end = time.time()
@@ -503,7 +504,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 )
             if loss_param_state:
                 metrics_log_parts.extend(
-                    f"{name}: {value:#.5g}" for name, value in loss_param_state.items()
+                    f"[ParamState]{name}: {value:#.5g}" for name, value in loss_param_state.items()
                 )
             if curv_scalar is None and loss_param_state:
                 curv_scalar = loss_param_state.get("curvature")

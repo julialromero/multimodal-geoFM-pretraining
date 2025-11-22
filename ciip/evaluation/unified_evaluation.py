@@ -230,6 +230,7 @@ from visualizations.ssl4eo.embedding_collapse_diagnostics import (  # type: igno
     extract_embeddings_for_dataset,
     plot_epoch_diagnostics,
     plot_epoch_diagnostics_s2only,
+    plot_epoch_diagnostics_transformer,
     plot_projection,
     preprocess_projection_data,
     ModalityEmbeddings,
@@ -831,6 +832,8 @@ def _run_embedding_diagnostics(
     sample_ids: Optional[Sequence[str]] = None,
     output_dir: Path,
 ) -> None:
+    print(f"Running embedding diagnostics, saving to {output_dir}")
+    print(type(output_dir))
     output_dir.mkdir(parents=True, exist_ok=True)
 
     def _detach_or_none(tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
@@ -1039,7 +1042,12 @@ def _run_embedding_diagnostics(
     if can_plot_full:
         # if config.model_weights == 'dino':
         #     plot_epoch_diagnostics_s2only(epoch_diagnostics, output_dir, label="backbone_raw")
-        plot_epoch_diagnostics(epoch_diagnostics, output_dir, label="posthead_raw", plot_even_odd=plot_even_odd)
+        if config.model_type in ("croma", "croma_vit", "croma_s1s2"):
+            plot_epoch_diagnostics_transformer(epoch_diagnostics, output_dir, label="transformer_hooks")
+        else:
+            plot_epoch_diagnostics(epoch_diagnostics, output_dir, label="posthead_raw", plot_even_odd=True)
+
+        # plot_epoch_diagnostics(epoch_diagnostics, output_dir, label="posthead_raw", plot_even_odd=plot_even_odd)
     elif can_plot_s2_only:
         if config.model_type == "torchgeo_resnet50":
             plot_epoch_diagnostics_s2only(epoch_diagnostics, output_dir, label="s2_backbone_raw", plot_even_odd=plot_even_odd)
@@ -1195,30 +1203,16 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
         croma_weights=config.croma_weights,
         croma_image_resolution=config.croma_image_resolution,
     )
-    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+    device = torch.device('cpu') ##torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
     adapter = adapter.to(device)
     adapter.eval()
     base_model = getattr(adapter, "base_model", adapter)
     is_lorentz = getattr(adapter, "is_lorentz", False)
 
-    def _model_label() -> str:
-        """Derive a label for organizing outputs per model run."""
-        if config.model_type in ['croma'] and config.croma_weights:
-            return Path(config.croma_weights).stem
-        if config.model_type == 'torchgeo_resnet50' and config.model_weights:
-            return Path(config.model_weights).stem
-        
-        if config.model_path:
-            return Path(config.model_path).stem
-        if config.model_weights:
-            return Path(config.model_weights).stem
-        if config.checkpoint:
-            return config.checkpoint.stem
-        return config.model_type
 
-    output_root = config.output_dir
+    output_root = Path(config.output_dir)
     os.makedirs(output_root, exist_ok=True)
-
+    
     target_modality = config.evaluation_modality.lower()
     if target_modality not in {"s1", "s2"}:
         raise ValueError("evaluation_modality must be either 's1' or 's2'")
@@ -1226,146 +1220,153 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
     model_channels = _infer_model_in_channels(
         adapter, config.model_in_channels, modality=target_modality
     )
-    # if target_modality == "s1":
-    #     eurosat_bands = EUROSAT_S1_BANDS
-    # else:
-    #     eurosat_bands = _resolve_eurosat_bands(model_channels)
-    # logging.info(
-    #     "EuroSAT linear probe will use %d Sentinel-%s bands (%s)",
-    #     len(eurosat_bands),
-    #     "1" if target_modality == "s1" else "2",
-    #     ", ".join(eurosat_bands),
-    # )
 
-    # os.makedirs(output_dir, exist_ok=True)
-
-    # # check if dir exists
-    # eurosat_output_dir = output_dir / "linear_probe"
-    # if True: #not eurosat_output_dir.exists():
-    #     eurosat_loaders = _build_eurosat_loaders(
-    #         config, bands=eurosat_bands, modality=target_modality
-    #     )
-    #     eurosat_embeddings: Dict[str, EmbeddingBundle] = {}
-    #     with _use_adapter_modality(adapter, target_modality):
-    #         for split, loader in eurosat_loaders.items():
-    #             eurosat_embeddings[split] = _extract_embeddings(
-    #                 adapter,
-    #                 loader,
-    #                 device=device,
-    #                 expected_in_channels=model_channels,
-    #                 modality=target_modality,
-    #             )
-    #     _run_linear_probe(config, eurosat_embeddings, output_dir=output_dir, label="eurosat")
-    #     _plot_eurosat_tsne(
-    #         eurosat_embeddings["test"],
-    #         output_dir=eurosat_output_dir,
-    #         label="eurosat",
-    #         max_samples=config.tsne_samples,
-    #         seed=config.random_seed,
-    #         model_title=config.model_path,
-    #     )
+    output_dir = config.output_dir
+    os.makedirs(output_dir, exist_ok=True)
+    output_dir = Path(output_dir)
 
 
-    # # first check if the output csvs already exist
-    # neuco_output_dir = output_dir / "neuco"
-    # neuco_modalities: List[str] = list(config.neuco_modalities)
-    # if target_modality == "s1":
-    #     neuco_modalities = ["s1"]
-    # elif not neuco_modalities:
-    #     neuco_modalities = ["s2l1c"]
+    if args.disable_eurosat == False:
+        if target_modality == "s1":
+            eurosat_bands = EUROSAT_S1_BANDS
+        else:
+            eurosat_bands = _resolve_eurosat_bands(model_channels)
+        logging.info(
+            "EuroSAT linear probe will use %d Sentinel-%s bands (%s)",
+            len(eurosat_bands),
+            "1" if target_modality == "s1" else "2",
+            ", ".join(eurosat_bands),
+        )
+        
 
-    # if len(neuco_modalities) > 1:
-    #     print('Only useing 1st modality for neuco benchmark')
-    # modality = neuco_modalities[0]
-    # csv_out_backbone = neuco_output_dir / "neuco_export" / f"neuco_{modality}_backbone.csv"
-    # csv_out_posthead = neuco_output_dir / "neuco_export" / f"neuco_{modality}_posthead.csv"
-    # csv_out_projected = neuco_output_dir / "neuco_export" /f"neuco_{modality}_projected.csv"
-    
-    # if csv_out_backbone.exists() and csv_out_posthead.exists() and csv_out_projected.exists():
-    #     print("NeuCo embeddings already exist, skipping extraction.")
-    # if csv_out_backbone.exists() and args.model_type in ["croma", "torchgeo_resnet50"]:
-    #     print("NeuCo embeddings already exist for model type {}, skipping extraction.".format(args.model_type))
-    # else:
-    #     print("csvs at {}, {}, {} do not exist, extracting NeuCo embeddings.".format(csv_out_backbone, csv_out_posthead, csv_out_projected))
-    #     neuco_output_dir.mkdir(parents=True, exist_ok=True)
-    #     neuco_loader = _build_neuco_loader(
-    #         config, modalities=neuco_modalities
-    #     )
-    #     with _use_adapter_modality(adapter, target_modality):
-    #         neuco_bundle = _extract_embeddings(
-    #             adapter,
-    #             neuco_loader,
-    #             device=device,
-    #             require_ids=True,
-    #             expected_in_channels=model_channels,
-    #             modality=target_modality,
-    #         )
-    
-    #     _export_neuco(neuco_bundle, neuco_output_dir / "neuco_export", label=modality)
-    #     print('Saved NeuCo embeddings to ', neuco_output_dir / "neuco_export")
-    
-    # # check neuco output dir
-    # import subprocess
-    # print(config.model_type)
-    # if config.model_type == "croma":
-    #     embedding_dim_backbone = "768"
-    #     embedding_dim_posthead = None
-    # # if torchgeo resnet50 
-    # elif config.model_type == "torchgeo_resnet50":
-    #     embedding_dim_backbone = "2048"
-    #     embedding_dim_posthead = None
-    # else:
-    #     try:
-    #         embedding_dim_backbone = str(neuco_bundle.backbone.shape[1])
-    #         embedding_dim_posthead = str(neuco_bundle.posthead.shape[1])
-    #     except:
-    #         embedding_dim_backbone = "2048"  # default to 512 if extraction failed
-    #         embedding_dim_posthead = "1024"
-    #     # if model type ois torchgeo resnet
-    #     if config.model_type == "torchgeo_resnet50":
-    #         embedding_dim_backbone = "2048"
-    #         embedding_dim_posthead = "2048"
+        # check if dir exists
+        eurosat_output_dir = output_dir / "linear_probe"
+        if True: #not eurosat_output_dir.exists():
+            eurosat_loaders = _build_eurosat_loaders(
+                config, bands=eurosat_bands, modality=target_modality
+            )
+            eurosat_embeddings: Dict[str, EmbeddingBundle] = {}
+            with _use_adapter_modality(adapter, target_modality):
+                for split, loader in eurosat_loaders.items():
+                    eurosat_embeddings[split] = _extract_embeddings(
+                        adapter,
+                        loader,
+                        device=device,
+                        expected_in_channels=model_channels,
+                        modality=target_modality,
+                    )
+            _run_linear_probe(config, eurosat_embeddings, output_dir=output_dir, label="eurosat")
+            _plot_eurosat_tsne(
+                eurosat_embeddings["test"],
+                output_dir=eurosat_output_dir,
+                label="eurosat",
+                max_samples=config.tsne_samples,
+                seed=config.random_seed,
+                model_title=config.model_path,
+            )
 
-    # print(f"NeuCo embedding dimension: {embedding_dim_backbone}")
 
-    # cmd = [
-    #     "python", "/local/ms-data/NeuCo-Bench/benchmark/main.py",
-    #     "--annotation_path", "/local/ms-data/SSL4EO-S12-downstream/labels",
-    #     "--output_dir", neuco_output_dir,
-    #     "--config", "/local/ms-data/NeuCo-Bench/benchmark/config.yaml",
-    #     "--method_name", "backbone",
-    #     "--phase", "testing",
-    #     "--submission_file", csv_out_backbone,
-    #     "--embedding_dim", embedding_dim_backbone
-    # ]
-    # env = os.environ.copy()
-    # env["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
-    # subprocess.run(cmd, check=True, env=env)
+    if args.disable_neuco == False:
+        # first check if the output csvs already exist
+        neuco_output_dir = output_dir / "neuco"
+        neuco_modalities: List[str] = list(config.neuco_modalities)
+        if target_modality == "s1":
+            neuco_modalities = ["s1"]
+        elif not neuco_modalities:
+            neuco_modalities = ["s2l1c"]
 
-    # if embedding_dim_posthead is not None:
-    #     cmd1 = [
-    #         "python", "/local/ms-data/NeuCo-Bench/benchmark/main.py",
-    #         "--annotation_path", "/local/ms-data/SSL4EO-S12-downstream/labels",
-    #         "--output_dir", neuco_output_dir,
-    #         "--config", "/local/ms-data/NeuCo-Bench/benchmark/config.yaml",
-    #         "--method_name", "posthead",
-    #         "--phase", "testing",
-    #         "--submission_file", csv_out_posthead,
-    #         "--embedding_dim", embedding_dim_posthead
-    #     ]
-    #     cmd2 = [
-    #         "python", "/local/ms-data/NeuCo-Bench/benchmark/main.py",
-    #         "--annotation_path", "/local/ms-data/SSL4EO-S12-downstream/labels",
-    #         "--output_dir", neuco_output_dir,
-    #         "--config", "/local/ms-data/NeuCo-Bench/benchmark/config.yaml",
-    #         "--method_name", "projected",
-    #         "--phase", "testing",
-    #         "--submission_file", csv_out_projected,
-    #         "--embedding_dim", embedding_dim_posthead
-    #     ]
+        if len(neuco_modalities) > 1:
+            print('Only useing 1st modality for neuco benchmark')
+        modality = neuco_modalities[0]
+        csv_out_backbone = neuco_output_dir / "neuco_export" / f"neuco_{modality}_backbone.csv"
+        csv_out_posthead = neuco_output_dir / "neuco_export" / f"neuco_{modality}_posthead.csv"
+        csv_out_projected = neuco_output_dir / "neuco_export" /f"neuco_{modality}_projected.csv"
+        
+        if csv_out_backbone.exists() and csv_out_posthead.exists() and csv_out_projected.exists():
+            print("NeuCo embeddings already exist, skipping extraction.")
+        if csv_out_backbone.exists() and args.model_type in ["croma", "torchgeo_resnet50"]:
+            print("NeuCo embeddings already exist for model type {}, skipping extraction.".format(args.model_type))
+        else:
+            print("csvs at {}, {}, {} do not exist, extracting NeuCo embeddings.".format(csv_out_backbone, csv_out_posthead, csv_out_projected))
+            neuco_output_dir.mkdir(parents=True, exist_ok=True)
+            neuco_loader = _build_neuco_loader(
+                config, modalities=neuco_modalities
+            )
+            with _use_adapter_modality(adapter, target_modality):
+                neuco_bundle = _extract_embeddings(
+                    adapter,
+                    neuco_loader,
+                    device=device,
+                    require_ids=True,
+                    expected_in_channels=model_channels,
+                    modality=target_modality,
+                )
+        
+            _export_neuco(neuco_bundle, neuco_output_dir / "neuco_export", label=modality)
+            print('Saved NeuCo embeddings to ', neuco_output_dir / "neuco_export")
+        
+        # check neuco output dir
+        import subprocess
+        print(config.model_type)
+        if config.model_type == "croma":
+            embedding_dim_backbone = "768"
+            embedding_dim_posthead = None
+        # if torchgeo resnet50 
+        elif config.model_type == "torchgeo_resnet50":
+            embedding_dim_backbone = "2048"
+            embedding_dim_posthead = None
+        else:
+            try:
+                embedding_dim_backbone = str(neuco_bundle.backbone.shape[1])
+                embedding_dim_posthead = str(neuco_bundle.posthead.shape[1])
+            except:
+                embedding_dim_backbone = "2048"  # default to 512 if extraction failed
+                embedding_dim_posthead = "1024"
+            # if model type ois torchgeo resnet
+            if config.model_type == "torchgeo_resnet50":
+                embedding_dim_backbone = "2048"
+                embedding_dim_posthead = "2048"
 
-    #     subprocess.run(cmd1, check=True, env=env)
-    #     subprocess.run(cmd2, check=True, env=env)
+        print(f"NeuCo embedding dimension: {embedding_dim_backbone}")
+
+        cmd = [
+            "python", "/local/ms-data/NeuCo-Bench/benchmark/main.py",
+            "--annotation_path", "/local/ms-data/SSL4EO-S12-downstream/labels",
+            "--output_dir", neuco_output_dir,
+            "--config", "/local/ms-data/NeuCo-Bench/benchmark/config.yaml",
+            "--method_name", "backbone",
+            "--phase", "testing",
+            "--submission_file", csv_out_backbone,
+            "--embedding_dim", embedding_dim_backbone
+        ]
+        env = os.environ.copy()
+        env["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+        subprocess.run(cmd, check=True, env=env)
+
+        if embedding_dim_posthead is not None:
+            cmd1 = [
+                "python", "/local/ms-data/NeuCo-Bench/benchmark/main.py",
+                "--annotation_path", "/local/ms-data/SSL4EO-S12-downstream/labels",
+                "--output_dir", neuco_output_dir,
+                "--config", "/local/ms-data/NeuCo-Bench/benchmark/config.yaml",
+                "--method_name", "posthead",
+                "--phase", "testing",
+                "--submission_file", csv_out_posthead,
+                "--embedding_dim", embedding_dim_posthead
+            ]
+            cmd2 = [
+                "python", "/local/ms-data/NeuCo-Bench/benchmark/main.py",
+                "--annotation_path", "/local/ms-data/SSL4EO-S12-downstream/labels",
+                "--output_dir", neuco_output_dir,
+                "--config", "/local/ms-data/NeuCo-Bench/benchmark/config.yaml",
+                "--method_name", "projected",
+                "--phase", "testing",
+                "--submission_file", csv_out_projected,
+                "--embedding_dim", embedding_dim_posthead
+            ]
+
+            subprocess.run(cmd1, check=True, env=env)
+            subprocess.run(cmd2, check=True, env=env)
   
 
 
@@ -1386,12 +1387,16 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
             device=device,
         )
 
+        # create Path fo diagnostics
+        diagnostics_dir = os.path.join(output_dir, "embedding_diagnostics")
+        diagnostics_dir = Path(diagnostics_dir)
+
         _run_embedding_diagnostics(
             config,
             s1_ssl4eo,
             s2_ssl4eo,
             sample_ids=ssl4eo_ids,
-            output_dir=output_dir / "embedding_diagnostics",
+            output_dir= diagnostics_dir #output_dir + "embedding_diagnostics",
         )
         logging.info("Completed SSL4EO diagnostics")
         # print output dir
@@ -1439,7 +1444,8 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
         retrieval_s2 = s2_ssl4eo.backbone
 
         retrieval_metrics = compute_cross_modal_retrieval(retrieval_s1, retrieval_s2, curvature=curvature)
-        retrieval_path = output_dir / "ssl4eo_retrieval.json"
+        #output_dir / "ssl4eo_retrieval.json"
+        retrieval_path = Path(output_dir) / "ssl4eo_retrieval_backbone.json"
         retrieval_path.write_text(json.dumps(retrieval_metrics, indent=2, sort_keys=True))
         logging.info("SSL4EO cross-modal retrieval metrics: %s", retrieval_metrics)
 
@@ -1450,14 +1456,14 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
         retrieval_s1 = s1_ssl4eo.projected
         retrieval_s2 = s2_ssl4eo.projected
         retrieval_metrics = compute_cross_modal_retrieval(retrieval_s1, retrieval_s2, curvature=curvature)
-        retrieval_path = output_dir / "ssl4eo_retrieval_projected.json"
+        retrieval_path = Path(output_dir) / "ssl4eo_retrieval_projected.json"
         retrieval_path.write_text(json.dumps(retrieval_metrics, indent=2, sort_keys=True))
         logging.info("SSL4EO projected cross-modal retrieval metrics: %s", retrieval_metrics)
 
         retrieval_s1 = s1_ssl4eo.posthead
         retrieval_s2 = s2_ssl4eo.posthead
         retrieval_metrics = compute_cross_modal_retrieval(retrieval_s1, retrieval_s2, curvature=curvature)
-        retrieval_path = output_dir / "ssl4eo_retrieval_posthead.json"
+        retrieval_path = Path(output_dir) / "ssl4eo_retrieval_posthead.json"
         retrieval_path.write_text(json.dumps(retrieval_metrics, indent=2, sort_keys=True))
         logging.info("SSL4EO posthead cross-modal retrieval metrics: %s", retrieval_metrics)
 
@@ -1482,11 +1488,7 @@ if __name__ == "__main__":
     parser.add_argument("--croma-image-resolution", type=int, default=120, help="Input resolution expected by the CROMA model.")
     parser.add_argument("--model-in-channels", type=int, help="Number of input channels for TorchGeo ResNet models.")
     parser.add_argument("--model-path", type=str, help="Experiment path identifier for the model.")
-    # parser.add_argument("--eurosat-root", type=Path, required=True, help="EuroSAT dataset root directory.")
-    # parser.add_argument("--neuco-root", type=Path, required=True, help="NeuCo-Bench dataset root directory.")
-    # parser.add_argument("--output-dir", type=Path, required=True, help="Directory to write evaluation artifacts.")
-    # parser.add_argument("--ssl4eo-root", type=Path, help="SSL4EO dataset root for diagnostics.")
-    parser.add_argument("--disable-ssl4eo", action="store_true", help="Skip SSL4EO diagnostics even if a root is provided.")
+    
     parser.add_argument("--tsne-samples", type=int, default=1500, help="Samples used for t-SNE visualisations.")
     parser.add_argument("--pca-samples", type=int, default=5000, help="Samples used for PCA visualisations.")
     parser.add_argument("--ssl4eo-subset-size", type=int, default=150, help="Subset size for SSL4EO embedding extraction.")
@@ -1501,6 +1503,10 @@ if __name__ == "__main__":
         help="Sentinel modality to use for EuroSAT and NeuCo evaluations.",
     )
     parser.add_argument("--neuco-resize", type=int, nargs=2, help="Resize dimensions for NeuCo images.")
+
+    parser.add_argument("--disable-eurosat", action="store_true", help="Skip EuroSAT linear probe evaluation.")
+    parser.add_argument("--disable-neuco", action="store_true", help="Skip NeuCo benchmark evaluation.")
+    parser.add_argument("--disable-ssl4eo", action="store_true", help="Skip SSL4EO diagnostics even if a root is provided.")
 
     args = parser.parse_args()
 
@@ -1530,7 +1536,8 @@ if __name__ == "__main__":
         
             
     if args.model_path is None and args.model_type == "ciip_checkpoint":
-        args.model_path = '2025_11_19-18_54_18-model_resnet50-lr_0.001-b_2-j_6-p_amp_bfloat16/'
+        args.model_path = '2025_11_21-11_32_16-model_resnet50-lr_0.001-b_2-j_6-p_amp_bfloat16'
+        # '2025_11_19-18_54_18-model_resnet50-lr_0.001-b_2-j_6-p_amp_bfloat16/'
         # '2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp'
         # '2025_11_17-12_26_37-model_resnet50-lr_0.001-b_2-j_6-p_amp'
         # '2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp'

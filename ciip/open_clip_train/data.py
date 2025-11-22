@@ -1176,35 +1176,35 @@ def get_ssl4eo_dataset(args, is_train, transforms):
     else:
         default_bands = ["1", "2", "3", "4", "5", "6", "7", "8", "8A", "9", "10", "11", "12"]
 
-    # dataset = SSL4EODataset(
-    #     root, # root file path
-    #     'bands', #args.dataset.s2_tier,
-    #     seasons=4,
-    #     transforms=None,  # transforms
-    #     target_image_dimension=(args.dataset.dimension, args.dataset.dimension)
-    # )
-    # # sample 2000 samples to plot pixel distribution
-    # data_sample = Subset(dataset, np.random.choice(range(len(dataset)), size=30, replace=False))
+    dataset = SSL4EODataset(
+        root, # root file path
+        'bands', #args.dataset.s2_tier,
+        seasons=4,
+        transforms=None,  # transforms
+        target_image_dimension=(args.dataset.dimension, args.dataset.dimension)
+    )
+    # sample 2000 samples to plot pixel distribution
+    data_sample = Subset(dataset, np.random.choice(range(len(dataset)), size=10, replace=False))
 
 
-    # # plot histogram of pixel values
+    # plot histogram of pixel values
     # plot_pixel_value_distributions(data_sample, band_names=['0','1'], modality='s1', title='s1 without transforms')
-    # plot_pixel_value_distributions(data_sample, band_names=default_bands, modality='s2', title='s2 without transforms')
+    plot_pixel_value_distributions(data_sample, band_names=default_bands, modality='s2', title='s2 without transforms')
 
     
     dataset = SSL4EODataset(
         root,
-        # seasons=1,
+        seasons=4,
         transforms=transforms,  
         s2_tier = "S2L2A",
         is_train=True
     )
 
     # sample 2000 samples to plot pixel distribution
-    # data_sample = Subset(dataset, np.random.choice(range(len(dataset)), size=30, replace=False))
-    # # plot histogram of pixel values
+    data_sample = Subset(dataset, np.random.choice(range(len(dataset)), size=10, replace=False))
+    # plot histogram of pixel values
     # plot_pixel_value_distributions(data_sample, band_names=['0','1'], modality='s1', title='s1 with transforms')
-    # plot_pixel_value_distributions(data_sample, band_names=default_bands, modality='s2', title='s2 with transforms')
+    plot_pixel_value_distributions(data_sample, band_names=default_bands, modality='s2', title='s2 with transforms')
 
 
     return dataset_to_datainfo(args, dataset, is_train)
