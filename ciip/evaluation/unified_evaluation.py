@@ -221,8 +221,6 @@ from visualizations.ssl4eo.embedding_collapse_diagnostics import (  # type: igno
     DEFAULT_S2_BANDS,
     EpochDiagnostics,
     ModalityEmbeddings,
-    compute_cross_encoder_cka,
-    # compute_linear_cka,
     compute_projection,
     compute_singular_values,
     compute_within_encoder_cka,
@@ -1603,10 +1601,10 @@ __all__ = ["ModelEvalConfig", "run_full_evaluation"]
 
 
 # python evaluation/unified_evaluation.py --model-in-channels 12 --ssl4eo-subset-size 3 --ciip-epoch 10 --model-path '2025_11_22-08_31_28-model_resnet50-lr_0.001-b_6-j_6-p_amp_bfloat16';
-# python evaluation/unified_evaluation.py --model-in-channels 12 --ssl4eo-subset-size 30 --ciip-epoch 30 --model-path '2025_11_22-08_31_28-model_resnet50-lr_0.001-b_6-j_6-p_amp_bfloat16';
-# python evaluation/unified_evaluation.py --model-in-channels 12 --ssl4eo-subset-size 30 --ciip-epoch 75;
-# python evaluation/unified_evaluation.py --model-in-channels 12 --ssl4eo-subset-size 30 --ciip-epoch 40;
-# python evaluation/unified_evaluation.py --model-in-channels 12 --disable-eurosat --disable-neuco --ssl4eo-subset-size 30
+# python evaluation/unified_evaluation.py --model-in-channels 12 --ssl4eo-subset-size 3 --ciip-epoch 30 --model-path '2025_11_22-08_31_28-model_resnet50-lr_0.001-b_6-j_6-p_amp_bfloat16';
+# python evaluation/unified_evaluation.py --model-in-channels 12 --ssl4eo-subset-size 3 --ciip-epoch 75;
+# python evaluation/unified_evaluation.py --model-in-channels 12 --ssl4eo-subset-size 3 --ciip-epoch 40;
+# python evaluation/unified_evaluation.py --model-in-channels 12 --disable-eurosat --disable-neuco --ssl4eo-subset-size 3
 
 
 if __name__ == "__main__":

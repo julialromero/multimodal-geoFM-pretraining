@@ -432,8 +432,7 @@ class S2ScaleTransform(nn.Module):
         return x / self.scale
 
 # Registry of models to evaluate
-def build_model_specs() -> List[ModelSpec]:
-    specs: List[ModelSpec] = []
+
 
     # # 1. Random Conv Filters (RCF) – 13-band, 512-dim features
     # specs.append(

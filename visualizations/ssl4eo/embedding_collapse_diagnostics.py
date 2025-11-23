@@ -300,11 +300,32 @@ def _prepare_cka_tensor(tensor: torch.Tensor, take: Optional[int] = None) -> Opt
     return tensor.to(dtype=torch.float32)
 
 
-def _layer_sort_key(name: str) -> Tuple[int, int, str]:
-    numbers = [int(match) for match in re.findall(r"\d+", name)]
-    if not numbers:
-        return (0, 0, name)
-    return (numbers[0], numbers[1] if len(numbers) > 1 else 0, name)
+_SUFFIX_ORDER = {
+    "conv1": 0,
+    "bn1":   1,
+    "conv2": 2,
+    "bn2":   3,
+    "conv3": 4,
+    "bn3":   5,
+    "block_out": 6,
+}
+
+def _layer_sort_key(name: str) -> Tuple[int, int, int, str]:
+    # Expects something like "layer1.0.conv1"
+    parts = name.split(".")
+    if len(parts) != 3:
+        # Fallback: put weird names at the end, sorted by name
+        return (999, 999, 999, name)
+
+    layer_str, block_str, suffix = parts
+
+    # "layer1" -> 1
+    layer_idx = int(layer_str.replace("layer", ""))
+    block_idx = int(block_str)
+
+    suffix_rank = _SUFFIX_ORDER.get(suffix, 998)  # unknown suffixes before total fallback
+
+    return (layer_idx, block_idx, suffix_rank, suffix)
 
 
 def _order_layers(layer_dict: Dict[str, torch.Tensor]) -> List[str]:
@@ -314,6 +335,7 @@ def _order_layers(layer_dict: Dict[str, torch.Tensor]) -> List[str]:
 def compute_within_encoder_cka(layer_features: Dict[str, torch.Tensor], cuda_cka) -> Tuple[List[str], Optional[np.ndarray]]:
     print(f'Computing wihtin encoder CKa')
     ordered = _order_layers(layer_features) # layer_features #
+    print(f'Ordered layers: {ordered}')
     prepared: Dict[str, torch.Tensor] = {}
     for name in ordered:
         tensor = _prepare_cka_tensor(layer_features[name])
@@ -346,8 +368,8 @@ def compute_cross_encoder_cka(
     s2_layers: Dict[str, torch.Tensor],
     cuda_cka
 ) -> Tuple[List[str], List[str], Optional[np.ndarray]]:
-    names_s1 = s1_layers #_order_layers(s1_layers)
-    names_s2 = s2_layers #_order_layers(s2_layers)
+    names_s1 = _order_layers(s1_layers)
+    names_s2 = _order_layers(s2_layers)
     prepared_s1 = {name: _prepare_cka_tensor(s1_layers[name]) for name in names_s1}
     prepared_s1 = {k: v for k, v in prepared_s1.items() if v is not None}
     prepared_s2 = {name: _prepare_cka_tensor(s2_layers[name]) for name in names_s2}
@@ -445,13 +467,13 @@ def _register_layer_hooks(
                 )
             # else:
                 layer_names = [
-                    # "conv1",
+                    "conv1",
                     "bn1",
-                    # 'conv2',
+                    'conv2',
                     # 'bn2',
-                    # 'conv3',
+                    'conv3',
                     'bn3',
-                    "fc",
+                    # "fc",
                 ]
 
                 for ln in layer_names:
@@ -468,8 +490,6 @@ def _register_layer_hooks(
                 # if not isinstance(module, nn.Module):
                 #     continue
                 # handles.append(module.register_forward_hook(_make_layer_hook(key, name)))
-
-
 
     def _attach_layers_croma_vit(vit: nn.Module, key: str):
         """
@@ -536,7 +556,324 @@ def _register_layer_hooks(
                 ffn.register_forward_hook(make_ffn_residual_hook(layer_idx))
             )
 
-        
+    def _attach_layers_dofa(encoder: nn.Module, key: str):
+        """
+        Attach 4 hook points for each sublayer (attention + MLP) in each DOFA/timm ViT Block.
+
+        For a Block named "blocks.i":
+
+        Attention sublayer:
+            blocks.i.attn.layernorm : output of norm1(x)
+            blocks.i.attn.scale     : output of ls1(attn_out)
+            blocks.i.attn.op        : output of attn(norm1(x))
+            blocks.i.attn.residual  : x_in + drop_path1(ls1(attn(norm1(x))))
+
+        MLP sublayer:
+            blocks.i.mlp.layernorm  : output of norm2(x)
+            blocks.i.mlp.scale      : output of ls2(mlp_out)
+            blocks.i.mlp.op         : output of mlp(norm2(x))
+            blocks.i.mlp.residual   : x_attn + drop_path2(ls2(mlp(norm2(x))))
+
+        Assumes timm-style Block forward:
+            x = x + drop_path1(ls1(attn(norm1(x))))
+            x = x + drop_path2(ls2(mlp(norm2(x))))
+        """
+        # Per-block buffers keyed by module id
+        block_buf = {}
+
+        for name, module in encoder.named_modules():
+            # timm/DOFA ViT blocks are class "Block"
+            if module.__class__.__name__ == "Block":
+                block_id = id(module)
+                block_name = name  # e.g. "blocks.0"
+
+                block_buf[block_id] = {
+                    "name": block_name,
+                    "x_in": None,    # block input
+                    "dp1_out": None, # output of drop_path1
+                    "dp2_out": None, # output of drop_path2
+                }
+                buf = block_buf[block_id]
+
+                # ---------- Block-level hooks to reconstruct residuals ----------
+
+                def _block_pre_hook(m, inputs, buf=buf):
+                    # Save input to the whole block
+                    x_in = inputs[0]
+                    buf["x_in"] = x_in
+
+                def _block_post_hook(m, inputs, output, buf=buf):
+                    """
+                    At this point, the block forward is done and we have:
+                    x_in      : input to the block
+                    dp1_out   : drop_path1(ls1(attn_out))
+                    dp2_out   : drop_path2(ls2(mlp_out))
+
+                    We reconstruct:
+                    x_attn = x_in + dp1_out
+                    x_mlp  = x_attn + dp2_out
+                    and feed them through _make_layer_hook as "residual" activations.
+                    """
+                    x_in = buf["x_in"]
+                    dp1_out = buf["dp1_out"]
+                    dp2_out = buf["dp2_out"]
+                    block_name = buf["name"]
+
+                    if x_in is None or dp1_out is None or dp2_out is None:
+                        # Incomplete info; don't crash
+                        return
+
+                    # Attention residual (after first sublayer)
+                    x_attn = x_in + dp1_out
+                    # MLP residual (after second sublayer)
+                    x_mlp = x_attn + dp2_out
+
+                    # Manually invoke layer hooks for these two residual points
+                    attn_res_name = f"{block_name}.attn.residual"
+                    mlp_res_name = f"{block_name}.mlp.residual"
+
+                    attn_res_hook = _make_layer_hook(key, attn_res_name)
+                    mlp_res_hook = _make_layer_hook(key, mlp_res_name)
+
+                    # Signature: hook(module, inputs, output)
+                    attn_res_hook(m, (None,), x_attn)
+                    mlp_res_hook(m, (None,), x_mlp)
+
+                    # Reset buffer
+                    buf["x_in"] = None
+                    buf["dp1_out"] = None
+                    buf["dp2_out"] = None
+
+                handles.append(module.register_forward_pre_hook(_block_pre_hook))
+                handles.append(module.register_forward_hook(_block_post_hook))
+
+                # ---------- Attention sublayer hooks ----------
+
+                if hasattr(module, "norm1"):
+                    ln_name = f"{block_name}.attn.layernorm"
+                    handles.append(
+                        module.norm1.register_forward_hook(
+                            _make_layer_hook(key, ln_name)
+                        )
+                    )
+
+                if hasattr(module, "attn"):
+                    op_name = f"{block_name}.attn.op"
+                    handles.append(
+                        module.attn.register_forward_hook(
+                            _make_layer_hook(key, op_name)
+                        )
+                    )
+
+                if hasattr(module, "ls1"):
+                    scale_name = f"{block_name}.attn.scale"
+                    handles.append(
+                        module.ls1.register_forward_hook(
+                            _make_layer_hook(key, scale_name)
+                        )
+                    )
+
+                if hasattr(module, "drop_path1"):
+                    def _dp1_hook(m, inputs, output, buf=buf):
+                        buf["dp1_out"] = output
+                    handles.append(
+                        module.drop_path1.register_forward_hook(_dp1_hook)
+                    )
+
+                # ---------- MLP sublayer hooks ----------
+
+                if hasattr(module, "norm2"):
+                    ln2_name = f"{block_name}.mlp.layernorm"
+                    handles.append(
+                        module.norm2.register_forward_hook(
+                            _make_layer_hook(key, ln2_name)
+                        )
+                    )
+
+                if hasattr(module, "mlp"):
+                    mlp_op_name = f"{block_name}.mlp.op"
+                    handles.append(
+                        module.mlp.register_forward_hook(
+                            _make_layer_hook(key, mlp_op_name)
+                        )
+                    )
+
+                if hasattr(module, "ls2"):
+                    mlp_scale_name = f"{block_name}.mlp.scale"
+                    handles.append(
+                        module.ls2.register_forward_hook(
+                            _make_layer_hook(key, mlp_scale_name)
+                        )
+                    )
+
+                if hasattr(module, "drop_path2"):
+                    def _dp2_hook(m, inputs, output, buf=buf):
+                        buf["dp2_out"] = output
+                    handles.append(
+                        module.drop_path2.register_forward_hook(_dp2_hook)
+                    )
+
+    def _attach_layers_scalemae(encoder: nn.Module, key: str):
+    """
+    Attach 4 hook points for each sublayer (attention + MLP) in each ScaleMAE ViT Block.
+
+    For a Block named "blocks.i":
+
+      Attention sublayer:
+        blocks.i.attn.layernorm : output of norm1(x)
+        blocks.i.attn.scale     : output of ls1(attn_out)
+        blocks.i.attn.op        : output of attn(norm1(x))
+        blocks.i.attn.residual  : x_in + drop_path1(ls1(attn(norm1(x))))
+
+      MLP sublayer:
+        blocks.i.mlp.layernorm  : output of norm2(x_attn)
+        blocks.i.mlp.scale      : output of ls2(mlp_out)
+        blocks.i.mlp.op         : output of mlp(norm2(x_attn))
+        blocks.i.mlp.residual   : x_attn + drop_path2(ls2(mlp(norm2(x_attn))))
+
+    Assumes timm-style Block forward:
+        x = x + drop_path1(ls1(attn(norm1(x))))
+        x = x + drop_path2(ls2(mlp(norm2(x))))
+    """
+    # Per-block buffers keyed by module id
+    block_buf = {}
+
+    for name, module in encoder.named_modules():
+        # ScaleMAE uses timm-like ViT Block modules
+        if module.__class__.__name__ == "Block":
+            block_id = id(module)
+            block_name = name  # e.g. "blocks.0", "blocks.1", ...
+
+            block_buf[block_id] = {
+                "name": block_name,
+                "x_in": None,    # input to the whole block
+                "dp1_out": None, # output of drop_path1(ls1(attn_out))
+                "dp2_out": None, # output of drop_path2(ls2(mlp_out))
+            }
+            buf = block_buf[block_id]
+
+            # ---------- Block-level hooks to reconstruct residuals ----------
+
+            def _block_pre_hook(m, inputs, buf=buf):
+                # Save input to the whole block
+                x_in = inputs[0]
+                buf["x_in"] = x_in
+
+            def _block_post_hook(m, inputs, output, buf=buf):
+                """
+                At this point, the block forward is done and we have:
+                  x_in      : input to the block
+                  dp1_out   : drop_path1(ls1(attn_out))
+                  dp2_out   : drop_path2(ls2(mlp_out))
+
+                We reconstruct:
+                  x_attn = x_in + dp1_out
+                  x_mlp  = x_attn + dp2_out
+                and feed them through _make_layer_hook as "residual" activations.
+                """
+                x_in = buf["x_in"]
+                dp1_out = buf["dp1_out"]
+                dp2_out = buf["dp2_out"]
+                block_name = buf["name"]
+
+                if x_in is None or dp1_out is None or dp2_out is None:
+                    # Incomplete info; don't crash
+                    return
+
+                # Attention residual (after first sublayer)
+                x_attn = x_in + dp1_out
+                # MLP residual (after second sublayer)
+                x_mlp = x_attn + dp2_out
+
+                # Use your existing hook factory to store these
+                attn_res_name = f"{block_name}.attn.residual"
+                mlp_res_name = f"{block_name}.mlp.residual"
+
+                attn_res_hook = _make_layer_hook(key, attn_res_name)
+                mlp_res_hook = _make_layer_hook(key, mlp_res_name)
+
+                # Signature: hook(module, inputs, output)
+                attn_res_hook(m, (None,), x_attn)
+                mlp_res_hook(m, (None,), x_mlp)
+
+                # Reset buffer
+                buf["x_in"] = None
+                buf["dp1_out"] = None
+                buf["dp2_out"] = None
+
+            handles.append(module.register_forward_pre_hook(_block_pre_hook))
+            handles.append(module.register_forward_hook(_block_post_hook))
+
+            # ---------- Attention sublayer hooks ----------
+
+            if hasattr(module, "norm1"):
+                ln_name = f"{block_name}.attn.layernorm"
+                handles.append(
+                    module.norm1.register_forward_hook(
+                        _make_layer_hook(key, ln_name)
+                    )
+                )
+
+            if hasattr(module, "attn"):
+                op_name = f"{block_name}.attn.op"
+                handles.append(
+                    module.attn.register_forward_hook(
+                        _make_layer_hook(key, op_name)
+                    )
+                )
+
+            if hasattr(module, "ls1"):
+                scale_name = f"{block_name}.attn.scale"
+                handles.append(
+                    module.ls1.register_forward_hook(
+                        _make_layer_hook(key, scale_name)
+                    )
+                )
+
+            if hasattr(module, "drop_path1"):
+                def _dp1_hook(m, inputs, output, buf=buf):
+                    buf["dp1_out"] = output
+                handles.append(
+                    module.drop_path1.register_forward_hook(_dp1_hook)
+                )
+
+            # ---------- MLP sublayer hooks ----------
+
+            if hasattr(module, "norm2"):
+                ln2_name = f"{block_name}.mlp.layernorm"
+                handles.append(
+                    module.norm2.register_forward_hook(
+                        _make_layer_hook(key, ln2_name)
+                    )
+                )
+
+            if hasattr(module, "mlp"):
+                mlp_op_name = f"{block_name}.mlp.op"
+                handles.append(
+                    module.mlp.register_forward_hook(
+                        _make_layer_hook(key, mlp_op_name)
+                    )
+                )
+
+            if hasattr(module, "ls2"):
+                mlp_scale_name = f"{block_name}.mlp.scale"
+                handles.append(
+                    module.ls2.register_forward_hook(
+                        _make_layer_hook(key, mlp_scale_name)
+                    )
+                )
+
+            if hasattr(module, "drop_path2"):
+                def _dp2_hook(m, inputs, output, buf=buf):
+                    buf["dp2_out"] = output
+                handles.append(
+                    module.drop_path2.register_forward_hook(_dp2_hook)
+                )
+
+
+
+
+
     real_model = model
     encoder_s1 = getattr(real_model, "encoder_s1", None)
     encoder_s2 = getattr(real_model, "encoder_s2")
@@ -550,31 +887,42 @@ def _register_layer_hooks(
 
     # if the encoders are resnets
     if encoder_s1 is not None:
-        # if type is resnet
-        if 'ResNet' in str(type(encoder_s1)):
+        enc_type1 = str(type(encoder_s1))
+        if 'ResNet' in enc_type:
             print('Attaching ResNet S1 layers')
             _attach_layers_resnet(encoder_s1, "s1")
-        elif 'ViT' in str(type(encoder_s1)):
+        elif 'ViT' in enc_type:
             print('Attaching CromaViT S1 layers')
             _attach_layers_croma_vit(encoder_s1, "s1")
         else:
             raise NotImplementedError(f"Layer hooks not implemented for S1 encoder type: {type(encoder_s1)}")
     if encoder_s2 is not None:
-        if 'ResNet' in str(type(encoder_s2)):
-            print('Attaching ResNet S2 layers')
+        enc_type = str(type(encoder_s2))
+        print(f"S2 encoder type: {enc_type}")
+
+        if "ResNet" in enc_type:
+            print("Attaching ResNet S2 layers")
             _attach_layers_resnet(encoder_s2, "s2")
-        elif 'ViT' in str(type(encoder_s2)):
-            print('Attaching CromaViT S2 layers')
+
+        elif "DOFA" in enc_type:
+            print("Attaching DOFA ViT S2 layers")
+            _attach_layers_dofa(encoder_s2, "s2")
+
+        elif "ScaleMAE" in enc_type:
+            print("Attaching ScaleMAE ViT S2 layers")
+            _attach_layers_scalemae(encoder_s2, "s2")
+
+        elif "ViT" in enc_type:
+            # This is your CROMA ViT (and any other plain ViT you want to treat the same way)
+            print("Attaching CromaViT S2 layers")
             _attach_layers_croma_vit(encoder_s2, "s2")
+
         else:
-            raise NotImplementedError(f"Layer hooks not implemented for S2 encoder type: {type(encoder_s2)}")
-            
+            raise NotImplementedError(
+                f"Layer hooks not implemented for S2 encoder type: {type(encoder_s2)}"
+            )
 
-    # if encoder_s2 is not None:
-    #     _attach_layers(encoder_s2, "s2")
-
-
-    # raise NotImplementedError("Debugging.")
+ 
 
     print("Registered layer hooks for embedding extraction.")
     print("Layers for S1 encoder:", list(layer_caches["s1"].keys()))
@@ -591,7 +939,7 @@ def _encoder_accepts_lorentz(method) -> bool:
     
 def plot_epoch_diagnostics_transformer(
     epoch_diag: EpochDiagnostics, output_dir: Path, label: str
-) -> Path:
+    ) -> Path:
     """
     Plot CKA diagnostics for CROMA-style Transformer encoders.
 
@@ -1181,18 +1529,6 @@ def plot_epoch_diagnostics(epoch_diag: EpochDiagnostics, output_dir: Path, label
         # f'  S2 layers={epoch_diag.s2_layers}'
     )
 
-    # print shape of matrices
-    if epoch_diag.s1_within_cka is not None:
-        print('S1 within CKA shape:', epoch_diag.s1_within_cka.shape)
-    if epoch_diag.s2_within_cka is not None:
-        print('S2 within CKA shape:', epoch_diag.s2_within_cka.shape)
-    if epoch_diag.cross_cka is not None:
-        print('Cross CKA shape:', epoch_diag.cross_cka.shape)   
-    #m print odd s2
-    if epoch_diag.s1_odd_within_cka is not None:
-        print('S1 odd within CKA shape:', epoch_diag.s1_odd_within_cka.shape)
-    if epoch_diag.s1_even_within_cka is not None:
-        print('S1 even within CKA shape:', epoch_diag.s1_even_within_cka.shape)
 
     # === TOP ROW (S1) ===
 
