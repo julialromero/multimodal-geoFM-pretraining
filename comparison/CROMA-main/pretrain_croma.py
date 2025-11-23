@@ -12,126 +12,126 @@ def exists(val):
     return val is not None
 
 
-class CROMA(nn.Module):
-    def __init__(self,
-                 patch_size=8,
-                 encoder_dim=768,
-                 encoder_layers=12,
-                 attention_heads=16,
-                 decoder_dim=512,
-                 decoder_layers=1,
-                 total_channels=14,
-                 num_patches=225,
-                 ):
-        super().__init__()
-        self.encoder_dim = encoder_dim
-        self.encoder_layers = encoder_layers
-        self.decoder_dim = decoder_dim
-        self.decoder_layers = decoder_layers
-        self.attention_heads = attention_heads
-        self.num_patches = num_patches
-        self.patch_size = patch_size
-        self.total_channels = total_channels
-        self.radar_encoder = ViT(num_patches=self.num_patches,
-                                          dim=self.encoder_dim,
-                                          layers=int(self.encoder_layers/2),
-                                          attention_heads=self.attention_heads,
-                                          in_channels=2,
-                                          patch_size=self.patch_size,
-                                          )
-        self.optical_encoder = ViT(num_patches=self.num_patches,
-                                          dim=self.encoder_dim,
-                                          layers=self.encoder_layers,
-                                          attention_heads=self.attention_heads,
-                                          in_channels=12,
-                                          patch_size=self.patch_size,
-                                          )
-        self.cross_encoder = BaseTransformerCrossAttn(dim=self.encoder_dim,
-                                                      layers=int(self.encoder_layers/2),
-                                                      attention_heads=self.attention_heads,
-                                                      )
-        self.GAP_FFN_radar = nn.Sequential(
-            nn.LayerNorm(self.encoder_dim),
-            nn.Linear(self.encoder_dim, int(4*self.encoder_dim)),
-            nn.GELU(),
-            nn.Linear(int(4*self.encoder_dim), self.encoder_dim)
-        )
-        self.GAP_FFN_optical = nn.Sequential(
-            nn.LayerNorm(self.encoder_dim),
-            nn.Linear(self.encoder_dim, int(4*self.encoder_dim)),
-            nn.GELU(),
-            nn.Linear(int(4*self.encoder_dim), self.encoder_dim)
-        )
-        self.decoder = DecoderMAE(num_patches=self.num_patches,
-                                              encoder_dim=self.encoder_dim,
-                                              decoder_dim=self.decoder_dim,
-                                              decoder_layers=self.decoder_layers,
-                                              attention_heads=8,
-                                              total_channels=self.total_channels,
-                                              patch_size=self.patch_size,
-                                              )
-        self.attn_bias = get_alibi(attention_heads=self.attention_heads,
-                                               num_patches=self.num_patches)
-        self.global_contrast_loss = ContrastLossInput(projection_input=self.encoder_dim,
-                                                                  projection_output=self.encoder_dim,
-                                                                  )
+# class CROMA(nn.Module):
+#     def __init__(self,
+#                  patch_size=8,
+#                  encoder_dim=768,
+#                  encoder_layers=12,
+#                  attention_heads=16,
+#                  decoder_dim=512,
+#                  decoder_layers=1,
+#                  total_channels=14,
+#                  num_patches=225,
+#                  ):
+#         super().__init__()
+#         self.encoder_dim = encoder_dim
+#         self.encoder_layers = encoder_layers
+#         self.decoder_dim = decoder_dim
+#         self.decoder_layers = decoder_layers
+#         self.attention_heads = attention_heads
+#         self.num_patches = num_patches
+#         self.patch_size = patch_size
+#         self.total_channels = total_channels
+#         self.radar_encoder = ViT(num_patches=self.num_patches,
+#                                           dim=self.encoder_dim,
+#                                           layers=int(self.encoder_layers/2),
+#                                           attention_heads=self.attention_heads,
+#                                           in_channels=2,
+#                                           patch_size=self.patch_size,
+#                                           )
+#         self.optical_encoder = ViT(num_patches=self.num_patches,
+#                                           dim=self.encoder_dim,
+#                                           layers=self.encoder_layers,
+#                                           attention_heads=self.attention_heads,
+#                                           in_channels=12,
+#                                           patch_size=self.patch_size,
+#                                           )
+#         self.cross_encoder = BaseTransformerCrossAttn(dim=self.encoder_dim,
+#                                                       layers=int(self.encoder_layers/2),
+#                                                       attention_heads=self.attention_heads,
+#                                                       )
+#         self.GAP_FFN_radar = nn.Sequential(
+#             nn.LayerNorm(self.encoder_dim),
+#             nn.Linear(self.encoder_dim, int(4*self.encoder_dim)),
+#             nn.GELU(),
+#             nn.Linear(int(4*self.encoder_dim), self.encoder_dim)
+#         )
+#         self.GAP_FFN_optical = nn.Sequential(
+#             nn.LayerNorm(self.encoder_dim),
+#             nn.Linear(self.encoder_dim, int(4*self.encoder_dim)),
+#             nn.GELU(),
+#             nn.Linear(int(4*self.encoder_dim), self.encoder_dim)
+#         )
+#         self.decoder = DecoderMAE(num_patches=self.num_patches,
+#                                               encoder_dim=self.encoder_dim,
+#                                               decoder_dim=self.decoder_dim,
+#                                               decoder_layers=self.decoder_layers,
+#                                               attention_heads=8,
+#                                               total_channels=self.total_channels,
+#                                               patch_size=self.patch_size,
+#                                               )
+#         self.attn_bias = get_alibi(attention_heads=self.attention_heads,
+#                                                num_patches=self.num_patches)
+#         self.global_contrast_loss = ContrastLossInput(projection_input=self.encoder_dim,
+#                                                                   projection_output=self.encoder_dim,
+#                                                                   )
 
-    def forward(self, imgs, radar_mask_info, optical_mask_info, rank, world_size):
-        # split stacked image into optical and radar
-        radar_imgs = imgs[:, 12:, ...]
-        optical_imgs = imgs[:, :12, ...]
+#     def forward(self, imgs, radar_mask_info, optical_mask_info, rank, world_size):
+#         # split stacked image into optical and radar
+#         radar_imgs = imgs[:, 12:, ...]
+#         optical_imgs = imgs[:, :12, ...]
 
-        # create independent random masks
-        radar_masked_attn_bias = apply_mask_to_alibi(alibi=self.attn_bias.to(radar_imgs.device),
-                                                              ids_keep_queries=radar_mask_info['ids_keep'],
-                                                              ids_keep_keys=radar_mask_info['ids_keep'],
-                                                              batch_size=radar_imgs.shape[0],
-                                                              orig_seq_len=self.num_patches,
-                                                              masked_seq_len=radar_mask_info['len_keep'],
-                                                              attention_heads=self.attention_heads)
-        optical_masked_attn_bias = apply_mask_to_alibi(alibi=self.attn_bias.to(optical_imgs.device),
-                                                              ids_keep_queries=optical_mask_info['ids_keep'],
-                                                              ids_keep_keys=optical_mask_info['ids_keep'],
-                                                              batch_size=radar_imgs.shape[0],
-                                                              orig_seq_len=self.num_patches,
-                                                              masked_seq_len=optical_mask_info['len_keep'],
-                                                              attention_heads=self.attention_heads)
+#         # create independent random masks
+#         radar_masked_attn_bias = apply_mask_to_alibi(alibi=self.attn_bias.to(radar_imgs.device),
+#                                                               ids_keep_queries=radar_mask_info['ids_keep'],
+#                                                               ids_keep_keys=radar_mask_info['ids_keep'],
+#                                                               batch_size=radar_imgs.shape[0],
+#                                                               orig_seq_len=self.num_patches,
+#                                                               masked_seq_len=radar_mask_info['len_keep'],
+#                                                               attention_heads=self.attention_heads)
+#         optical_masked_attn_bias = apply_mask_to_alibi(alibi=self.attn_bias.to(optical_imgs.device),
+#                                                               ids_keep_queries=optical_mask_info['ids_keep'],
+#                                                               ids_keep_keys=optical_mask_info['ids_keep'],
+#                                                               batch_size=radar_imgs.shape[0],
+#                                                               orig_seq_len=self.num_patches,
+#                                                               masked_seq_len=optical_mask_info['len_keep'],
+#                                                               attention_heads=self.attention_heads)
 
-        # encode each sensor independently
-        radar_encodings = self.radar_encoder(imgs=radar_imgs, attn_bias=radar_masked_attn_bias, mask_info=radar_mask_info)
-        optical_encodings = self.optical_encoder(imgs=optical_imgs, attn_bias=optical_masked_attn_bias, mask_info=optical_mask_info)
+#         # encode each sensor independently
+#         radar_encodings = self.radar_encoder(imgs=radar_imgs, attn_bias=radar_masked_attn_bias, mask_info=radar_mask_info)
+#         optical_encodings = self.optical_encoder(imgs=optical_imgs, attn_bias=optical_masked_attn_bias, mask_info=optical_mask_info)
 
-        # create unimodal representations with an FFN
-        radar_GAP = self.GAP_FFN_radar(radar_encodings.mean(dim=1))
-        optical_GAP = self.GAP_FFN_optical(optical_encodings.mean(dim=1))
+#         # create unimodal representations with an FFN
+#         radar_GAP = self.GAP_FFN_radar(radar_encodings.mean(dim=1))
+#         optical_GAP = self.GAP_FFN_optical(optical_encodings.mean(dim=1))
 
-        # perform contrastive loss on unimodal representations
-        contrastive_loss = self.global_contrast_loss(radar_features=radar_GAP,
-                                                     optical_features=optical_GAP,
-                                                     world_size=world_size,
-                                                     rank=rank)
+#         # perform contrastive loss on unimodal representations
+#         contrastive_loss = self.global_contrast_loss(radar_features=radar_GAP,
+#                                                      optical_features=optical_GAP,
+#                                                      world_size=world_size,
+#                                                      rank=rank)
 
-        # create cross attention bias and create joint multimodal encodings
-        cross_attn_bias = apply_mask_to_alibi(alibi=self.attn_bias.to(radar_imgs.device),
-                                                          ids_keep_queries=radar_mask_info['ids_keep'],
-                                                          ids_keep_keys=optical_mask_info['ids_keep'],
-                                                          batch_size=radar_imgs.shape[0],
-                                                          orig_seq_len=self.num_patches,
-                                                          masked_seq_len=optical_mask_info['len_keep'],
-                                                          attention_heads=self.attention_heads)
-        joint_encodings = self.cross_encoder(x=radar_encodings,
-                                             context=optical_encodings,
-                                             alibi=cross_attn_bias)
+#         # create cross attention bias and create joint multimodal encodings
+#         cross_attn_bias = apply_mask_to_alibi(alibi=self.attn_bias.to(radar_imgs.device),
+#                                                           ids_keep_queries=radar_mask_info['ids_keep'],
+#                                                           ids_keep_keys=optical_mask_info['ids_keep'],
+#                                                           batch_size=radar_imgs.shape[0],
+#                                                           orig_seq_len=self.num_patches,
+#                                                           masked_seq_len=optical_mask_info['len_keep'],
+#                                                           attention_heads=self.attention_heads)
+#         joint_encodings = self.cross_encoder(x=radar_encodings,
+#                                              context=optical_encodings,
+#                                              alibi=cross_attn_bias)
 
-        # reconstruct both sensors
-        patchified_imgs = rearrange(imgs, 'b c (h i) (w j) -> b (h w) (c i j)', i=self.patch_size, j=self.patch_size)
-        mae_loss = self.decoder(x=joint_encodings,
-                                mask_info_radar=radar_mask_info,
-                                mask_info_optical=optical_mask_info,
-                                target=patchified_imgs,
-                                )
+#         # reconstruct both sensors
+#         patchified_imgs = rearrange(imgs, 'b c (h i) (w j) -> b (h w) (c i j)', i=self.patch_size, j=self.patch_size)
+#         mae_loss = self.decoder(x=joint_encodings,
+#                                 mask_info_radar=radar_mask_info,
+#                                 mask_info_optical=optical_mask_info,
+#                                 target=patchified_imgs,
+#                                 )
 
-        return contrastive_loss, mae_loss
+#         return contrastive_loss, mae_loss
 
 
 class FFN(nn.Module):

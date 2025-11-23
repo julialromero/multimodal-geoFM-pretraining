@@ -38,6 +38,7 @@ from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 from tqdm import tqdm
 from zarr.storage import ZipStore
+import xarray as xr
 
 from ciip.eval_utils import create_ciip_model
 
@@ -62,18 +63,6 @@ MODALITY_STATS: Dict[str, Tuple[np.ndarray, np.ndarray]] = {
 
 # # ------------------------
 
-def _open_xr_zarr_any(spath: str) -> xr.Dataset:
-    """Open a zarr store (zip or dir), robust to consolidated/non-consolidated."""
-    if spath.endswith(".zarr.zip"):
-        with ZipStore(spath, mode="r") as zs:
-            try:
-                return xr.open_zarr(zs, consolidated=True)
-            except Exception:
-                return xr.open_zarr(zs, consolidated=False)
-    try:
-        return xr.open_zarr(spath, consolidated=True)
-    except Exception:
-        return xr.open_zarr(spath, consolidated=False)
 
 # def _isel_seasons_on_dataset(ds: xr.Dataset, seasons: Sequence[int], randomize: bool, k: int) -> xr.Dataset:
 #     if "time" not in ds.dims:
@@ -496,7 +485,7 @@ class E2SChallengeDataset(Dataset):
         for modality, sample_path in zip(self.modalities, sample_paths):
             season_index = xr.DataArray(seasons, dims='time')
             # data[modality] = xr.open_zarr(sample_path).isel(time=season_index)[self.dataset_name].values
-            data[modality] = _open_xr_zarr_any(sample_path).isel(time=season_index)[self.dataset_name].values
+            data[modality] = xr.open_zarr(sample_path).isel(time=season_index)[self.dataset_name].values
 
             # Add shift to align S2 channels with SSL4EO-S12 v1.1
             if self.shift_s2_channels and (modality in ['s2l1c', 's2l2a'] or modality in ['S2L1C', 'S2L2A']):

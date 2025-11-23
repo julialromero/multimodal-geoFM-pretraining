@@ -247,6 +247,7 @@ class SSL4EODataset(Dataset):
         """Index by file: return all 64 samples for one random season."""
         # Random time index (shared across modalities for this file)
         time_idx = np.random.randint(0, self.num_timestamps)
+        print(f'num timestamps: {self.num_timestamps}, selected time_idx: {time_idx}')
         season_name = self.seasons[time_idx]
 
         ds_s1, ds_s2 = self._open_zarr_pair(file_idx)
@@ -263,7 +264,6 @@ class SSL4EODataset(Dataset):
         assert C_s1 == 2, f"Unexpected S1 channel count: {C_s1}"
         assert C_s2 == 12 or C_s2 == 13, f"Unexpected S2 channel count: {C_s2}"
 
-        # Take ALL samples at this random time_idx: (P, C, H, W)
         s1_np = arr_s1[:, time_idx]  # (P, C1, H, W)
         s2_np = arr_s2[:, time_idx]  # (P, C2, H, W)
 

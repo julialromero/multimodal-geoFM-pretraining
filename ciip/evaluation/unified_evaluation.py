@@ -310,7 +310,7 @@ def _extract_embeddings(
     ids: List[str] = []
 
     
-    for batch in tqdm(dataloader, desc="Extracting embeddings"):
+    for batch in dataloader:
         if isinstance(batch, dict):
             image = batch.get("image") if "image" in batch else batch.get("data")
             batch_labels = batch.get("label")
@@ -323,8 +323,8 @@ def _extract_embeddings(
         image = image.to(device)
         adapter.to(device)
 
-        print(f'Image type: {type(image)}')
-        print(f'Image shape: {image.shape if isinstance(image, torch.Tensor) else "N/A"}')
+        # print(f'Image type: {type(image)}')
+        # print(f'Image shape: {image.shape if isinstance(image, torch.Tensor) else "N/A"}')
 
         if isinstance(image, dict) and not getattr(adapter, "supports_multimodal_dict", False):
             image = image[next(iter(image))]
@@ -514,6 +514,8 @@ def _build_ssl4eo_dataset(config: ModelEvalConfig) -> torch.utils.data.Dataset:
     dataset = SSL4EODataset(
         root=str(config.ssl4eo_root.expanduser()),
         s2_tier=str(config.ssl4eo_s2_tier),
+        seasons=[0,1,2,3],
+        num_timestamps=4,
         # s2_bands=list(config.ssl4eo_s2_bands),
         transforms={'s1': data.get_transform('s1', is_train=False), 's2': data.get_transform(config.ssl4eo_s2_tier, is_train=False)},
         is_train=False,
@@ -524,8 +526,10 @@ def _build_ssl4eo_dataset(config: ModelEvalConfig) -> torch.utils.data.Dataset:
     total = len(dataset)
     subset_size = config.ssl4eo_subset_size
     if subset_size > 0 and subset_size < total:
-        rng = np.random.default_rng(config.ssl4eo_subset_seed)
-        indices = sorted(rng.choice(total, size=subset_size, replace=False).tolist())
+        # rng = np.random.default_rng(config.ssl4eo_subset_seed)
+        # indices = sorted(rng.choice(total, size=subset_size, replace=False).tolist())
+        # random choice no seed
+        indices = sorted(np.random.choice(total, size=subset_size, replace=False).tolist())
         dataset = Subset(dataset, indices)
     return dataset
 
@@ -832,9 +836,12 @@ def _run_embedding_diagnostics(
     sample_ids: Optional[Sequence[str]] = None,
     output_dir: Path,
 ) -> None:
-    print(f"Running embedding diagnostics, saving to {output_dir}")
-    print(type(output_dir))
+    print(f"Running embedding diagnostics")
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    import CKA
+    device = s2_bundle.backbone.device if s2_bundle.backbone is not None else torch.device("cpu")
+    cuda_cka = CKA.CudaCKA(device=device)
 
     def _detach_or_none(tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
         return tensor.detach() if tensor is not None else None
@@ -865,29 +872,86 @@ def _run_embedding_diagnostics(
             return None
         return compute_singular_values(tensor)  # type: ignore[arg-type]
 
+    # Within-encoder CKA containers
     s1_layers: List[str] = []
     s1_within: Optional[np.ndarray] = None
+    s1_odd_layers: List[str] = []
+    s1_odd_within: Optional[np.ndarray] = None
+    s1_even_layers: List[str] = []
+    s1_even_within: Optional[np.ndarray] = None
+
     s2_layers: List[str] = []
     s2_within: Optional[np.ndarray] = None
+    s2_odd_layers: List[str] = []
+    s2_odd_within: Optional[np.ndarray] = None
+    s2_even_layers: List[str] = []
+    s2_even_within: Optional[np.ndarray] = None
+
+    # Cross-encoder CKA containers
     cross_s1_layers: List[str] = []
     cross_s2_layers: List[str] = []
     cross_matrix: Optional[np.ndarray] = None
+
     projected_cka: Optional[float] = None
 
+    # --------------------
+    # S1 within-encoder CKA
+    # --------------------
     if modality_tensors["s1"] and modality_tensors["s1"]["layers"]:
-        s1_layers, s1_within = compute_within_encoder_cka(
-            modality_tensors["s1"]["layers"]  # type: ignore[arg-type]
-        )
+        s1_all_dict = modality_tensors["s1"]["layers"]  # type: ignore[arg-type]
+
+        # # print shape of each layer tensor
+        # for layer_name, layer_tensor in s1_all_dict.items():
+        #     print(f"S1 layer: {layer_name}, shape: {layer_tensor.shape if layer_tensor is not None else 'N/A'}")
+
+        # All layers
+        s1_layers, s1_within = compute_within_encoder_cka(s1_all_dict, cuda_cka) # 32x32
+
+        # print(s1_layers)
+        # print(s1_within.shape if s1_within is not None else "s1_within is None")
+        # quit()
+
+        # Odd (block-interior) = .bn3
+        s1_odd_dict = {k: v for k, v in s1_all_dict.items() if k.endswith(".bn2")}
+        # for k, v in s1_odd_dict.items():
+            # print(f"S1 odd layer: {k}, shape: {v.shape if v is not None else 'N/A'}")
+        if s1_odd_dict:
+            s1_odd_layers, s1_odd_within = compute_within_encoder_cka(s1_odd_dict, cuda_cka)
+        # quit()
+
+        # Even (post-residual) = .block_out
+        s1_even_dict = {k: v for k, v in s1_all_dict.items() if k.endswith(".block_out")}
+        if s1_even_dict:
+            s1_even_layers, s1_even_within = compute_within_encoder_cka(s1_even_dict, cuda_cka)
+
     elif s1_bundle is not None:
         logging.warning("S1 layer activations unavailable; skipping S1 CKA diagnostics")
 
+    # --------------------
+    # S2 within-encoder CKA
+    # --------------------
     if modality_tensors["s2"] and modality_tensors["s2"]["layers"]:
-        s2_layers, s2_within = compute_within_encoder_cka(
-            modality_tensors["s2"]["layers"]  # type: ignore[arg-type]
-        )
+        s2_all_dict = modality_tensors["s2"]["layers"]  # type: ignore[arg-type]
+
+        # All layers
+        s2_layers, s2_within = compute_within_encoder_cka(s2_all_dict, cuda_cka)
+
+        # Odd (block-interior) = .bn3
+        s2_odd_dict = {k: v for k, v in s2_all_dict.items() if k.endswith(".bn2")}
+        if s2_odd_dict:
+            s2_odd_layers, s2_odd_within = compute_within_encoder_cka(s2_odd_dict, cuda_cka)
+
+        # Even (post-residual) = .block_out
+        s2_even_dict = {k: v for k, v in s2_all_dict.items() if k.endswith(".block_out")}
+        if s2_even_dict:
+            s2_even_layers, s2_even_within = compute_within_encoder_cka(s2_even_dict, cuda_cka)
+
     else:
         logging.warning("S2 layer activations unavailable; skipping S2 CKA diagnostics")
 
+    # --------------------
+    # Cross-encoder CKA (unchanged)
+    # --------------------
     if (
         modality_tensors["s1"]
         and modality_tensors["s1"]["layers"]
@@ -897,7 +961,9 @@ def _run_embedding_diagnostics(
         cross_s1_layers, cross_s2_layers, cross_matrix = compute_cross_encoder_cka(
             modality_tensors["s1"]["layers"],  # type: ignore[arg-type]
             modality_tensors["s2"]["layers"],  # type: ignore[arg-type]
+            cuda_cka,
         )
+
 
     s1_posthead_singular = _maybe_singular("s1", "posthead")
     s1_projected_singular = _maybe_singular("s1", "projected")
@@ -906,40 +972,89 @@ def _run_embedding_diagnostics(
     s2_projected_singular = _maybe_singular("s2", "projected")
     s2_backbone_singular = _maybe_singular("s2", "backbone")
 
+        # ----- Projected-space CKA (scalar between S1 and S2 projected features) -----
+    projected_cka: Optional[float] = None
     if (
         modality_tensors["s1"]
         and modality_tensors["s1"].get("projected") is not None
+        and modality_tensors["s2"]
         and modality_tensors["s2"].get("projected") is not None
-    ):  
-        device = 'cuda'
+    ):
+        device = "cpu"
         cuda_cka = CudaCKA(device=device)
-        projected_cka = cuda_cka.linear_CKA(
+        projected_cka_tensor = cuda_cka.linear_CKA(
             modality_tensors["s1"]["projected"].to(device),  # type: ignore[arg-type]
             modality_tensors["s2"]["projected"].to(device),  # type: ignore[arg-type]
-        ).cpu()
+        )
+        # store as plain Python float
+        projected_cka = float(projected_cka_tensor.detach().cpu().item())
 
-    cka_payload: Dict[str, Optional[Dict[str, object]]] = {
-        "s1": None,
-        "s2": None,
+    # ----- Package CKA results (full, odd, even, cross, projected) -----
+    cka_payload: Dict[str, object] = {
+        "s1_full": None,
+        "s1_odd": None,
+        "s1_even": None,
+        "s2_full": None,
+        "s2_odd": None,
+        "s2_even": None,
         "cross": None,
         "projected_similarity": projected_cka,
     }
-    if s1_layers:
-        cka_payload["s1"] = {
+
+    # S1 full
+    if s1_layers and s1_within is not None:
+        cka_payload["s1_full"] = {
             "layers": s1_layers,
-            "matrix": s1_within.tolist() if s1_within is not None else None,
+            "matrix": s1_within.tolist(),
         }
-    if s2_layers:
-        cka_payload["s2"] = {
+
+    # S1 odd (bn3)
+    if "s1_layers_odd" in locals() and s1_layers_odd and s1_within_odd is not None:
+        cka_payload["s1_odd"] = {
+            "layers": s1_layers_odd,
+            "matrix": s1_within_odd.tolist(),
+        }
+
+    # S1 even (block_out)
+    if "s1_layers_even" in locals() and s1_layers_even and s1_within_even is not None:
+        cka_payload["s1_even"] = {
+            "layers": s1_layers_even,
+            "matrix": s1_within_even.tolist(),
+        }
+
+    # S2 full
+    if s2_layers and s2_within is not None:
+        cka_payload["s2_full"] = {
             "layers": s2_layers,
-            "matrix": s2_within.tolist() if s2_within is not None else None,
+            "matrix": s2_within.tolist(),
         }
+
+    # S2 odd (bn3)
+    if "s2_layers_odd" in locals() and s2_layers_odd and s2_within_odd is not None:
+        cka_payload["s2_odd"] = {
+            "layers": s2_layers_odd,
+            "matrix": s2_within_odd.tolist(),
+        }
+
+    # S2 even (block_out)
+    if "s2_layers_even" in locals() and s2_layers_even and s2_within_even is not None:
+        cka_payload["s2_even"] = {
+            "layers": s2_layers_even,
+            "matrix": s2_within_even.tolist(),
+        }
+
+    # Cross-encoder CKA
     if cross_matrix is not None:
         cka_payload["cross"] = {
             "s1_layers": cross_s1_layers,
             "s2_layers": cross_s2_layers,
             "matrix": cross_matrix.tolist(),
         }
+
+    # (optional) write to JSON, if you want it on disk:
+    # with (output_dir / "cka.json").open("w", encoding="utf-8") as handle:
+    #     json.dump(cka_payload, handle, indent=2)
+
 
     spectra: List[Tuple[str, str, np.ndarray]] = []
     if s1_posthead_singular is not None:
@@ -1020,9 +1135,18 @@ def _run_embedding_diagnostics(
         cross_cka=cross_matrix,
         cross_s1_layers=cross_s1_layers,
         cross_s2_layers=cross_s2_layers,
+        ## add
+        s1_odd_layers=s1_odd_layers,
+        s1_odd_within_cka=s1_odd_within,
+        s1_even_layers=s1_even_layers,
+        s1_even_within_cka=s1_even_within,
+        s2_odd_layers=s2_odd_layers,
+        s2_odd_within_cka=s2_odd_within,
+        s2_even_layers=s2_even_layers,
+        s2_even_within_cka=s2_even_within,
     )
 
-    can_plot_full = (
+    can_plot_full =    (
         s1_bundle is not None
         and modality_tensors["s1"] is not None
         # and modality_tensors["s1"].get("posthead") is not None
@@ -1035,7 +1159,7 @@ def _run_embedding_diagnostics(
 
     
     # if resnet architecture, plot even-layer cka and odd-layer cka
-    plot_even_odd = (
+    plot_even_odd = ( 
         config.model_type == "torchgeo_resnet50"
         or config.model_type == "ciip_checkpoint"        
     )
@@ -1049,10 +1173,10 @@ def _run_embedding_diagnostics(
 
         # plot_epoch_diagnostics(epoch_diagnostics, output_dir, label="posthead_raw", plot_even_odd=plot_even_odd)
     elif can_plot_s2_only:
-        if config.model_type == "torchgeo_resnet50":
-            plot_epoch_diagnostics_s2only(epoch_diagnostics, output_dir, label="s2_backbone_raw", plot_even_odd=plot_even_odd)
-        else:
-            logging.info("S1 modality unavailable; skipping S1/S2 joint diagnostics plot")
+        # if config.model_type == "torchgeo_resnet50":
+        plot_epoch_diagnostics_s2only(epoch_diagnostics, output_dir, label="s2_backbone_raw", plot_even_odd=plot_even_odd)
+        # else:
+        #     logging.info("S1 modality unavailable; skipping S1/S2 joint diagnostics plot")
     else:
         logging.info("Skipping epoch diagnostics plots due to missing posthead/projected features")
 
@@ -1134,7 +1258,7 @@ def _run_embedding_diagnostics(
                     output_dir / f"pca_{feature_name}_{suffix}.png",
                     title=f"PCA ({feature_name}, {suffix})",
                 )
-
+    print(f"Embedding diagnostics saved to {output_dir}")
 
 def _run_hyperbolic_visualisations(
     s1_proj_features: torch.Tensor,
@@ -1307,7 +1431,6 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
         
         # check neuco output dir
         import subprocess
-        print(config.model_type)
         if config.model_type == "croma":
             embedding_dim_backbone = "768"
             embedding_dim_posthead = None
@@ -1343,31 +1466,6 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
         env["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
         subprocess.run(cmd, check=True, env=env)
 
-        if embedding_dim_posthead is not None:
-            cmd1 = [
-                "python", "/local/ms-data/NeuCo-Bench/benchmark/main.py",
-                "--annotation_path", "/local/ms-data/SSL4EO-S12-downstream/labels",
-                "--output_dir", neuco_output_dir,
-                "--config", "/local/ms-data/NeuCo-Bench/benchmark/config.yaml",
-                "--method_name", "posthead",
-                "--phase", "testing",
-                "--submission_file", csv_out_posthead,
-                "--embedding_dim", embedding_dim_posthead
-            ]
-            cmd2 = [
-                "python", "/local/ms-data/NeuCo-Bench/benchmark/main.py",
-                "--annotation_path", "/local/ms-data/SSL4EO-S12-downstream/labels",
-                "--output_dir", neuco_output_dir,
-                "--config", "/local/ms-data/NeuCo-Bench/benchmark/config.yaml",
-                "--method_name", "projected",
-                "--phase", "testing",
-                "--submission_file", csv_out_projected,
-                "--embedding_dim", embedding_dim_posthead
-            ]
-
-            subprocess.run(cmd1, check=True, env=env)
-            subprocess.run(cmd2, check=True, env=env)
-  
 
 
 
@@ -1460,16 +1558,22 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
         retrieval_path.write_text(json.dumps(retrieval_metrics, indent=2, sort_keys=True))
         logging.info("SSL4EO projected cross-modal retrieval metrics: %s", retrieval_metrics)
 
-        retrieval_s1 = s1_ssl4eo.posthead
-        retrieval_s2 = s2_ssl4eo.posthead
-        retrieval_metrics = compute_cross_modal_retrieval(retrieval_s1, retrieval_s2, curvature=curvature)
-        retrieval_path = Path(output_dir) / "ssl4eo_retrieval_posthead.json"
-        retrieval_path.write_text(json.dumps(retrieval_metrics, indent=2, sort_keys=True))
-        logging.info("SSL4EO posthead cross-modal retrieval metrics: %s", retrieval_metrics)
+        # retrieval_s1 = s1_ssl4eo.posthead
+        # retrieval_s2 = s2_ssl4eo.posthead
+        # retrieval_metrics = compute_cross_modal_retrieval(retrieval_s1, retrieval_s2, curvature=curvature)
+        # retrieval_path = Path(output_dir) / "ssl4eo_retrieval_posthead.json"
+        # retrieval_path.write_text(json.dumps(retrieval_metrics, indent=2, sort_keys=True))
+        # logging.info("SSL4EO posthead cross-modal retrieval metrics: %s", retrieval_metrics)
 
 
 __all__ = ["ModelEvalConfig", "run_full_evaluation"]
 
+
+# python evaluation/unified_evaluation.py --model-in-channels 12 --ssl4eo-subset-size 3 --ciip-epoch 10 --model-path '2025_11_22-08_31_28-model_resnet50-lr_0.001-b_6-j_6-p_amp_bfloat16';
+# python evaluation/unified_evaluation.py --model-in-channels 12 --ssl4eo-subset-size 30 --ciip-epoch 30 --model-path '2025_11_22-08_31_28-model_resnet50-lr_0.001-b_6-j_6-p_amp_bfloat16';
+# python evaluation/unified_evaluation.py --model-in-channels 12 --ssl4eo-subset-size 30 --ciip-epoch 75;
+# python evaluation/unified_evaluation.py --model-in-channels 12 --ssl4eo-subset-size 30 --ciip-epoch 40;
+# python evaluation/unified_evaluation.py --model-in-channels 12 --disable-eurosat --disable-neuco --ssl4eo-subset-size 30
 
 
 if __name__ == "__main__":
@@ -1507,7 +1611,7 @@ if __name__ == "__main__":
     parser.add_argument("--disable-eurosat", action="store_true", help="Skip EuroSAT linear probe evaluation.")
     parser.add_argument("--disable-neuco", action="store_true", help="Skip NeuCo benchmark evaluation.")
     parser.add_argument("--disable-ssl4eo", action="store_true", help="Skip SSL4EO diagnostics even if a root is provided.")
-
+    parser.add_argument("--ciip-epoch", type=int, default=10, help="Epoch number for CIIP checkpoint to evaluate.")
     args = parser.parse_args()
 
 
@@ -1535,8 +1639,9 @@ if __name__ == "__main__":
 
         
             
-    if args.model_path is None and args.model_type == "ciip_checkpoint":
-        args.model_path = '2025_11_21-11_32_16-model_resnet50-lr_0.001-b_2-j_6-p_amp_bfloat16'
+    if args.model_type == "ciip_checkpoint":
+        if not args.model_path:
+            args.model_path = '2025_11_21-11_32_16-model_resnet50-lr_0.001-b_2-j_6-p_amp_bfloat16'
         # '2025_11_19-18_54_18-model_resnet50-lr_0.001-b_2-j_6-p_amp_bfloat16/'
         # '2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp'
         # '2025_11_17-12_26_37-model_resnet50-lr_0.001-b_2-j_6-p_amp'
@@ -1556,8 +1661,9 @@ if __name__ == "__main__":
         # '2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp'
         checkpoint_root = Path(args.model_root) / args.model_path / "checkpoints"
         # args.output_dir = Path("diagnostics/output")
-
-        args.checkpoint=Path(f"{checkpoint_root}/epoch_10.pt")
+        
+        # args.checkpoint=Path(f"{checkpoint_root}/epoch_10.pt")
+        args.checkpoint=Path(f"{checkpoint_root}/epoch_{args.ciip_epoch}.pt")
 
     else:
         args.checkpoint = None
@@ -1570,7 +1676,7 @@ if __name__ == "__main__":
     elif args.model_type == 'torchgeo_resnet50':
         output_dir = f"/home/juro4948/ciip/diagnostics/unified_eval/{args.model_weights}/"
     elif args.model_type == 'ciip_checkpoint':
-        output_dir = f"/home/juro4948/ciip/diagnostics/unified_eval/{args.model_type}/"
+        output_dir = f"/home/juro4948/ciip/diagnostics/unified_eval/{args.model_type}/epoch_{args.ciip_epoch}/"
         output_dir = output_dir + args.model_path.strip('/') + '/'
     else:
         raise ValueError("Invalid model type")

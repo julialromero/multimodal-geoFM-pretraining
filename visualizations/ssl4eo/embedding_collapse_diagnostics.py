@@ -94,6 +94,15 @@ class EpochDiagnostics:
     cross_cka: Optional[np.ndarray]
     cross_s1_layers: List[str]
     cross_s2_layers: List[str]
+    # add
+    s1_odd_layers: List[str]
+    s1_odd_within_cka: Optional[np.ndarray]
+    s1_even_layers: List[str]
+    s1_even_within_cka: Optional[np.ndarray]
+    s2_odd_layers: List[str]
+    s2_odd_within_cka: Optional[np.ndarray]
+    s2_even_layers: List[str]
+    s2_even_within_cka: Optional[np.ndarray]
 
 
 # ---------------------------------------------------------------------------
@@ -291,34 +300,6 @@ def _prepare_cka_tensor(tensor: torch.Tensor, take: Optional[int] = None) -> Opt
     return tensor.to(dtype=torch.float32)
 
 
-# def compute_linear_cka(
-#     x: torch.Tensor,
-#     y: torch.Tensor,
-#     eps: float = 1e-12,
-# ) -> Optional[float]:
-#     """Compute linear CKA similarity between two activation matrices."""
-
-#     # print shape of x and y
-#     # print("Computing CKA between shapes:", x.shape, y.shape)
-#     # if there are 3 dims:
-
-
-#     count = min(x.shape[0], y.shape[0])
-#     if count < 2:
-#         return None
-#     x = x[:count] - x[:count].mean(dim=0, keepdim=True)
-#     y = y[:count] - y[:count].mean(dim=0, keepdim=True)
-#     cov_xy = x.t().matmul(y)
-#     cov_xx = x.t().matmul(x)
-#     cov_yy = y.t().matmul(y)
-#     numerator = torch.linalg.norm(cov_xy, ord="fro") ** 2
-#     denom = torch.linalg.norm(cov_xx, ord="fro") * torch.linalg.norm(cov_yy, ord="fro")
-#     denom_value = float(denom.item()) if isinstance(denom, torch.Tensor) else float(denom)
-#     if denom_value <= eps:
-#         return None
-#     return float((numerator / (denom + eps)).item())
-
-
 def _layer_sort_key(name: str) -> Tuple[int, int, str]:
     numbers = [int(match) for match in re.findall(r"\d+", name)]
     if not numbers:
@@ -326,20 +307,20 @@ def _layer_sort_key(name: str) -> Tuple[int, int, str]:
     return (numbers[0], numbers[1] if len(numbers) > 1 else 0, name)
 
 
-# def _order_layers(layer_dict: Dict[str, torch.Tensor]) -> List[str]:
-#     return sorted(layer_dict.keys(), key=_layer_sort_key)
+def _order_layers(layer_dict: Dict[str, torch.Tensor]) -> List[str]:
+    return sorted(layer_dict.keys(), key=_layer_sort_key)
 
 
-def compute_within_encoder_cka(layer_features: Dict[str, torch.Tensor]) -> Tuple[List[str], Optional[np.ndarray]]:
-    import CKA
-    cuda_cka = CKA.CudaCKA(device='cpu')
-
-    ordered = layer_features #_order_layers(layer_features)
+def compute_within_encoder_cka(layer_features: Dict[str, torch.Tensor], cuda_cka) -> Tuple[List[str], Optional[np.ndarray]]:
+    print(f'Computing wihtin encoder CKa')
+    ordered = _order_layers(layer_features) # layer_features #
     prepared: Dict[str, torch.Tensor] = {}
     for name in ordered:
         tensor = _prepare_cka_tensor(layer_features[name])
         if tensor is not None:
             prepared[name] = tensor
+        else:
+            raise ValueError(f"CKA preparation returned None for layer {name}")
     names = [name for name in ordered if name in prepared]
     size = len(names)
     if size == 0:
@@ -354,6 +335,8 @@ def compute_within_encoder_cka(layer_features: Dict[str, torch.Tensor]) -> Tuple
             value = cuda_cka.linear_CKA(x, prepared[names[j]])
             if value is None:
                 raise ValueError("CKA computation returned None")
+            if value >1.1:
+                raise ValueError("CKA computation returned value > 1.1: {}".format(value))
             matrix[i, j] = matrix[j, i] = np.clip(value.cpu(), 0.0, 1.0)
     return names, matrix
 
@@ -361,9 +344,8 @@ def compute_within_encoder_cka(layer_features: Dict[str, torch.Tensor]) -> Tuple
 def compute_cross_encoder_cka(
     s1_layers: Dict[str, torch.Tensor],
     s2_layers: Dict[str, torch.Tensor],
+    cuda_cka
 ) -> Tuple[List[str], List[str], Optional[np.ndarray]]:
-    import CKA
-    cuda_cka = CKA.CudaCKA(device='cpu')
     names_s1 = s1_layers #_order_layers(s1_layers)
     names_s2 = s2_layers #_order_layers(s2_layers)
     prepared_s1 = {name: _prepare_cka_tensor(s1_layers[name]) for name in names_s1}
@@ -399,42 +381,6 @@ def _build_ssl4eo_dataset(
         transforms=None,
         target_image_dimension=(image_dimension, image_dimension),
     )
-
-
-# def load_model_from_checkpoint(
-#     config: DictConfig,
-#     checkpoint_path: Path,
-#     *,
-#     device: torch.device,
-#     input_dtype: torch.dtype,
-#     w_path: Optional[Path] = None,  # retained for API compatibility
-#     skip_final_fc: bool = False,
-#     use_orthogonal_mapping: bool = False,
-# ) -> nn.Module:
-#     model = create_model(config, device=device)
-#     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-#     state_dict = checkpoint.get("state_dict", checkpoint)
-#     cleaned = {k.replace("module.", ""): v for k, v in state_dict.items()}
-#     missing, unexpected = model.load_state_dict(cleaned, strict=False)
-#     allowed_missing = {
-#         "encoder_s1.fc.weight",
-#         "encoder_s1.fc.bias",
-#         "encoder_s2.fc.weight",
-#         "encoder_s2.fc.bias",
-#     }
-#     remaining_missing = {key for key in missing if key not in allowed_missing}
-#     if remaining_missing:
-#         _LOGGER.warning("Missing keys when loading %s: %s", checkpoint_path.name, sorted(remaining_missing))
-#     if unexpected:
-#         _LOGGER.warning("Unexpected keys when loading %s: %s", checkpoint_path.name, sorted(unexpected))
-#     model = model.to(device=device, dtype=input_dtype, non_blocking=True)
-#     if skip_final_fc:
-#         for encoder_name in ["encoder_s1", "encoder_s2"]:
-#             encoder = getattr(model, encoder_name, None)
-#             if encoder is not None and hasattr(encoder, "fc"):
-#                 setattr(encoder, "fc", nn.Identity())
-#     model.eval()
-#     return model
 
 
 def _unwrap_subset(dataset: torch.utils.data.Dataset) -> Tuple[torch.utils.data.Dataset, Sequence[int]]:
@@ -477,15 +423,17 @@ def _register_layer_hooks(
             return base(module, inputs, output)
 
         return block_hook
+    
 
     def _attach_layers_resnet(encoder: nn.Module, key: str):
         for name, module in encoder.named_modules():
+            # print('Examining module:', name, module.__class__.__name__)
             # Treat any 'Bottleneck' with a bn3 as a bottleneck block
-            if module.__class__.__name__ == "Bottleneck" and hasattr(module, "bn3"):
-                bn3_name = f"{name}.bn3"
+            if module.__class__.__name__ == "Bottleneck" and hasattr(module, "bn2"):
+                bn2_name = f"{name}.bn2"
                 handles.append(
-                    module.bn3.register_forward_hook(
-                        _make_layer_hook(key, bn3_name)
+                    module.bn2.register_forward_hook(
+                        _make_layer_hook(key, bn2_name)
                     )
                 )
 
@@ -495,6 +443,32 @@ def _register_layer_hooks(
                         _make_block_hook(key, block_out_name)
                     )
                 )
+            # else:
+                layer_names = [
+                    # "conv1",
+                    "bn1",
+                    # 'conv2',
+                    # 'bn2',
+                    # 'conv3',
+                    'bn3',
+                    "fc",
+                ]
+
+                for ln in layer_names:
+                    if module.__class__.__name__ == "Bottleneck" and hasattr(module, ln):
+                        handles.append(
+                            module.register_forward_hook(
+                                _make_layer_hook(key, name + '.' + ln)
+                            )
+                        )
+                        # print('Attached hook to layer:', name + '.' + ln)
+            # for name in layer_names:
+                # module = getattr(encoder, name, None)
+                # print('Checking for layer:', name, 'Found:', module is not None)
+                # if not isinstance(module, nn.Module):
+                #     continue
+                # handles.append(module.register_forward_hook(_make_layer_hook(key, name)))
+
 
 
     def _attach_layers_croma_vit(vit: nn.Module, key: str):
@@ -568,7 +542,7 @@ def _register_layer_hooks(
     encoder_s2 = getattr(real_model, "encoder_s2")
 
 
-    print('ENCODER S1:', encoder_s1)
+    # print('ENCODER S1:', encoder_s1)
     print('ENCODER S2:', encoder_s2)
 
     print('ENCODER S1 TYPE:', type(encoder_s1))
@@ -604,9 +578,9 @@ def _register_layer_hooks(
 
     print("Registered layer hooks for embedding extraction.")
     print("Layers for S1 encoder:", list(layer_caches["s1"].keys()))
-    print("Layers for S2 encoder:", list(layer_caches["s2"].keys()))
+    # print("Layers for S2 encoder:", list(layer_caches["s2"].keys()))
     print("Total hooks registered:", len(handles))
-    print("Hook handles:", handles)
+    # print("Hook handles:", handles)
 
     return layer_caches, handles, controller
 
@@ -615,367 +589,6 @@ def _encoder_accepts_lorentz(method) -> bool:
     inst = getattr(method, "__self__", None)  
     return getattr(inst, "is_lorentz", False)
     
-
-
-def extract_embeddings_for_dataset(
-    model: nn.Module,
-    dataset: torch.utils.data.Dataset,
-    *,
-    input_dtype: torch.dtype,
-    device: torch.device,
-    autocast,
-) -> Tuple[ModalityEmbeddings, ModalityEmbeddings, List[str]]:
-    base_dataset, indices = _unwrap_subset(dataset)
-    layer_cache, handles, capture_controller = _register_layer_hooks(model)
-    s1_vectors: List[torch.Tensor] = []
-    s2_vectors: List[torch.Tensor] = []
-    s1_norm_vectors: List[torch.Tensor] = []
-    s2_norm_vectors: List[torch.Tensor] = []
-    s1_backbone_vectors: List[torch.Tensor] = []
-    s2_backbone_vectors: List[torch.Tensor] = []
-    sample_ids: List[str] = []
-
-    has_posthead = hasattr(model, "compute_posthead") and inspect.ismethod(
-        getattr(model, "compute_posthead")
-    )
-    has_projected = hasattr(model, "compute_projected") and inspect.ismethod(
-        getattr(model, "compute_projected")
-    )
-
-    def _to_tensor(array) -> torch.Tensor:
-        tensor = torch.as_tensor(array)
-        if tensor.ndim == 3:
-            return tensor
-        if tensor.ndim == 4:
-            return tensor.squeeze(0)
-        raise ValueError("Unsupported sample shape for embedding extraction")
-
-    # print len of dataset
-    print("Extracting embeddings for num files (64 images per file)", len(indices))
-    with torch.no_grad():
-        # Keep hooks active across the entire extraction loop so CKA receives
-        # activations from every sample before we clean them up.
-        try:
-            for dataset_idx in indices:
-                sample = base_dataset[dataset_idx]
-                if isinstance(sample, dict):
-                    s1_img = sample.get("s1")
-                    s2_img = sample.get("s2")
-                    uid = sample.get("uid") or sample.get("id") or sample.get("file_name")
-                else:
-                    s1_img, s2_img = sample  # type: ignore[misc]
-                    uid = str(dataset_idx)
-                if s1_img is None or s2_img is None:
-                    continue
-
-                # S1 tensor shape with unsqueeze(0): torch.Size([1, 64, 2, 224, 224])
-                # without unsqueeze(0): S1 shape=torch.Size([64, 2, 224, 224])
-                s1_tensor = _to_tensor(s1_img).to(device=device, dtype=input_dtype)
-                s2_tensor = _to_tensor(s2_img).to(device=device, dtype=input_dtype)
-
-                # print shapes
-                # print(f"Processing sample UID={uid}: S1 shape={s1_tensor.shape}, S2 shape={s2_tensor.shape}")
-
-                ctx = (
-                        torch.cuda.amp.autocast(enabled=False)
-                        if s2_tensor.is_cuda
-                        else contextlib.nullcontext()
-                        )
-
-                s1_raw = None
-                s2_raw = None
-                s1_norm = None
-                s2_norm = None
-                s1_backbone = None
-                s2_backbone = None
-
-                with ctx:
-                    # print(model)
-                    assert has_posthead == has_projected, "Model must have both posthead and projected methods or re-implement."
-
-                    if has_posthead:
-                        # print('Extracting raw embeddings')
-                        if model.encoder_s1 is not None:
-                            s1_raw = model.compute_posthead(s1_tensor, modality='s1')
-                        s2_raw = model.compute_posthead(s2_tensor, modality='s2')
-
-                        assert s2_raw is not None, "S2 raw embedding extraction returned None"
-
-
-                        with capture_controller.suspend():
-                            # now extract backbone embeddings
-                            # print('Extracting backbone embeddings')
-                            if model.encoder_s1 is not None:
-                                s1_backbone = model.compute_backbone(
-                                    s1_tensor.float(), modality='s1'
-                                )
-                            s2_backbone = model.compute_backbone(
-                            s2_tensor.float(), modality='s2')
-
-
-                            # print('Extracting norm embeddings')
-                            if model.encoder_s1 is not None:
-                                s1_norm = model.compute_projected(s1_tensor, modality='s1')
-
-                            s2_norm = model.compute_projected(s2_tensor, modality='s2')
-
-
-                    else:
-                        # print('Extracting backbone embeddings')
-                        if model.encoder_s1 is not None:
-                            s1_backbone = model.compute_backbone(
-                                s1_tensor.float(), modality='s1'
-                            )
-                            assert s1_backbone is not None, "S1 backbone extraction returned None"
-                        s2_backbone = model.compute_backbone(
-                            s2_tensor.float(), modality='s2')
-
-
-
-                if s1_raw is not None:
-                    if s1_raw.squeeze(0).dim() != 2:
-                        raise ValueError("Extracted S1 embeddings must be 2D after squeezing")
-                    s1_vectors.append(s1_raw.squeeze(0).cpu().to(torch.float32))
-                if s1_norm is not None:
-                    if s1_norm.squeeze(0).dim() != 2:
-                        raise ValueError("Extracted normalized S1 embeddings must be 2D after squeezing")
-                    s1_norm_vectors.append(s1_norm.squeeze(0).cpu().to(torch.float32))
-
-                if s2_raw is not None:
-                    if s2_raw.squeeze(0).dim() != 2:
-                        raise ValueError("Extracted S2 embeddings must be 2D after squeezing")
-                    s2_vectors.append(s2_raw.squeeze(0).cpu().to(torch.float32))
-                if s2_norm is not None:
-                    if s2_norm.squeeze(0).dim() != 2:
-                        raise ValueError("Extracted normalized S2 embeddings must be 2D after squeezing")
-                    s2_norm_vectors.append(s2_norm.squeeze(0).cpu().to(torch.float32))
-
-                if model.encoder_s1 is not None and s1_backbone is not None:
-                    s1_backbone_vectors.append(s1_backbone.squeeze(0).cpu().to(torch.float32))
-                if s2_backbone is not None:
-                    s2_backbone_vectors.append(s2_backbone.squeeze(0).cpu().to(torch.float32))
-                sample_ids.append(str(uid))
-        finally:
-            for handle in handles:
-                handle.remove()
-
-    
-
-    def _stack(list_tensors: List[torch.Tensor]) -> Optional[torch.Tensor]:
-        if not list_tensors:
-            return None
-        # if there are 2 dims, stack on first dim
-        if list_tensors[0].dim() == 2:
-            # if the first dim is 64
-            assert list_tensors[0].shape[0] == 64, "Expected first dimension to be 64"
-            return torch.cat(list_tensors, dim=0)
-        return torch.stack(list_tensors, dim=0)
-    
-    s1_layers = {name: torch.cat(tensors, dim=0) for name, tensors in layer_cache["s1"].items() if tensors}
-    s2_layers = {name: torch.cat(tensors, dim=0) for name, tensors in layer_cache["s2"].items() if tensors}
-
-    if model.encoder_s1 is not None:
-        s1_embeddings = ModalityEmbeddings(_stack(s1_vectors), _stack(s1_norm_vectors), s1_layers, backbone=_stack(s1_backbone_vectors))
-    else:
-        s1_embeddings = None
-    s2_embeddings = ModalityEmbeddings(_stack(s2_vectors), _stack(s2_norm_vectors), s2_layers, backbone=_stack(s2_backbone_vectors))
-    return s1_embeddings, s2_embeddings, sample_ids
-
-
-# ---------------------------------------------------------------------------
-# Diagnostics computation and plotting
-# ---------------------------------------------------------------------------
-
-
-def _compute_epoch_diagnostics(
-    label: str,
-    epoch: int,
-    s1: ModalityEmbeddings,
-    s2: ModalityEmbeddings,
-    ids: List[str],
-) -> EpochDiagnostics:
-    s1_sv = compute_singular_values(s1.raw) if s1.raw is not None else np.empty(0, dtype=np.float32)
-    s2_sv = compute_singular_values(s2.raw) if s2.raw is not None else np.empty(0, dtype=np.float32)
-    s1_layers, s1_cka = compute_within_encoder_cka(s1.layer_activations)
-    s2_layers, s2_cka = compute_within_encoder_cka(s2.layer_activations)
-    cross_s1, cross_s2, cross_cka = compute_cross_encoder_cka(s1.layer_activations, s2.layer_activations)
-    return EpochDiagnostics(
-        label=label,
-        epoch=epoch,
-        ids=ids,
-        s1=s1,
-        s2=s2,
-        s1_singular_values=s1_sv,
-        s2_singular_values=s2_sv,
-        s1_layers=s1_layers,
-        s2_layers=s2_layers,
-        s1_within_cka=s1_cka,
-        s2_within_cka=s2_cka,
-        cross_cka=cross_cka,
-        cross_s1_layers=cross_s1,
-        cross_s2_layers=cross_s2,
-    )
-
-
-def _plot_singular_values(ax, values: np.ndarray, *, modality: str, embedding_dim: int, label: Optional[str]) -> None:
-    if values.size == 0:
-        ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
-        ax.set_xticks([])
-        ax.set_yticks([])
-        ax.set_title(f"{modality} singular values")
-        return
-    ax.plot(np.arange(1, values.size + 1), values, marker="o")
-    ax.set_xlim(0, 50)
-    ax.set_xlabel("Component rank")
-    ax.set_ylabel("Singular value")
-    ax.set_title(f"{modality} SVD (dim={embedding_dim}) {label}")
-    ax.grid(True, alpha=0.2)
-
-
-def _plot_cka(ax, matrix: Optional[np.ndarray], x_labels: List[str], y_labels: List[str], *, title: str, xlabel: str, ylabel: str) -> None:
-    if matrix is None or matrix.size == 0 or np.all(np.isnan(matrix)):
-        ax.text(0.5, 0.5, "CKA unavailable", ha="center", va="center", transform=ax.transAxes, color="gray")
-        ax.set_title(title)
-        ax.set_xticks([])
-        ax.set_yticks([])
-        return
-    im = ax.imshow(matrix, vmin=0.0, vmax=1.0, aspect="auto", cmap="magma", origin='lower')
-    ax.set_title(title)
-    # assert contents of
-    assert [a == b for (a, b) in zip(x_labels, y_labels)], f"{x_labels} \n\n {y_labels}"
-    
-    ax.set_xlabel('Layer #')
-    ax.set_ylabel('Layer #')
-
-    n = len(x_labels)
-    label_nums = list(range(n))
-    downsampled = label_nums[::10] if n > 0 else []
-
-    ax.set_xticks(downsampled)
-    ax.set_xticklabels(downsampled, rotation=45, ha="right")
-
-    ax.set_yticks(downsampled)
-    ax.set_yticklabels(downsampled)
-    ax.figure.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="Linear CKA")
-
-
-def plot_epoch_diagnostics_s2only(epoch_diag: EpochDiagnostics, output_dir: Path, label: str, plot_even_odd=True) -> Path:
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    fig, axes = plt.subplots(1, 4, figsize=(16, 4))
-
-    print("Total S2 layers:", len(epoch_diag.s2_layers))
-    # print("Odd idx:", s2_odd_idx)
-    # print("Even idx:", s2_even_idx)
-    # print("Odd CKA submatrix shape:",
-    #     epoch_diag.s2_within_cka[np.ix_(s2_odd_idx, s2_odd_idx)].shape)
-    # print("Even CKA submatrix shape:",
-    #     epoch_diag.s2_within_cka[np.ix_(s2_even_idx, s2_even_idx)].shape)
-    
-
-    # Left: S2 within-encoder CKA
-    _plot_cka(
-        axes[0],
-        epoch_diag.s2_within_cka,
-        epoch_diag.s2_layers,
-        epoch_diag.s2_layers,
-        title="S2 within-encoder",
-        xlabel="Layer",
-        ylabel="Layer",
-    )
-
-    if plot_even_odd:
-        odd_idx, even_idx = _split_odd_even_indices(epoch_diag.s2_layers)
-        # print("S2 odd layers:", len(odd_idx))
-        # print("S2 even layers:", len(even_idx))
-        # print(epoch_diag.s2_layers.shape)
-
-        # check if 
-        print("Full CKA shape:", epoch_diag.s2_within_cka.shape)
-        print("Odd submatrix shape:",
-            epoch_diag.s2_within_cka[np.ix_(odd_idx, odd_idx)].shape)
-        print("Even submatrix shape:",
-            epoch_diag.s2_within_cka[np.ix_(even_idx, even_idx)].shape)
-        
-        # check if the odd and even submatrices are identical
-        if epoch_diag.s2_within_cka is not None:
-            odd_submatrix = epoch_diag.s2_within_cka[np.ix_(odd_idx, odd_idx)]
-            even_submatrix = epoch_diag.s2_within_cka[np.ix_(even_idx, even_idx)]
-            print("Odd submatrix:\n", odd_submatrix)
-            print("Even submatrix:\n", even_submatrix)
-            # asseert they are not identical
-            if np.array_equal(odd_submatrix, even_submatrix):
-                print("Warning: Odd and even submatrices are identical!")
-
-
-        _plot_cka_subset(
-            axes[1],
-            epoch_diag.s2_within_cka,
-            epoch_diag.s2_layers,
-            odd_idx,
-            title="S2 within-encoder (odd layers)",
-        )
-
-        _plot_cka_subset(
-            axes[2],
-            epoch_diag.s2_within_cka,
-            epoch_diag.s2_layers,
-            even_idx,
-            title="S2 within-encoder (even layers)",
-        )
-    else:
-        axes[1].axis("off")
-        axes[2].axis("off")
-
-    for ax in axes[:3]:      # last one is the text box
-        ax.set_aspect('equal', adjustable='box')
-
-
-    # Right: summary text
-    axes[3].axis("off")
-    axes[3].text(0.5, 0.5,
-        f"{label}:\nEpoch {epoch_diag.epoch}\n"
-        f"Samples: {len(epoch_diag.ids)}*64={len(epoch_diag.ids)*64}",
-        ha="center",
-        va="center",
-        transform=axes[3].transAxes,  # ← BUG: Using axes[1] instead of axes[3]
-        fontsize=14,
-    )
-
-    fig.suptitle(f"S2 Embedding diagnostics — {epoch_diag.label}")
-    fig.tight_layout(rect=[0, 0, 1, 0.94])
-
-    output_path = output_dir / "embedding_diagnostics.png"
-    fig.savefig(output_path, dpi=200)
-    plt.close(fig)
-    return output_path
-
-def _split_vit_hook_indices(layer_names: list[str]) -> dict[str, list[int]]:
-    """
-    Group CROMA ViT layer names into 3 hook types:
-      - 'ln'        : *input_norm* of attn or ffn
-      - 'core'      : self-attn or FFN output (before residual add)
-      - 'residual'  : post-residual sublayer output
-
-    Assumes names like:
-      layer0.attn.ln, layer0.ffn.ln
-      layer0.attn.core, layer0.ffn.core
-      layer0.attn.residual, layer0.ffn.residual
-    """
-    groups = {"ln": [], "core": [], "residual": []}
-
-    for i, name in enumerate(layer_names):
-        if name.endswith(".ln") or ".ln." in name:
-            groups["ln"].append(i)
-        elif name.endswith(".core") or ".core." in name:
-            groups["core"].append(i)
-        elif name.endswith(".residual") or ".residual." in name:
-            groups["residual"].append(i)
-
-    return groups
-
-
-
 def plot_epoch_diagnostics_transformer(
     epoch_diag: EpochDiagnostics, output_dir: Path, label: str
 ) -> Path:
@@ -992,8 +605,8 @@ def plot_epoch_diagnostics_transformer(
 
     print(
         f"Plotting Transformer CKA matrices:\n"
-        f"  S1 layers={epoch_diag.s1_layers}\n"
-        f"  S2 layers={epoch_diag.s2_layers}"
+        # f"  S1 layers={epoch_diag.s1_layers}\n"
+        # f"  S2 layers={epoch_diag.s2_layers}"
     )
 
     # === S1 ENCODER ROW ===
@@ -1100,29 +713,378 @@ def plot_epoch_diagnostics_transformer(
     plt.close(fig)
     return output_path
 
-def _split_odd_even_indices(layer_names: list[str]) -> tuple[list[int], list[int]]:
-    """
-    Return indices for 'odd' and 'even' layers in a ResNet-like model.
+def extract_embeddings_for_dataset(
+    model: nn.Module,
+    dataset: torch.utils.data.Dataset,
+    *,
+    input_dtype: torch.dtype,
+    device: torch.device,
+    autocast,
+) -> Tuple[ModalityEmbeddings, ModalityEmbeddings, List[str]]:
+    base_dataset, indices = _unwrap_subset(dataset)
+    layer_cache, handles, capture_controller = _register_layer_hooks(model)
+    s1_vectors: List[torch.Tensor] = []
+    s2_vectors: List[torch.Tensor] = []
+    s1_norm_vectors: List[torch.Tensor] = []
+    s2_norm_vectors: List[torch.Tensor] = []
+    s1_backbone_vectors: List[torch.Tensor] = []
+    s2_backbone_vectors: List[torch.Tensor] = []
+    sample_ids: List[str] = []
 
-    We follow Kornblith et al.:
-      - "odd"  = bn3 outputs inside bottlenecks
-      - "even" = post-residual block outputs (our `.block_out` hooks)
+    has_posthead = hasattr(model, "compute_posthead") and inspect.ismethod(
+        getattr(model, "compute_posthead")
+    )
+    has_projected = hasattr(model, "compute_projected") and inspect.ismethod(
+        getattr(model, "compute_projected")
+    )
+
+    def _to_tensor(array) -> torch.Tensor:
+        tensor = torch.as_tensor(array)
+        if tensor.ndim == 3:
+            return tensor
+        if tensor.ndim == 4:
+            return tensor.squeeze(0)
+        raise ValueError("Unsupported sample shape for embedding extraction")
+
+    # print len of dataset
+    print("Extracting embeddings for num files (64 images per file)", len(indices))
+    with torch.no_grad():
+        # Keep hooks active across the entire extraction loop so CKA receives
+        # activations from every sample before we clean them up.
+        try:
+            for dataset_idx in indices:
+                sample = base_dataset[dataset_idx]
+                if isinstance(sample, dict):
+                    s1_img = sample.get("s1")
+                    s2_img = sample.get("s2")
+                    uid = sample.get("uid") or sample.get("id") or sample.get("file_name")
+                else:
+                    s1_img, s2_img = sample  # type: ignore[misc]
+                    uid = str(dataset_idx)
+
+                if s1_img is None or s2_img is None:
+                    continue
+
+                # print shape of s1 and s2 images
+                # print(f"Sample UID={uid}: S1 image shape={s1_img.shape}, S2 image shape={s2_img.shape}")
+
+                # S1 tensor shape with unsqueeze(0): torch.Size([1, 64, 2, 224, 224])
+                # without unsqueeze(0): S1 shape=torch.Size([64, 2, 224, 224])
+                s1_tensor = _to_tensor(s1_img).to(device=device, dtype=input_dtype)
+                s2_tensor = _to_tensor(s2_img).to(device=device, dtype=input_dtype)
+
+                # print shapes
+                # print(f"Processing sample UID={uid}: S1 shape={s1_tensor.shape}, S2 shape={s2_tensor.shape}")
+
+                ctx = (
+                        torch.cuda.amp.autocast(enabled=False)
+                        if s2_tensor.is_cuda
+                        else contextlib.nullcontext()
+                        )
+
+                s1_raw = None
+                s2_raw = None
+                s1_norm = None
+                s2_norm = None
+                s1_backbone = None
+                s2_backbone = None
+
+                with ctx:
+                    # print(model)
+                    assert has_posthead == has_projected, "Model must have both posthead and projected methods or re-implement."
+
+                    if has_posthead:
+                        # print('Extracting raw embeddings')
+                        if model.encoder_s1 is not None:
+                            s1_raw = model.compute_posthead(s1_tensor, modality='s1')
+                        s2_raw = model.compute_posthead(s2_tensor, modality='s2')
+
+                        assert s2_raw is not None, "S2 raw embedding extraction returned None"
+
+
+                        with capture_controller.suspend():
+                            # now extract backbone embeddings
+                            # print('Extracting backbone embeddings')
+                            if model.encoder_s1 is not None:
+                                s1_backbone = model.compute_backbone(
+                                    s1_tensor.float(), modality='s1'
+                                )
+                            s2_backbone = model.compute_backbone(
+                            s2_tensor.float(), modality='s2')
+
+
+                            # print('Extracting norm embeddings')
+                            if model.encoder_s1 is not None:
+                                s1_norm = model.compute_projected(s1_tensor, modality='s1')
+
+                            s2_norm = model.compute_projected(s2_tensor, modality='s2')
+
+
+                    else:
+                        # print('Extracting backbone embeddings')
+                        if model.encoder_s1 is not None:
+                            s1_backbone = model.compute_backbone(
+                                s1_tensor.float(), modality='s1'
+                            )
+                            assert s1_backbone is not None, "S1 backbone extraction returned None"
+                        s2_backbone = model.compute_backbone(
+                            s2_tensor.float(), modality='s2')
+
+
+
+                if s1_raw is not None:
+                    if s1_raw.squeeze(0).dim() != 2:
+                        raise ValueError("Extracted S1 embeddings must be 2D after squeezing")
+                    s1_vectors.append(s1_raw.squeeze(0).cpu().to(torch.float32))
+                if s1_norm is not None:
+                    if s1_norm.squeeze(0).dim() != 2:
+                        raise ValueError("Extracted normalized S1 embeddings must be 2D after squeezing")
+                    s1_norm_vectors.append(s1_norm.squeeze(0).cpu().to(torch.float32))
+
+                if s2_raw is not None:
+                    if s2_raw.squeeze(0).dim() != 2:
+                        raise ValueError("Extracted S2 embeddings must be 2D after squeezing")
+                    s2_vectors.append(s2_raw.squeeze(0).cpu().to(torch.float32))
+                if s2_norm is not None:
+                    if s2_norm.squeeze(0).dim() != 2:
+                        raise ValueError("Extracted normalized S2 embeddings must be 2D after squeezing")
+                    s2_norm_vectors.append(s2_norm.squeeze(0).cpu().to(torch.float32))
+
+                if model.encoder_s1 is not None and s1_backbone is not None:
+                    s1_backbone_vectors.append(s1_backbone.squeeze(0).cpu().to(torch.float32))
+                if s2_backbone is not None:
+                    s2_backbone_vectors.append(s2_backbone.squeeze(0).cpu().to(torch.float32))
+                sample_ids.append(str(uid))
+        finally:
+            for handle in handles:
+                handle.remove()
+
+    
+
+    def _stack(list_tensors: List[torch.Tensor]) -> Optional[torch.Tensor]:
+        if not list_tensors:
+            return None
+        # if there are 2 dims, stack on first dim
+        if list_tensors[0].dim() == 2:
+            # if the first dim is 64
+            assert list_tensors[0].shape[0] == 64, "Expected first dimension to be 64"
+            return torch.cat(list_tensors, dim=0)
+        return torch.stack(list_tensors, dim=0)
+    
+    print('Gathering layer activations')
+    
+    s1_layers = {name: torch.cat(tensors, dim=0) for name, tensors in layer_cache["s1"].items() if tensors}
+    s2_layers = {name: torch.cat(tensors, dim=0) for name, tensors in layer_cache["s2"].items() if tensors}
+
+    # for name, tensors in layer_cache["s2"].items():
+    #     print(f"S2 Layer captured: {name} with {len(tensors)} tensors")
+
+    if model.encoder_s1 is not None:
+        s1_embeddings = ModalityEmbeddings(_stack(s1_vectors), _stack(s1_norm_vectors), s1_layers, backbone=_stack(s1_backbone_vectors))
+    else:
+        s1_embeddings = None
+    s2_embeddings = ModalityEmbeddings(_stack(s2_vectors), _stack(s2_norm_vectors), s2_layers, backbone=_stack(s2_backbone_vectors))
+    return s1_embeddings, s2_embeddings, sample_ids
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics computation and plotting
+# ---------------------------------------------------------------------------
+
+
+def _compute_epoch_diagnostics(
+    label: str,
+    epoch: int,
+    s1: ModalityEmbeddings,
+    s2: ModalityEmbeddings,
+    ids: List[str],
+) -> EpochDiagnostics:
+    import CKA
+    device = s1.raw.device if s1.raw is not None else s2.raw.device
+    cuda_cka = CKA.CudaCKA(device=device)
+
+    s1_sv = compute_singular_values(s1.raw) if s1.raw is not None else np.empty(0, dtype=np.float32)
+    s2_sv = compute_singular_values(s2.raw) if s2.raw is not None else np.empty(0, dtype=np.float32)
+    s1_layers, s1_cka = compute_within_encoder_cka(s1.layer_activations, cuda_cka)
+    s2_layers, s2_cka = compute_within_encoder_cka(s2.layer_activations, cuda_cka)
+    cross_s1, cross_s2, cross_cka = compute_cross_encoder_cka(s1.layer_activations, s2.layer_activations, cuda_cka)
+
+    odd_dict = {k:v for k,v in s2.layer_activations.items() if k.endswith(".bn3")}
+    odd_names, odd_cka = compute_within_encoder_cka(odd_dict, cuda_cka)
+
+    even_dict = {k:v for k,v in s2.layer_activations.items() if k.endswith(".block_out")}
+    even_names, even_cka = compute_within_encoder_cka(even_dict, cuda_cka)
+
+
+
+    return EpochDiagnostics(
+        label=label,
+        epoch=epoch,
+        ids=ids,
+        s1=s1,
+        s2=s2,
+        s1_singular_values=s1_sv,
+        s2_singular_values=s2_sv,
+        s1_layers=s1_layers,
+        s2_layers=s2_layers,
+        s1_within_cka=s1_cka,
+        s2_within_cka=s2_cka,
+        cross_cka=cross_cka,
+        cross_s1_layers=cross_s1,
+        cross_s2_layers=cross_s2,
+        s2_odd_layers=odd_names,
+        s2_odd_within_cka=odd_cka,
+        s2_even_layers=even_names,
+        s2_even_within_cka=even_cka,
+    )
+
+
+def _plot_singular_values(ax, values: np.ndarray, *, modality: str, embedding_dim: int, label: Optional[str]) -> None:
+    if values.size == 0:
+        ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_title(f"{modality} singular values")
+        return
+    ax.plot(np.arange(1, values.size + 1), values, marker="o")
+    ax.set_xlim(0, 50)
+    ax.set_xlabel("Component rank")
+    ax.set_ylabel("Singular value")
+    ax.set_title(f"{modality} SVD (dim={embedding_dim}) {label}")
+    ax.grid(True, alpha=0.2)
+
+
+def _plot_cka(
+    ax,
+    matrix: Optional[np.ndarray],
+    x_labels: List[str],
+    y_labels: List[str],
+    *,
+    title: str,
+) -> None:
     """
-    odd_idx: list[int] = []
-    even_idx: list[int] = []
+    Plot a CKA matrix with sensible defaults.
+
+    - Handles missing/NaN matrices.
+    - Uses origin='upper' (no vertical flip).
+    - Uses aspect='equal' so cells are square.
+    - Downsamples ticks to at most ~10 per axis.
+    - Only enforces x==y labels when the matrix is square and
+      both label lists have the same length (i.e., within-encoder CKA).
+    """
+    if matrix is None or matrix.size == 0 or np.all(np.isnan(matrix)):
+        ax.text(
+            0.5,
+            0.5,
+            "CKA unavailable",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+            color="gray",
+        )
+        ax.set_title(title)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        return
+
+    # Main image: no vertical flip, square cells
+    im = ax.imshow(
+        matrix,
+        vmin=0.0,
+        vmax=1.0,
+        aspect="equal",
+        cmap="magma",
+        origin="lower",
+    )
+    ax.set_title(title)
+
+    # Only enforce x_labels == y_labels when it's a square within-encoder matrix
+    if (
+        matrix.ndim == 2
+        and matrix.shape[0] == matrix.shape[1]
+        and len(x_labels) == len(y_labels)
+    ):
+        if any(a != b for a, b in zip(x_labels, y_labels)):
+            raise AssertionError(
+                f"Mismatch between x_labels and y_labels:\n"
+                f"x_labels={x_labels}\n\ny_labels={y_labels}"
+            )
+
+    ax.set_xlabel("Layer #")
+    ax.set_ylabel("Layer #")
+
+    # Sensible tick downsampling (works for both within- and cross-encoder)
+    def _downsample_indices(n: int, max_ticks: int = 10) -> List[int]:
+        if n <= 0:
+            return []
+        if n <= max_ticks:
+            return list(range(n))
+        step = int(np.ceil(n / max_ticks))
+        return list(range(0, n, step))
+
+    n_x = len(x_labels)
+    n_y = len(y_labels)
+
+    xticks = _downsample_indices(n_x)
+    yticks = _downsample_indices(n_y)
+
+    ax.set_xticks(xticks)
+    ax.set_xticklabels(xticks, rotation=45, ha="right")
+
+    ax.set_yticks(yticks)
+    ax.set_yticklabels(yticks)
+
+    # Colorbar for this axis
+    ax.figure.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="Linear CKA")
+
+
+
+
+def _split_vit_hook_indices(layer_names: list[str]) -> dict[str, list[int]]:
+    """
+    Group CROMA ViT layer names into 3 hook types:
+      - 'ln'        : *input_norm* of attn or ffn
+      - 'core'      : self-attn or FFN output (before residual add)
+      - 'residual'  : post-residual sublayer output
+
+    Assumes names like:
+      layer0.attn.ln, layer0.ffn.ln
+      layer0.attn.core, layer0.ffn.core
+      layer0.attn.residual, layer0.ffn.residual
+    """
+    groups = {"ln": [], "core": [], "residual": []}
 
     for i, name in enumerate(layer_names):
-        if name.endswith(".bn3"):
-            odd_idx.append(i)
-        elif name.endswith(".block_out"):
-            even_idx.append(i)
+        if name.endswith(".ln") or ".ln." in name:
+            groups["ln"].append(i)
+        elif name.endswith(".core") or ".core." in name:
+            groups["core"].append(i)
+        elif name.endswith(".residual") or ".residual." in name:
+            groups["residual"].append(i)
 
-    if not odd_idx or not even_idx:
-        raise ValueError(
-            f"Could not find both .bn3 and .block_out layers in names:\n{layer_names}"
-        )
+    return groups
 
-    return odd_idx, even_idx
+
+def _plot_cka_subset(ax, full_matrix: np.ndarray, layer_names: list[str],
+                    indices: list[int], title: str) -> None:
+    if full_matrix is None or full_matrix.size == 0 or not indices:
+        ax.text(0.5, 0.5, "CKA unavailable", ha="center", va="center",
+                transform=ax.transAxes, color="gray")
+        ax.set_title(title)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        return
+
+    sub_mat = full_matrix[np.ix_(indices, indices)]
+    # re-use your existing helper
+    sub_names = [layer_names[i] for i in indices]
+
+    print('Submatrix shape:')
+    print(sub_mat.shape)
+    _plot_cka(ax, sub_mat, sub_names, sub_names,
+              title=title)
+
+
 
 
     # for i, name in enumerate(layer_names):
@@ -1141,122 +1103,165 @@ def _split_odd_even_indices(layer_names: list[str]) -> tuple[list[int], list[int
 
     # return odd_idx, even_idx
 
-def _plot_cka_subset(ax, full_matrix: np.ndarray, layer_names: list[str],
-                    indices: list[int], title: str) -> None:
-    if full_matrix is None or full_matrix.size == 0 or not indices:
-        ax.text(0.5, 0.5, "CKA unavailable", ha="center", va="center",
-                transform=ax.transAxes, color="gray")
-        ax.set_title(title)
-        ax.set_xticks([])
-        ax.set_yticks([])
-        return
 
-    sub_mat = full_matrix[np.ix_(indices, indices)]
-    # re-use your existing helper
-    sub_names = [layer_names[i] for i in indices]
-    _plot_cka(ax, sub_mat, sub_names, sub_names,
-              title=title, xlabel="Layer #", ylabel="Layer #")
+def plot_epoch_diagnostics_s2only(epoch_diag: EpochDiagnostics, output_dir: Path, label: str, plot_even_odd=True) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    fig, axes = plt.subplots(1, 4, figsize=(16, 4))
+
+    print("Total S2 layers:", len(epoch_diag.s2_layers))
+
+    # --- [0]: S2 full CKA ---
+    _plot_cka(
+        axes[0],
+        epoch_diag.s2_within_cka,
+        epoch_diag.s2_layers,
+        epoch_diag.s2_layers,
+        title="S2 within-encoder (all layers)",
+    )
+
+    # --- [1] & [2]: odd/even ---
+    # print number of odd/even layers
+    print("Plotting S2 odd/even layer CKA matrices")
+    print("Total S2 odd layers:", len(epoch_diag.s2_odd_layers))
+    print("Total S2 even layers:", len(epoch_diag.s2_even_layers))
+    if plot_even_odd:
+        _plot_cka(
+            axes[1],
+            epoch_diag.s2_odd_within_cka,
+            epoch_diag.s2_odd_layers,
+            epoch_diag.s2_odd_layers,
+            title="S2 within-encoder (odd layers)",
+        )
+
+        _plot_cka(
+            axes[2],
+            epoch_diag.s2_even_within_cka,
+            epoch_diag.s2_even_layers,
+            epoch_diag.s2_even_layers,
+            title="S2 within-encoder (even layers)",
+        )
+    else:
+        axes[1].axis("off")
+        axes[2].axis("off")
+
+    for ax in axes[:3]:
+        ax.set_aspect('equal', adjustable='box')
+
+    # --- [3]: Summary ---
+    axes[3].axis("off")
+    axes[3].text(
+        0.5, 0.5,
+        f"{label}:\nEpoch {epoch_diag.epoch}\n"
+        f"Samples: {len(epoch_diag.ids)}*64={len(epoch_diag.ids)*64}",
+        ha="center",
+        va="center",
+        fontsize=14,
+        transform=axes[3].transAxes,
+    )
+
+    fig.suptitle(f"S2 Embedding diagnostics — {epoch_diag.label}")
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+
+    output_path = output_dir / "embedding_diagnostics.png"
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+    return output_path
+
+
 
 def plot_epoch_diagnostics(epoch_diag: EpochDiagnostics, output_dir: Path, label: str, plot_even_odd) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 2x4 layout: Top row = S1, Bottom row = S2, Cross-encoder in top-right
     fig, axes = plt.subplots(2, 4, figsize=(20, 10))
 
     print(
         f'Plotting CKA matrices:\n'
-        f'  S1 layers={epoch_diag.s1_layers}\n'
-        f'  S2 layers={epoch_diag.s2_layers}'
+        # f'  S1 layers={epoch_diag.s1_layers}\n'
+        # f'  S2 layers={epoch_diag.s2_layers}'
     )
 
-    # === TOP ROW (S1 ENCODER) ===
-    
-    # [0,0]: S1 full
+    # print shape of matrices
+    if epoch_diag.s1_within_cka is not None:
+        print('S1 within CKA shape:', epoch_diag.s1_within_cka.shape)
+    if epoch_diag.s2_within_cka is not None:
+        print('S2 within CKA shape:', epoch_diag.s2_within_cka.shape)
+    if epoch_diag.cross_cka is not None:
+        print('Cross CKA shape:', epoch_diag.cross_cka.shape)   
+    #m print odd s2
+    if epoch_diag.s1_odd_within_cka is not None:
+        print('S1 odd within CKA shape:', epoch_diag.s1_odd_within_cka.shape)
+    if epoch_diag.s1_even_within_cka is not None:
+        print('S1 even within CKA shape:', epoch_diag.s1_even_within_cka.shape)
+
+    # === TOP ROW (S1) ===
+
+    # [0,0] full
     _plot_cka(
         axes[0, 0],
         epoch_diag.s1_within_cka,
         epoch_diag.s1_layers,
         epoch_diag.s1_layers,
-        title="S1 within-encoder (all layers)",
-        xlabel="Layer",
-        ylabel="Layer",
+        title="S1 within-encoder (all layers)"
     )
 
-    # [0,1] & [0,2]: S1 odd/even (if enabled)
-    if plot_even_odd:
-        s1_odd_idx, s1_even_idx = _split_odd_even_indices(epoch_diag.s1_layers)
+    # [0,1] odd
+    _plot_cka(
+        axes[0, 1],
+        epoch_diag.s1_odd_within_cka,
+        epoch_diag.s1_odd_layers,
+        epoch_diag.s1_odd_layers,
+        title="S1 within-encoder (odd layers)",
+    )
 
-        print("Odd:", [epoch_diag.s1_layers[i] for i in s1_odd_idx])
-        print("Even:", [epoch_diag.s1_layers[i] for i in s1_even_idx])
+    # [0,2] even
+    _plot_cka(
+        axes[0, 2],
+        epoch_diag.s1_even_within_cka,
+        epoch_diag.s1_even_layers,
+        epoch_diag.s1_even_layers,
+        title="S1 within-encoder (even layers)",
+    )
 
-
-        _plot_cka_subset(
-            axes[0, 1],
-            epoch_diag.s1_within_cka,
-            epoch_diag.s1_layers,
-            s1_odd_idx,
-            title="S1 within-encoder (odd layers)",
-        )
-
-        _plot_cka_subset(
-            axes[0, 2],
-            epoch_diag.s1_within_cka,
-            epoch_diag.s1_layers,
-            s1_even_idx,
-            title="S1 within-encoder (even layers)",
-        )
-    else:
-        axes[0, 1].axis("off")
-        axes[0, 2].axis("off")
-
-    # [0,3]: Cross-encoder
+    # [0,3] cross
     _plot_cka(
         axes[0, 3],
         epoch_diag.cross_cka,
         epoch_diag.cross_s2_layers,
         epoch_diag.cross_s1_layers,
         title="Cross encoder",
-        xlabel="S2 layer",
-        ylabel="S1 layer",
     )
 
-    # === BOTTOM ROW (S2 ENCODER) ===
-    
-    # [1,0]: S2 full
+    # === BOTTOM ROW (S2) ===
+
+    # [1,0] full
     _plot_cka(
         axes[1, 0],
         epoch_diag.s2_within_cka,
         epoch_diag.s2_layers,
         epoch_diag.s2_layers,
         title="S2 within-encoder (all layers)",
-        xlabel="Layer",
-        ylabel="Layer",
     )
 
-    # [1,1] & [1,2]: S2 odd/even (if enabled)
-    if plot_even_odd:
-        s2_odd_idx, s2_even_idx = _split_odd_even_indices(epoch_diag.s2_layers)
+    # [1,1] odd
+    _plot_cka(
+        axes[1, 1],
+        epoch_diag.s2_odd_within_cka,
+        epoch_diag.s2_odd_layers,
+        epoch_diag.s2_odd_layers,
+        title="S2 within-encoder (odd layers)",
+    )
 
-        _plot_cka_subset(
-            axes[1, 1],
-            epoch_diag.s2_within_cka,
-            epoch_diag.s2_layers,
-            s2_odd_idx,
-            title="S2 within-encoder (odd layers)",
-        )
+    # [1,2] even
+    _plot_cka(
+        axes[1, 2],
+        epoch_diag.s2_even_within_cka,
+        epoch_diag.s2_even_layers,
+        epoch_diag.s2_even_layers,
+        title="S2 within-encoder (even layers)",
+    )
 
-        _plot_cka_subset(
-            axes[1, 2],
-            epoch_diag.s2_within_cka,
-            epoch_diag.s2_layers,
-            s2_even_idx,
-            title="S2 within-encoder (even layers)",
-        )
-    else:
-        axes[1, 1].axis("off")
-        axes[1, 2].axis("off")
-
-    # [1,3]: Summary text
+    # [1,3] summary
     axes[1, 3].axis("off")
     axes[1, 3].text(
         0.5, 0.5,
@@ -1264,9 +1269,8 @@ def plot_epoch_diagnostics(epoch_diag: EpochDiagnostics, output_dir: Path, label
         f"Samples: {len(epoch_diag.ids)}*64={len(epoch_diag.ids)*64}",
         ha="center",
         va="center",
-        transform=axes[1, 3].transAxes,
         fontsize=14,
-        bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgray", alpha=0.8)
+        transform=axes[1, 3].transAxes,
     )
 
     fig.suptitle(
@@ -1279,6 +1283,7 @@ def plot_epoch_diagnostics(epoch_diag: EpochDiagnostics, output_dir: Path, label
     output_path = output_dir / "embedding_diagnostics.png"
     fig.savefig(output_path, dpi=200, bbox_inches='tight')
     plt.close(fig)
+    print("Saved embedding diagnostics plot to:", output_path)
     return output_path
 
 
