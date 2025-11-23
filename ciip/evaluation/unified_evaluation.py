@@ -228,6 +228,7 @@ from visualizations.ssl4eo.embedding_collapse_diagnostics import (  # type: igno
     extract_embeddings_for_dataset,
     plot_epoch_diagnostics,
     plot_epoch_diagnostics_s2only,
+    plot_epoch_diagnostics_scalemae,
     plot_epoch_diagnostics_transformer,
     plot_projection,
     preprocess_projection_data,
@@ -877,6 +878,8 @@ def _run_embedding_diagnostics(
     s1_odd_within: Optional[np.ndarray] = None
     s1_even_layers: List[str] = []
     s1_even_within: Optional[np.ndarray] = None
+    s1_residual_layers: List[str] = []
+    s1_residual_within: Optional[np.ndarray] = None
 
     s2_layers: List[str] = []
     s2_within: Optional[np.ndarray] = None
@@ -884,6 +887,12 @@ def _run_embedding_diagnostics(
     s2_odd_within: Optional[np.ndarray] = None
     s2_even_layers: List[str] = []
     s2_even_within: Optional[np.ndarray] = None
+    s2_residual_layers: List[str] = []
+    s2_residual_within: Optional[np.ndarray] = None
+    s1_group_layers: Dict[str, List[str]] = {}
+    s1_group_within: Dict[str, Optional[np.ndarray]] = {}
+    s2_group_layers: Dict[str, List[str]] = {}
+    s2_group_within: Dict[str, Optional[np.ndarray]] = {}
 
     # Cross-encoder CKA containers
     cross_s1_layers: List[str] = []
@@ -892,35 +901,82 @@ def _run_embedding_diagnostics(
 
     projected_cka: Optional[float] = None
 
+    def _collect_transformer_groups(layer_dict: Dict[str, torch.Tensor]):
+        group_layers: Dict[str, List[str]] = {}
+        group_within: Dict[str, Optional[np.ndarray]] = {}
+
+        names = list(layer_dict.keys())
+        is_scalemae_style = any(
+            pattern in name
+            for name in names
+            for pattern in (".layernorm", ".scale", ".op")
+        )
+
+        if is_scalemae_style:
+            specs = {
+                "layernorm": [k for k in names if ".layernorm" in k],
+                "scale": [k for k in names if ".scale" in k],
+                "op": [k for k in names if ".op" in k],
+                "residual": [k for k in names if ".residual" in k],
+            }
+        else:
+            specs = {
+                "ln": [k for k in names if (k.endswith(".ln") or ".ln." in k)],
+                "core": [k for k in names if (k.endswith(".core") or ".core." in k)],
+                "residual": [k for k in names if ".residual" in k],
+            }
+
+        for group, keys in specs.items():
+            subset = {k: layer_dict[k] for k in keys}
+            if subset:
+                layers, cka_matrix = compute_within_encoder_cka(subset, cuda_cka)
+            else:
+                layers, cka_matrix = [], None
+            group_layers[group] = layers
+            group_within[group] = cka_matrix
+
+        return group_layers, group_within
+
     # --------------------
     # S1 within-encoder CKA
     # --------------------
     if modality_tensors["s1"] and modality_tensors["s1"]["layers"]:
         s1_all_dict = modality_tensors["s1"]["layers"]  # type: ignore[arg-type]
-
-        # # print shape of each layer tensor
-        # for layer_name, layer_tensor in s1_all_dict.items():
-        #     print(f"S1 layer: {layer_name}, shape: {layer_tensor.shape if layer_tensor is not None else 'N/A'}")
-
-        # All layers
         s1_layers, s1_within = compute_within_encoder_cka(s1_all_dict, cuda_cka) # 32x32
 
-        # print(s1_layers)
-        # print(s1_within.shape if s1_within is not None else "s1_within is None")
-        # quit()
+        layer_names = list(s1_all_dict.keys())
+        has_resnet_hooks = any(name.endswith(".bn2") for name in layer_names)
+        has_transformer_hooks = any(
+            pattern in name
+            for name in layer_names
+            for pattern in (".layernorm", ".ln", ".op", ".core", ".scale", ".residual")
+        )
 
-        # Odd (block-interior) = .bn3
-        s1_odd_dict = {k: v for k, v in s1_all_dict.items() if k.endswith(".bn2")}
-        # for k, v in s1_odd_dict.items():
-            # print(f"S1 odd layer: {k}, shape: {v.shape if v is not None else 'N/A'}")
-        if s1_odd_dict:
-            s1_odd_layers, s1_odd_within = compute_within_encoder_cka(s1_odd_dict, cuda_cka)
-        # quit()
+        if has_resnet_hooks:
+            s1_odd_dict = {k: v for k, v in s1_all_dict.items() if k.endswith(".bn2")}
+            if s1_odd_dict:
+                s1_odd_layers, s1_odd_within = compute_within_encoder_cka(s1_odd_dict, cuda_cka)
 
-        # Even (post-residual) = .block_out
-        s1_even_dict = {k: v for k, v in s1_all_dict.items() if k.endswith(".block_out")}
-        if s1_even_dict:
-            s1_even_layers, s1_even_within = compute_within_encoder_cka(s1_even_dict, cuda_cka)
+            s1_even_dict = {k: v for k, v in s1_all_dict.items() if k.endswith(".block_out")}
+            if s1_even_dict:
+                s1_even_layers, s1_even_within = compute_within_encoder_cka(s1_even_dict, cuda_cka)
+
+            s1_group_layers = {
+                "odd": s1_odd_layers,
+                "even": s1_even_layers,
+            }
+            s1_group_within = {
+                "odd": s1_odd_within,
+                "even": s1_even_within,
+            }
+
+        if has_transformer_hooks:
+            s1_group_layers, s1_group_within = _collect_transformer_groups(s1_all_dict)
+
+            # Do not reuse odd/even slots for transformer groups
+            s1_odd_layers, s1_odd_within = [], None
+            s1_even_layers, s1_even_within = [], None
+            s1_residual_layers, s1_residual_within = [], None
 
     elif s1_bundle is not None:
         logging.warning("S1 layer activations unavailable; skipping S1 CKA diagnostics")
@@ -931,18 +987,31 @@ def _run_embedding_diagnostics(
     if modality_tensors["s2"] and modality_tensors["s2"]["layers"]:
         s2_all_dict = modality_tensors["s2"]["layers"]  # type: ignore[arg-type]
 
-        # All layers
         s2_layers, s2_within = compute_within_encoder_cka(s2_all_dict, cuda_cka)
 
-        # Odd (block-interior) = .bn3
-        s2_odd_dict = {k: v for k, v in s2_all_dict.items() if k.endswith(".bn2")}
-        if s2_odd_dict:
-            s2_odd_layers, s2_odd_within = compute_within_encoder_cka(s2_odd_dict, cuda_cka)
+        layer_names = list(s2_all_dict.keys())
+        has_resnet_hooks = any(name.endswith(".bn2") for name in layer_names)
+        has_transformer_hooks = any(
+            pattern in name
+            for name in layer_names
+            for pattern in (".layernorm", ".ln", ".op", ".core", ".scale", ".residual")
+        )
 
-        # Even (post-residual) = .block_out
-        s2_even_dict = {k: v for k, v in s2_all_dict.items() if k.endswith(".block_out")}
-        if s2_even_dict:
-            s2_even_layers, s2_even_within = compute_within_encoder_cka(s2_even_dict, cuda_cka)
+        if has_resnet_hooks:
+            s2_odd_dict = {k: v for k, v in s2_all_dict.items() if k.endswith(".bn2")}
+            if s2_odd_dict:
+                s2_odd_layers, s2_odd_within = compute_within_encoder_cka(s2_odd_dict, cuda_cka)
+
+            s2_even_dict = {k: v for k, v in s2_all_dict.items() if k.endswith(".block_out")}
+            if s2_even_dict:
+                s2_even_layers, s2_even_within = compute_within_encoder_cka(s2_even_dict, cuda_cka)
+
+        if has_transformer_hooks:
+            s2_group_layers, s2_group_within = _collect_transformer_groups(s2_all_dict)
+
+            s2_odd_layers, s2_odd_within = [], None
+            s2_even_layers, s2_even_within = [], None
+            s2_residual_layers, s2_residual_within = [], None
 
     else:
         logging.warning("S2 layer activations unavailable; skipping S2 CKA diagnostics")
@@ -1007,17 +1076,30 @@ def _run_embedding_diagnostics(
         }
 
     # S1 odd (bn3)
-    if "s1_layers_odd" in locals() and s1_layers_odd and s1_within_odd is not None:
+    if s1_odd_layers and s1_odd_within is not None:
         cka_payload["s1_odd"] = {
-            "layers": s1_layers_odd,
-            "matrix": s1_within_odd.tolist(),
+            "layers": s1_odd_layers,
+            "matrix": s1_odd_within.tolist(),
         }
 
     # S1 even (block_out)
-    if "s1_layers_even" in locals() and s1_layers_even and s1_within_even is not None:
+    if s1_even_layers and s1_even_within is not None:
         cka_payload["s1_even"] = {
-            "layers": s1_layers_even,
-            "matrix": s1_within_even.tolist(),
+            "layers": s1_even_layers,
+            "matrix": s1_even_within.tolist(),
+        }
+
+    if s1_group_layers:
+        cka_payload["s1_groups"] = {
+            group: {
+                "layers": layers,
+                "matrix": (
+                    s1_group_within[group].tolist()
+                    if s1_group_within.get(group) is not None
+                    else None
+                ),
+            }
+            for group, layers in s1_group_layers.items()
         }
 
     # S2 full
@@ -1028,17 +1110,30 @@ def _run_embedding_diagnostics(
         }
 
     # S2 odd (bn3)
-    if "s2_layers_odd" in locals() and s2_layers_odd and s2_within_odd is not None:
+    if s2_odd_layers and s2_odd_within is not None:
         cka_payload["s2_odd"] = {
-            "layers": s2_layers_odd,
-            "matrix": s2_within_odd.tolist(),
+            "layers": s2_odd_layers,
+            "matrix": s2_odd_within.tolist(),
         }
 
     # S2 even (block_out)
-    if "s2_layers_even" in locals() and s2_layers_even and s2_within_even is not None:
+    if s2_even_layers and s2_even_within is not None:
         cka_payload["s2_even"] = {
-            "layers": s2_layers_even,
-            "matrix": s2_within_even.tolist(),
+            "layers": s2_even_layers,
+            "matrix": s2_even_within.tolist(),
+        }
+
+    if s2_group_layers:
+        cka_payload["s2_groups"] = {
+            group: {
+                "layers": layers,
+                "matrix": (
+                    s2_group_within[group].tolist()
+                    if s2_group_within.get(group) is not None
+                    else None
+                ),
+            }
+            for group, layers in s2_group_layers.items()
         }
 
     # Cross-encoder CKA
@@ -1138,10 +1233,18 @@ def _run_embedding_diagnostics(
         s1_odd_within_cka=s1_odd_within,
         s1_even_layers=s1_even_layers,
         s1_even_within_cka=s1_even_within,
+        s1_residual_layers=s1_residual_layers,
+        s1_residual_within_cka=s1_residual_within,
         s2_odd_layers=s2_odd_layers,
         s2_odd_within_cka=s2_odd_within,
         s2_even_layers=s2_even_layers,
         s2_even_within_cka=s2_even_within,
+        s2_residual_layers=s2_residual_layers,
+        s2_residual_within_cka=s2_residual_within,
+        s1_group_layers=s1_group_layers,
+        s1_group_within_cka=s1_group_within,
+        s2_group_layers=s2_group_layers,
+        s2_group_within_cka=s2_group_within,
     )
 
     can_plot_full = (
@@ -1159,6 +1262,7 @@ def _run_embedding_diagnostics(
     is_transformer = config.model_type in ("croma", "croma_vit", "croma_s1s2") or any(
         token in normalized_weights for token in ("dofa", "scalemae", "vitsmall", "vit")
     )
+    is_scalemae = any(token in normalized_weights for token in ("scalemae", "dofa"))
     is_resnet_based = (
         config.model_type == "torchgeo_resnet50"
         or normalized_weights.startswith("resnet")
@@ -1172,9 +1276,14 @@ def _run_embedding_diagnostics(
     plot_even_odd = is_resnet_based or config.model_type == "ciip_checkpoint"
 
     if is_transformer:
-        plot_epoch_diagnostics_transformer(
-            epoch_diagnostics, output_dir, label="transformer_hooks"
-        )
+        if is_scalemae:
+            plot_epoch_diagnostics_scalemae(
+                epoch_diagnostics, output_dir, label="transformer_hooks"
+            )
+        else:
+            plot_epoch_diagnostics_transformer(
+                epoch_diagnostics, output_dir, label="transformer_hooks"
+            )
     elif is_ciip_or_moco:
         if can_plot_full:
             plot_epoch_diagnostics(

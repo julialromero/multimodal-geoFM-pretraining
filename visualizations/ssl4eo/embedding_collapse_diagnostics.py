@@ -99,10 +99,18 @@ class EpochDiagnostics:
     s1_odd_within_cka: Optional[np.ndarray]
     s1_even_layers: List[str]
     s1_even_within_cka: Optional[np.ndarray]
+    s1_residual_layers: List[str]
+    s1_residual_within_cka: Optional[np.ndarray]
     s2_odd_layers: List[str]
     s2_odd_within_cka: Optional[np.ndarray]
     s2_even_layers: List[str]
     s2_even_within_cka: Optional[np.ndarray]
+    s2_residual_layers: List[str]
+    s2_residual_within_cka: Optional[np.ndarray]
+    s1_group_layers: Dict[str, List[str]]
+    s1_group_within_cka: Dict[str, Optional[np.ndarray]]
+    s2_group_layers: Dict[str, List[str]]
+    s2_group_within_cka: Dict[str, Optional[np.ndarray]]
 
 
 # ---------------------------------------------------------------------------
@@ -888,10 +896,10 @@ def _register_layer_hooks(
     # if the encoders are resnets
     if encoder_s1 is not None:
         enc_type1 = str(type(encoder_s1))
-        if 'ResNet' in enc_type:
+        if 'ResNet' in enc_type1:
             print('Attaching ResNet S1 layers')
             _attach_layers_resnet(encoder_s1, "s1")
-        elif 'ViT' in enc_type:
+        elif 'ViT' in enc_type1:
             print('Attaching CromaViT S1 layers')
             _attach_layers_croma_vit(encoder_s1, "s1")
         else:
@@ -943,13 +951,12 @@ def plot_epoch_diagnostics_transformer(
     """
     Plot CKA diagnostics for CROMA-style Transformer encoders.
 
-    Layout (2x4):
-      Row 0 (S1): [all] [LN hooks] [core hooks] [residual hooks]
-      Row 1 (S2): [all] [LN hooks] [core hooks] [residual hooks]
+    Layout (1x4):
+      Row 0 (S2): [all] [LN hooks] [core hooks] [residual hooks]
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    fig, axes = plt.subplots(2, 4, figsize=(20, 10))
+    fig, axes = plt.subplots(1, 4, figsize=(20, 5))
 
     print(
         f"Plotting Transformer CKA matrices:\n"
@@ -957,57 +964,9 @@ def plot_epoch_diagnostics_transformer(
         # f"  S2 layers={epoch_diag.s2_layers}"
     )
 
-    # === S1 ENCODER ROW ===
-
-    # [0,0]: S1 full (all hooks)
+    # [0]: S2 full (all hooks)
     _plot_cka(
-        axes[0, 0],
-        epoch_diag.s1_within_cka,
-        epoch_diag.s1_layers,
-        epoch_diag.s1_layers,
-        title="S1 within-encoder (all hooks)",
-        xlabel="Layer",
-        ylabel="Layer",
-    )
-
-    if epoch_diag.s1_within_cka is not None and epoch_diag.s1_layers:
-        s1_groups = _split_vit_hook_indices(epoch_diag.s1_layers)
-
-        # [0,1]: LN hooks
-        _plot_cka_subset(
-            axes[0, 1],
-            epoch_diag.s1_within_cka,
-            epoch_diag.s1_layers,
-            s1_groups["ln"],
-            title="S1 within-encoder (LN hooks)",
-        )
-
-        # [0,2]: core hooks (attn/FFN)
-        _plot_cka_subset(
-            axes[0, 2],
-            epoch_diag.s1_within_cka,
-            epoch_diag.s1_layers,
-            s1_groups["core"],
-            title="S1 within-encoder (core hooks)",
-        )
-
-        # [0,3]: residual hooks
-        _plot_cka_subset(
-            axes[0, 3],
-            epoch_diag.s1_within_cka,
-            epoch_diag.s1_layers,
-            s1_groups["residual"],
-            title="S1 within-encoder (residual hooks)",
-        )
-    else:
-        for j in range(1, 4):
-            axes[0, j].axis("off")
-
-    # === S2 ENCODER ROW ===
-
-    # [1,0]: S2 full (all hooks)
-    _plot_cka(
-        axes[1, 0],
+        axes[0],
         epoch_diag.s2_within_cka,
         epoch_diag.s2_layers,
         epoch_diag.s2_layers,
@@ -1017,37 +976,47 @@ def plot_epoch_diagnostics_transformer(
     )
 
     if epoch_diag.s2_within_cka is not None and epoch_diag.s2_layers:
-        s2_groups = _split_vit_hook_indices(epoch_diag.s2_layers)
+        s2_groups = _split_transformer_hook_indices(epoch_diag.s2_layers)
 
-        # [1,1]: LN hooks
-        _plot_cka_subset(
-            axes[1, 1],
-            epoch_diag.s2_within_cka,
-            epoch_diag.s2_layers,
-            s2_groups["ln"],
-            title="S2 within-encoder (LN hooks)",
-        )
+        def _plot_subset(ax, indices: list[int], title: str) -> None:
+            if not indices:
+                ax.text(
+                    0.5,
+                    0.5,
+                    "CKA unavailable",
+                    ha="center",
+                    va="center",
+                    transform=ax.transAxes,
+                    color="gray",
+                )
+                ax.set_title(title)
+                ax.set_xticks([])
+                ax.set_yticks([])
+                return
 
-        # [1,2]: core hooks
-        _plot_cka_subset(
-            axes[1, 2],
-            epoch_diag.s2_within_cka,
-            epoch_diag.s2_layers,
-            s2_groups["core"],
-            title="S2 within-encoder (core hooks)",
-        )
+            sub_mat = epoch_diag.s2_within_cka[np.ix_(indices, indices)]
+            sub_names = [epoch_diag.s2_layers[i] for i in indices]
+            _plot_cka(
+                ax,
+                sub_mat,
+                sub_names,
+                sub_names,
+                title=title,
+            )
 
-        # [1,3]: residual hooks
-        _plot_cka_subset(
-            axes[1, 3],
-            epoch_diag.s2_within_cka,
-            epoch_diag.s2_layers,
-            s2_groups["residual"],
-            title="S2 within-encoder (residual hooks)",
+        # [1]: LN hooks
+        _plot_subset(axes[1], s2_groups["ln"], "S2 within-encoder (LN hooks)")
+
+        # [2]: core hooks
+        _plot_subset(axes[2], s2_groups["core"], "S2 within-encoder (core hooks)")
+
+        # [3]: residual hooks
+        _plot_subset(
+            axes[3], s2_groups["residual"], "S2 within-encoder (residual hooks)"
         )
     else:
         for j in range(1, 4):
-            axes[1, j].axis("off")
+            axes[j].axis("off")
 
     fig.suptitle(
         f"Transformer embedding diagnostics — {epoch_diag.label}\n"
@@ -1057,6 +1026,87 @@ def plot_epoch_diagnostics_transformer(
     fig.tight_layout(rect=[0, 0, 1, 0.94])
 
     output_path = output_dir / "embedding_diagnostics_transformer.png"
+    fig.savefig(output_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return output_path
+
+
+def plot_epoch_diagnostics_scalemae(
+    epoch_diag: EpochDiagnostics, output_dir: Path, label: str
+) -> Path:
+    """Plot CKA diagnostics for ScaleMAE/DOFA-style transformer encoders."""
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    fig, axes = plt.subplots(1, 5, figsize=(24, 5))
+
+    print(
+        f"Plotting ScaleMAE/DOFA Transformer CKA matrices:\n",
+    )
+
+    _plot_cka(
+        axes[0],
+        epoch_diag.s2_within_cka,
+        epoch_diag.s2_layers,
+        epoch_diag.s2_layers,
+        title="S2 within-encoder (all hooks)",
+        xlabel="Layer",
+        ylabel="Layer",
+    )
+
+    if epoch_diag.s2_within_cka is not None and epoch_diag.s2_layers:
+        s2_groups = _split_scalemae_hook_indices(epoch_diag.s2_layers)
+
+        def _plot_subset(ax, indices: list[int], title: str) -> None:
+            if not indices:
+                ax.text(
+                    0.5,
+                    0.5,
+                    "CKA unavailable",
+                    ha="center",
+                    va="center",
+                    transform=ax.transAxes,
+                    color="gray",
+                )
+                ax.set_title(title)
+                ax.set_xticks([])
+                ax.set_yticks([])
+                return
+
+            sub_mat = epoch_diag.s2_within_cka[np.ix_(indices, indices)]
+            sub_names = [epoch_diag.s2_layers[i] for i in indices]
+            _plot_cka(
+                ax,
+                sub_mat,
+                sub_names,
+                sub_names,
+                title=title,
+            )
+
+        _plot_subset(
+            axes[1], s2_groups["layernorm"], "S2 within-encoder (layernorm)"
+        )
+        _plot_subset(
+            axes[2], s2_groups["scale"], "S2 within-encoder (scale)"
+        )
+        _plot_subset(
+            axes[3], s2_groups["op"], "S2 within-encoder (op)"
+        )
+        _plot_subset(
+            axes[4], s2_groups["residual"], "S2 within-encoder (residual)"
+        )
+    else:
+        for ax in axes[1:]:
+            ax.axis("off")
+
+    fig.suptitle(
+        f"ScaleMAE embedding diagnostics — {epoch_diag.label}\n"
+        f"Epoch {epoch_diag.epoch} | Samples: {len(epoch_diag.ids)}*64={len(epoch_diag.ids)*64}",
+        fontsize=16,
+    )
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+
+    output_path = output_dir / "embedding_diagnostics_scalemae.png"
     fig.savefig(output_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
     return output_path
@@ -1257,11 +1307,14 @@ def _compute_epoch_diagnostics(
     s2_layers, s2_cka = compute_within_encoder_cka(s2.layer_activations, cuda_cka)
     cross_s1, cross_s2, cross_cka = compute_cross_encoder_cka(s1.layer_activations, s2.layer_activations, cuda_cka)
 
-    odd_dict = {k:v for k,v in s2.layer_activations.items() if k.endswith(".bn3")}
+    odd_dict = {k: v for k, v in s2.layer_activations.items() if k.endswith(".bn2")}
     odd_names, odd_cka = compute_within_encoder_cka(odd_dict, cuda_cka)
 
-    even_dict = {k:v for k,v in s2.layer_activations.items() if k.endswith(".block_out")}
+    even_dict = {k: v for k, v in s2.layer_activations.items() if k.endswith(".block_out")}
     even_names, even_cka = compute_within_encoder_cka(even_dict, cuda_cka)
+
+    residual_dict = {k: v for k, v in s2.layer_activations.items() if k.endswith(".residual")}
+    residual_names, residual_cka = compute_within_encoder_cka(residual_dict, cuda_cka)
 
 
 
@@ -1280,10 +1333,18 @@ def _compute_epoch_diagnostics(
         cross_cka=cross_cka,
         cross_s1_layers=cross_s1,
         cross_s2_layers=cross_s2,
+        s1_residual_layers=[],
+        s1_residual_within_cka=None,
         s2_odd_layers=odd_names,
         s2_odd_within_cka=odd_cka,
         s2_even_layers=even_names,
         s2_even_within_cka=even_cka,
+        s2_residual_layers=residual_names,
+        s2_residual_within_cka=residual_cka,
+        s1_group_layers={},
+        s1_group_within_cka={},
+        s2_group_layers={},
+        s2_group_within_cka={},
     )
 
 
@@ -1388,7 +1449,7 @@ def _plot_cka(
 
 
 
-def _split_vit_hook_indices(layer_names: list[str]) -> dict[str, list[int]]:
+def _split_croma_vit_hook_indices(layer_names: list[str]) -> dict[str, list[int]]:
     """
     Group CROMA ViT layer names into 3 hook types:
       - 'ln'        : *input_norm* of attn or ffn
@@ -1411,6 +1472,47 @@ def _split_vit_hook_indices(layer_names: list[str]) -> dict[str, list[int]]:
             groups["residual"].append(i)
 
     return groups
+
+
+def _split_scalemae_hook_indices(layer_names: list[str]) -> dict[str, list[int]]:
+    """
+    Group ScaleMAE/DOFA hook names emitted by ``_attach_layers_scalemae`` and
+    ``_attach_layers_dofa`` into layernorm/scale/op/residual categories.
+
+    Uses naming patterns like:
+      blocks.0.attn.layernorm, blocks.0.attn.scale, blocks.0.attn.op, blocks.0.attn.residual
+      blocks.0.mlp.layernorm,  blocks.0.mlp.scale,  blocks.0.mlp.op,  blocks.0.mlp.residual
+    """
+    groups = {"layernorm": [], "scale": [], "op": [], "residual": []}
+
+    for i, name in enumerate(layer_names):
+        if ".layernorm" in name:
+            groups["layernorm"].append(i)
+        elif name.endswith(".residual"):
+            groups["residual"].append(i)
+        elif ".scale" in name:
+            groups["scale"].append(i)
+        elif ".op" in name:
+            groups["op"].append(i)
+
+    return groups
+
+
+def _split_transformer_hook_indices(layer_names: list[str]) -> dict[str, list[int]]:
+    """
+    Dispatch to a hook grouping strategy based on layer name patterns.
+    """
+    if any(
+        pattern in name
+        for name in layer_names
+        for pattern in (".layernorm", ".scale", ".op")
+    ):
+        return _split_scalemae_hook_indices(layer_names)
+
+    if any(".ln" in name for name in layer_names):
+        return _split_croma_vit_hook_indices(layer_names)
+
+    return {"ln": [], "core": [], "residual": []}
 
 
 def _plot_cka_subset(ax, full_matrix: np.ndarray, layer_names: list[str],
