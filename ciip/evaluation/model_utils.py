@@ -12,12 +12,48 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from torchgeo.models import ResNet50_Weights, resnet50
+from torchgeo.models import (
+    DOFABase16_Weights,
+    ResNet18_Weights,
+    ResNet50_Weights,
+    ResNet152_Weights,
+    ScaleMAELarge16_Weights,
+    ViTSmall16_Weights,
+    dofa_base_patch16_224,
+    resnet18,
+    resnet50,
+    resnet152,
+    scalemae_large_patch16,
+    vit_small_patch16_224,
+)
 
 from ciip.model_ciip import CIIP, LorentzCIIP
 
 
 _CROMA_MODULE: Optional[ModuleType] = None
+
+
+class RandomConvFeatures(nn.Module):
+    """Random Convolutional Filters baseline (13-channel, 512-dim GAP)."""
+
+    def __init__(self, in_chans: int = 13, out_dim: int = 512):
+        super().__init__()
+
+        torch.manual_seed(42)
+
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_chans, 256, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(256, out_dim, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(inplace=True),
+        )
+        for parameter in self.parameters():
+            parameter.requires_grad = False
+        self.out_dim = out_dim
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        features = self.conv(x)
+        return features.mean(dim=(2, 3))
 
 
 def _load_croma_module() -> ModuleType:
@@ -344,6 +380,69 @@ class TorchGeoResNetAdapter(EvaluationAdapter):
         if normalize or project_hyperbolic:
             features = F.normalize(features, dim=1)
         return features
+
+
+def _extract_backbone_outputs(backbone: nn.Module, images: torch.Tensor) -> torch.Tensor:
+    """Forward images through a backbone and pool features for evaluation."""
+
+    if hasattr(backbone, "forward_features"):
+        features = backbone.forward_features(images)
+    else:
+        features = backbone(images)
+
+    if isinstance(features, dict):
+        for key in ("x", "tokens", "sequence", "feat", "last_hidden_state"):
+            candidate = features.get(key)
+            if isinstance(candidate, torch.Tensor):
+                features = candidate
+                break
+        else:
+            raise RuntimeError(
+                "Backbone returned a dict without recognizable feature tensors; "
+                f"keys={list(features.keys())}"
+            )
+
+    if isinstance(features, (tuple, list)):
+        features = features[0]
+
+    if not isinstance(features, torch.Tensor):
+        raise TypeError(
+            "Backbone outputs must be tensors for unified evaluation; "
+            f"received {type(features)}"
+        )
+
+    if features.ndim == 3:
+        features = features.mean(dim=1)
+    elif features.ndim == 4:
+        features = features.mean(dim=(2, 3))
+    elif features.ndim > 2:
+        features = features.flatten(start_dim=1)
+    return features
+
+
+class BackboneOnlyAdapter(EvaluationAdapter):
+    """Adapter for backbones that only expose Sentinel-2 features."""
+
+    supports_ssl4eo = True
+
+    def __init__(self, model: nn.Module, *, dtype: torch.dtype = torch.float32) -> None:
+        super().__init__()
+        self.base_model = model
+        self.encoder_s2 = model
+        self.encoder_s1 = None
+        self.dtype_s2 = dtype
+        self.dtype_s1 = dtype
+
+    def compute_backbone(self, images: torch.Tensor, modality: str = "s2") -> torch.Tensor:
+        if modality.lower() != "s2":
+            raise ValueError("This adapter only supports Sentinel-2 imagery.")
+        return _extract_backbone_outputs(self.encoder_s2, images)
+
+    def compute_embeddings(
+        self, images: Any, modality: str = "s2"
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+        backbone = self.compute_backbone(images, modality=modality)
+        return backbone, None, None
 
 
 class CromaEvaluationAdapter(EvaluationAdapter):
@@ -709,6 +808,38 @@ def _resolve_resnet_weights(name: Optional[str]) -> Optional[ResNet50_Weights]:
     raise ValueError(f"Unsupported ResNet50 weights '{name}'. Expected 'dino' or 'moco'.")
 
 
+def _build_backbone_adapter(model_weights: Optional[str]) -> BackboneOnlyAdapter:
+    if model_weights is None:
+        raise ValueError("model_weights must be provided for backbone-only models")
+
+    normalized = model_weights.lower()
+    if normalized == "rcf_13ch":
+        model = RandomConvFeatures(in_chans=13, out_dim=512)
+    elif normalized == "dofa_base_s2_13ch":
+        model = dofa_base_patch16_224(weights=DOFABase16_Weights.DOFA_MAE)
+    elif normalized == "scalemae_large_rgb":
+        model = scalemae_large_patch16(weights=ScaleMAELarge16_Weights.FMOW_RGB)
+    elif normalized == "resnet18_s2_all_moco":
+        model = resnet18(weights=ResNet18_Weights.SENTINEL2_ALL_MOCO)
+        model.fc = nn.Identity()
+    elif normalized == "resnet18_s2_rgb_moco":
+        model = resnet18(weights=ResNet18_Weights.SENTINEL2_RGB_MOCO)
+        model.fc = nn.Identity()
+    elif normalized == "resnet50_s2_rgb_moco":
+        model = resnet50(weights=ResNet50_Weights.SENTINEL2_RGB_MOCO)
+        model.fc = nn.Identity()
+    elif normalized == "resnet152_imagenet_rgb":
+        model = resnet152(weights=ResNet152_Weights.IMAGENET1K_V1)
+        model.fc = nn.Identity()
+    elif normalized == "vitsmall16_s2_all_moco":
+        model = vit_small_patch16_224(weights=ViTSmall16_Weights.SENTINEL2_ALL_MOCO)
+    else:
+        raise ValueError(f"Unsupported backbone-only weights '{model_weights}'.")
+
+    model.eval()
+    return BackboneOnlyAdapter(model)
+
+
 def build_evaluation_adapter(
     *,
     model_type: str,
@@ -730,6 +861,9 @@ def build_evaluation_adapter(
         weights = _resolve_resnet_weights(model_weights)
         return TorchGeoResNetAdapter(weights=weights, in_chans=in_chans)
 
+    if model_type == "backbone_only":
+        return _build_backbone_adapter(model_weights)
+
     if model_type == "croma":
         if croma_weights is None:
             raise ValueError("'croma_weights' must be provided when model_type='croma'.")
@@ -740,7 +874,7 @@ def build_evaluation_adapter(
 
     raise ValueError(
         f"Unsupported model_type '{model_type}'. "
-        "Valid options are 'ciip_checkpoint', 'torchgeo_resnet50' and 'croma'."
+        "Valid options are 'ciip_checkpoint', 'torchgeo_resnet50', 'backbone_only' and 'croma'."
     )
 
 
@@ -748,6 +882,7 @@ __all__ = [
     "EvaluationAdapter",
     "CiipEvaluationAdapter",
     "TorchGeoResNetAdapter",
+    "BackboneOnlyAdapter",
     "CromaEvaluationAdapter",
     "build_model_from_checkpoint",
     "build_evaluation_adapter",

@@ -1146,37 +1146,57 @@ def _run_embedding_diagnostics(
         s2_even_within_cka=s2_even_within,
     )
 
-    can_plot_full =    (
+    can_plot_full = (
         s1_bundle is not None
         and modality_tensors["s1"] is not None
         # and modality_tensors["s1"].get("posthead") is not None
         # and modality_tensors["s2"].get("posthead") is not None
     )
     can_plot_s2_only = (
-        s1_bundle is None 
+        s1_bundle is None
         # and modality_tensors["s2"].get("posthead") is not None
     )
 
-    
-    # if resnet architecture, plot even-layer cka and odd-layer cka
-    plot_even_odd = ( 
-        config.model_type == "torchgeo_resnet50"
-        or config.model_type == "ciip_checkpoint"        
+    normalized_weights = (config.model_weights or "").lower()
+    is_transformer = config.model_type in ("croma", "croma_vit", "croma_s1s2") or any(
+        token in normalized_weights for token in ("dofa", "scalemae", "vitsmall", "vit")
     )
-    if can_plot_full:
-        # if config.model_weights == 'dino':
-        #     plot_epoch_diagnostics_s2only(epoch_diagnostics, output_dir, label="backbone_raw")
-        if config.model_type in ("croma", "croma_vit", "croma_s1s2"):
-            plot_epoch_diagnostics_transformer(epoch_diagnostics, output_dir, label="transformer_hooks")
-        else:
-            plot_epoch_diagnostics(epoch_diagnostics, output_dir, label="posthead_raw", plot_even_odd=True)
+    is_resnet_based = (
+        config.model_type == "torchgeo_resnet50"
+        or normalized_weights.startswith("resnet")
+        or normalized_weights == "rcf_13ch"
+    )
+    is_ciip_or_moco = config.model_type == "ciip_checkpoint" or (
+        config.model_type == "torchgeo_resnet50" and normalized_weights == "moco"
+    )
 
-        # plot_epoch_diagnostics(epoch_diagnostics, output_dir, label="posthead_raw", plot_even_odd=plot_even_odd)
-    elif can_plot_s2_only:
-        # if config.model_type == "torchgeo_resnet50":
-        plot_epoch_diagnostics_s2only(epoch_diagnostics, output_dir, label="s2_backbone_raw", plot_even_odd=plot_even_odd)
-        # else:
-        #     logging.info("S1 modality unavailable; skipping S1/S2 joint diagnostics plot")
+    # if resnet architecture, plot even-layer cka and odd-layer cka
+    plot_even_odd = is_resnet_based or config.model_type == "ciip_checkpoint"
+
+    if is_transformer:
+        plot_epoch_diagnostics_transformer(
+            epoch_diagnostics, output_dir, label="transformer_hooks"
+        )
+    elif is_ciip_or_moco:
+        if can_plot_full:
+            plot_epoch_diagnostics(
+                epoch_diagnostics,
+                output_dir,
+                label="posthead_raw",
+                plot_even_odd=True,
+            )
+        else:
+            logging.info(
+                "Skipping full epoch diagnostics plot; required modalities missing for %s",
+                config.model_type,
+            )
+    elif is_resnet_based and (can_plot_s2_only or can_plot_full):
+        plot_epoch_diagnostics_s2only(
+            epoch_diagnostics,
+            output_dir,
+            label="s2_backbone_raw",
+            plot_even_odd=plot_even_odd,
+        )
     else:
         logging.info("Skipping epoch diagnostics plots due to missing posthead/projected features")
 
@@ -1434,17 +1454,19 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
         if config.model_type == "croma":
             embedding_dim_backbone = "768"
             embedding_dim_posthead = None
-        # if torchgeo resnet50 
+        # if torchgeo resnet50
         elif config.model_type == "torchgeo_resnet50":
             embedding_dim_backbone = "2048"
             embedding_dim_posthead = None
         else:
-            try:
-                embedding_dim_backbone = str(neuco_bundle.backbone.shape[1])
-                embedding_dim_posthead = str(neuco_bundle.posthead.shape[1])
-            except:
-                embedding_dim_backbone = "2048"  # default to 512 if extraction failed
-                embedding_dim_posthead = "1024"
+            backbone_shape = getattr(neuco_bundle.backbone, "shape", None)
+            posthead_shape = getattr(neuco_bundle.posthead, "shape", None)
+            embedding_dim_backbone = (
+                str(backbone_shape[1]) if backbone_shape is not None else "2048"
+            )
+            embedding_dim_posthead = (
+                str(posthead_shape[1]) if posthead_shape is not None else None
+            )
             # if model type ois torchgeo resnet
             if config.model_type == "torchgeo_resnet50":
                 embedding_dim_backbone = "2048"
@@ -1536,8 +1558,19 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
         return
     
 
-    if config.model_type == "croma" or config.model_weights == 'moco':
-        logging.info("Using backbone embeddings for CROMA or MoCo cross-modal retrieval")
+    use_backbone_retrieval = (
+        config.model_type == "croma"
+        or config.model_weights == 'moco'
+        or s1_ssl4eo.projected is None
+        or s2_ssl4eo.projected is None
+    )
+
+    if use_backbone_retrieval:
+        logging.info(
+            "Using backbone embeddings for cross-modal retrieval (model_type=%s, model_weights=%s)",
+            config.model_type,
+            config.model_weights,
+        )
         retrieval_s1 = s1_ssl4eo.backbone
         retrieval_s2 = s2_ssl4eo.backbone
 
@@ -1583,11 +1616,26 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model-type",
         default="ciip_checkpoint",
-        choices=["ciip_checkpoint", "torchgeo_resnet50", "croma"],
+        choices=["ciip_checkpoint", "torchgeo_resnet50", "croma", "backbone_only"],
         help="Model source to evaluate.",
     )
     # parser.add_argument("--checkpoint", type=Path, help="Checkpoint path for CIIP/Lorentz models.")
-    parser.add_argument("--model-weights", choices=["dino", "moco"], help="TorchGeo ResNet50 weight selection.")
+    parser.add_argument(
+        "--model-weights",
+        choices=[
+            "dino",
+            "moco",
+            "rcf_13ch",
+            "dofa_base_s2_13ch",
+            "scalemae_large_rgb",
+            "resnet18_s2_all_moco",
+            "resnet18_s2_rgb_moco",
+            "resnet50_s2_rgb_moco",
+            "resnet152_imagenet_rgb",
+            "vitsmall16_s2_all_moco",
+        ],
+        help="Pretrained weight selection for the requested model type.",
+    )
     parser.add_argument("--croma-weights", type=Path,  help="Path to the pretrained CROMA weights.") # '/home/juro4948/ciip/comparison/CROMA-main/CROMA_base.pt'
     parser.add_argument("--croma-image-resolution", type=int, default=120, help="Input resolution expected by the CROMA model.")
     parser.add_argument("--model-in-channels", type=int, help="Number of input channels for TorchGeo ResNet models.")
@@ -1675,6 +1723,8 @@ if __name__ == "__main__":
         output_dir = f"/home/juro4948/ciip/diagnostics/unified_eval/{args.model_type}/"
     elif args.model_type == 'torchgeo_resnet50':
         output_dir = f"/home/juro4948/ciip/diagnostics/unified_eval/{args.model_weights}/"
+    elif args.model_type == 'backbone_only':
+        output_dir = f"/home/juro4948/ciip/diagnostics/unified_eval/{args.model_weights or 'backbone_only'}/"
     elif args.model_type == 'ciip_checkpoint':
         output_dir = f"/home/juro4948/ciip/diagnostics/unified_eval/{args.model_type}/epoch_{args.ciip_epoch}/"
         output_dir = output_dir + args.model_path.strip('/') + '/'
@@ -1688,8 +1738,8 @@ if __name__ == "__main__":
 
     if args.model_type == "ciip_checkpoint" and args.checkpoint is None:
         parser.error("--checkpoint is required when --model-type=ciip_checkpoint")
-    if args.model_type == "torchgeo_resnet50" and args.model_weights is None:
-        parser.error("--model-weights must be provided for torchgeo_resnet50 models")
+    if args.model_type in {"torchgeo_resnet50", "backbone_only"} and args.model_weights is None:
+        parser.error("--model-weights must be provided for the selected model type")
     if args.model_type == "croma" and args.croma_weights is None:
         parser.error("--croma-weights must be provided when --model-type=croma")
     
