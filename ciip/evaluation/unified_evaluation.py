@@ -21,7 +21,7 @@ import contextlib
 import re
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -44,6 +44,7 @@ from ciip.evaluation.model_utils import EvaluationAdapter, build_evaluation_adap
 from ciip.model_ciip import LorentzCIIP
 from ciip.open_clip_train import data
 import os
+import torchvision.transforms as T
 
 ## EUROSAT STANDARDIZATION VALUES
 EUROSATMEAN = {
@@ -248,6 +249,16 @@ from visualizations.ssl4eo.hyperbolic_visualization import (  # type: ignore
     plot_pos_neg_hist
 )
 from visualizations.ssl4eo.hyperbolic_retrieval import compute_cross_modal_retrieval
+from ciip.evaluation.id_metrics import (
+    IMAGENET_MEAN,
+    IMAGENET_STD,
+    SSL4EO_MODEL_TRANSFORMS,
+    S2ScaleTransform,
+    compute_global_id_metrics,
+    prepare_embeddings_for_id,
+    save_id_metrics,
+    select_ssl4eo_transform,
+)
 from ciip.open_clip_train.data import SSL4EODataset
 
 @dataclass
@@ -502,13 +513,15 @@ def _build_neuco_loader(
             image, _ = batch
         # print(f"NeuCo batch image shape: {image.shape if isinstance(image, torch.Tensor) else 'N/A'}")
     return loader
-
-
 def _build_ssl4eo_dataset(config: ModelEvalConfig) -> torch.utils.data.Dataset:
     if config.ssl4eo_root is None:
         raise RuntimeError("SSL4EO dataset root must be provided for diagnostics")
 
     ensure_hydra_original_cwd()
+
+    s2_transform = select_ssl4eo_transform(config.model_weights)
+    if s2_transform is None:
+        s2_transform = data.get_transform(config.ssl4eo_s2_tier, is_train=False)
 
     dataset = SSL4EODataset(
         root=str(config.ssl4eo_root.expanduser()),
@@ -516,9 +529,9 @@ def _build_ssl4eo_dataset(config: ModelEvalConfig) -> torch.utils.data.Dataset:
         seasons=[0,1,2,3],
         num_timestamps=4,
         # s2_bands=list(config.ssl4eo_s2_bands),
-        transforms={'s1': data.get_transform('s1', is_train=False), 's2': data.get_transform(config.ssl4eo_s2_tier, is_train=False)},
+        transforms={'s1': data.get_transform('s1', is_train=False), 's2': s2_transform},
         is_train=False,
-        
+
         # s2_tier=config.neuco_modalities[0],  # use first modality as tier
     )
 
@@ -837,6 +850,36 @@ def _run_embedding_diagnostics(
 ) -> None:
     print(f"Running embedding diagnostics")
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    id_metrics: Dict[str, Dict[str, float]] = {}
+    for modality_name, bundle in ("s1", s1_bundle), ("s2", s2_bundle):
+        if bundle is None:
+            continue
+
+        for feature_name, tensor in (
+            ("backbone", getattr(bundle, "backbone", None)),
+            ("posthead", getattr(bundle, "raw", None)),
+            ("projected", getattr(bundle, "projected", None)),
+        ):
+            Z = prepare_embeddings_for_id(tensor) if tensor is not None else None
+            if Z is None:
+                continue
+            try:
+                metrics = compute_global_id_metrics(Z)
+                id_metrics[f"{modality_name}_{feature_name}"] = metrics
+                logging.info(
+                    "ID metrics for %s %s – FisherS: %.4f, MLE: %.4f, MoM: %.4f, TLE: %.4f",
+                    modality_name,
+                    feature_name,
+                    metrics["fishers"],
+                    metrics["mle"],
+                    metrics["mom"],
+                    metrics["tle"],
+                )
+            except Exception as exc:  # pragma: no cover - diagnostic path
+                logging.warning("Failed to compute ID metrics for %s %s: %s", modality_name, feature_name, exc)
+
+    save_id_metrics(id_metrics, output_dir / "global_id_results.txt")
 
     import CKA
     device = s2_bundle.backbone.device if s2_bundle.backbone is not None else torch.device("cpu")
