@@ -96,33 +96,41 @@ def main(args: DictConfig, start_epoch=0):
     device = init_distributed_device(args.datamodule)
     # print('After distribution: ', args.datamodule)
 
-    # get the name of the experiments
-    if True: #args.train.name is None:
-        # raise NotImplementedError('Name not yet supported.')
-        # sanitize model name for filesystem / uri use, easier if we don't use / in name as a rule?
-        model_name_safe = args.model.framework.replace('/', '-')
-        date_str = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
-        if args.datamodule.distributed:
-            # sync date_str from master to all ranks
-            date_str = broadcast_object(args.datamodule, date_str)
-        args.train.name = '-'.join([
-            date_str,
-            f"model_{model_name_safe}",
-            f"lr_{args.train.lr}",
-            f"b_{args.datamodule.batch_size}",
-            f"j_{args.model.workers}",
-            f"p_{args.model.precision}",
-        ])
-        print(f'Experiment name using {args.train.name}.')
-
     resume_latest = args.io.resume == 'latest'
-    log_base_path = os.path.join(args.io.logs, args.train.name)
+    resume_specified = bool(args.io.resume) and not resume_latest
+
+    # get the name of the experiments
+    if resume_specified:
+        # Ensure logs/checkpoints go to the same directory as the resume checkpoint
+        resume_checkpoint_dir = os.path.dirname(args.io.resume)
+        log_base_path = os.path.dirname(resume_checkpoint_dir)
+        args.train.name = os.path.basename(log_base_path)
+    else:
+        if True: #args.train.name is None:
+            # raise NotImplementedError('Name not yet supported.')
+            # sanitize model name for filesystem / uri use, easier if we don't use / in name as a rule?
+            model_name_safe = args.model.framework.replace('/', '-')
+            date_str = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
+            if args.datamodule.distributed:
+                # sync date_str from master to all ranks
+                date_str = broadcast_object(args.datamodule, date_str)
+            args.train.name = '-'.join([
+                date_str,
+                f"model_{model_name_safe}",
+                f"lr_{args.train.lr}",
+                f"b_{args.datamodule.batch_size}",
+                f"j_{args.model.workers}",
+                f"p_{args.model.precision}",
+            ])
+            print(f'Experiment name using {args.train.name}.')
+
+        log_base_path = os.path.join(args.io.logs, args.train.name)
     args.log_path = None
     if is_master(args, local=args.log_local):
         os.makedirs(log_base_path, exist_ok=True)
         log_filename = f'out-{args.datamodule.rank}' if args.log_local else 'out.log'
         args.log_path = os.path.join(log_base_path, log_filename)
-        if os.path.exists(args.log_path) and not resume_latest:
+        if os.path.exists(args.log_path) and not (resume_latest or resume_specified):
             print(
                 "Error. Experiment already exists. Use --name {} to specify a new experiment."
             )

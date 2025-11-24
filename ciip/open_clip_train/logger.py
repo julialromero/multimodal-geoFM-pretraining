@@ -20,7 +20,8 @@ def setup_logging(log_file, level, include_host=False):
     logging.root.addHandler(stream_handler)
 
     if log_file:
-        file_handler = logging.FileHandler(filename=log_file)
+        # Explicitly append to existing log files (default mode is already append).
+        file_handler = logging.FileHandler(filename=log_file, mode='a')
         file_handler.setFormatter(formatter)
         logging.root.addHandler(file_handler)
 
