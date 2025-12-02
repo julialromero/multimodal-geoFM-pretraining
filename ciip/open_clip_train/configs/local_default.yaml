@@ -12,6 +12,10 @@ io:
 comet: personal
 
 model:
+  # encoder_pair controls which pair of encoders are built by the data-parallel runner.
+  # default keeps the two-sensor CIIP setup; set to "s2_text" to pair a Sentinel-2
+  # ResNet-50 encoder with a text transformer encoder.
+  encoder_pair: s1s2
   framework: resnet18 #options are resnet18, resnet50, modified_resnet, transformer
   embed_dim: 512
   pre_projection_dim: 1024
@@ -24,6 +28,12 @@ model:
   s2_resolution: 224
   s1_bands: [1, 2]
   s2_bands: [1, 2, 3, 4, 5, 6, 7, 8, 8A, 9, 10, 11, 12] # if using sentinel-2 s2a tier, band 10 is no longer present
+  text:
+    context_length: 77
+    vocab_size: 49408
+    transformer_width: 512
+    transformer_heads: 8
+    transformer_layers: 12
   #TODO we should use mixed prevision
   precision: 'fp16'
   grad_clip_norm: ~
