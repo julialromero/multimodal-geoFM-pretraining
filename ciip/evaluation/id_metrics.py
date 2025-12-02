@@ -16,6 +16,11 @@ import torchvision.transforms as T
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
 
+# S2RGB_MEAN = [100.708, 87.489, 61.932]
+# S2RGB_STD = [68.550, 47.647, 40.592]
+
+S2RGB_MEAN = [2340.936, 2184.553, 1924.863]
+S2RGB_STD = [1397.225, 1219.943, 1201.092]
 
 class S2ScaleTransform(nn.Module):
     """Scale Sentinel-2 pixel values by a constant factor."""
@@ -39,8 +44,8 @@ SSL4EO_MODEL_TRANSFORMS: Dict[str, Callable[[torch.Tensor], torch.Tensor]] = {
     "scalemae_large_rgb": T.Compose(
         [
             T.CenterCrop((224, 224)),
-            S2ScaleTransform(scale=10000.0),
-            T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+            # S2ScaleTransform(scale=10000.0),
+            T.Normalize(mean=S2RGB_MEAN, std=S2RGB_STD),
         ]
     ),
     "resnet18_s2_all_moco": T.Compose(
@@ -58,22 +63,22 @@ SSL4EO_MODEL_TRANSFORMS: Dict[str, Callable[[torch.Tensor], torch.Tensor]] = {
     "resnet18_s2_rgb_moco": T.Compose(
         [
             T.CenterCrop((224, 224)),
-            S2ScaleTransform(scale=10000.0),
-            T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+            # S2ScaleTransform(scale=10000.0),
+            T.Normalize(mean=S2RGB_MEAN, std=S2RGB_STD),
         ]
     ),
     "resnet50_s2_rgb_moco": T.Compose(
         [
             T.CenterCrop((224, 224)),
-            S2ScaleTransform(scale=10000.0),
-            T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+            # S2ScaleTransform(scale=10000.0),
+            T.Normalize(mean=S2RGB_MEAN, std=S2RGB_STD),
         ]
     ),
     "resnet152_imagenet_rgb": T.Compose(
         [
             T.CenterCrop((224, 224)),
-            S2ScaleTransform(scale=10000.0),
-            T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+            # S2ScaleTransform(scale=10000.0),
+            T.Normalize(mean=S2RGB_MEAN, std=S2RGB_STD),
         ]
     ),
     "vitsmall16_s2_all_moco": T.Compose(

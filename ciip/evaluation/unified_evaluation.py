@@ -30,11 +30,13 @@ import torch.utils.data
 from sklearn.decomposition import PCA
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, f1_score
+from sklearn.neighbors import KNeighborsClassifier
 from torch import nn
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 from sklearn.manifold import TSNE
 # from ciip.evaluation.ssl4eo_retrieval import compute_cross_modal_retrieval
+import subprocess
 
 from torchgeo.datasets import EuroSAT
 from torchvision import transforms
@@ -45,6 +47,7 @@ from ciip.model_ciip import LorentzCIIP
 from ciip.open_clip_train import data
 import os
 import torchvision.transforms as T
+from torchvision.models import resnet152, ResNet152_Weights
 
 ## EUROSAT STANDARDIZATION VALUES
 EUROSATMEAN = {
@@ -145,6 +148,8 @@ def _resolve_eurosat_bands(num_channels: int) -> Tuple[str, ...]:
         return EUROSATBANDS
     if num_channels == 12:
         return tuple(band for band in EUROSATBANDS if band != "B10")
+    if num_channels == 3:
+        return ("B04", "B03", "B02")
     if num_channels < 1:
         raise ValueError("Model must expose at least one Sentinel-2 channel")
     logging.warning(
@@ -214,6 +219,7 @@ from ciip.evaluation.export_neuco_embeddings import (  # type: ignore
     InputResizer,
     SSL4EONormalize,
     Divideby10000Normalize,
+    CromaNormalize,
     TemporalMean,
     collate_fn,
     create_submission_from_dict,
@@ -230,7 +236,7 @@ from visualizations.ssl4eo.embedding_collapse_diagnostics import (  # type: igno
     plot_epoch_diagnostics,
     plot_epoch_diagnostics_s2only,
     plot_epoch_diagnostics_scalemae,
-    plot_epoch_diagnostics_transformer,
+    plot_epoch_diagnostics_croma,
     plot_projection,
     preprocess_projection_data,
     ModalityEmbeddings,
@@ -354,7 +360,7 @@ def _extract_embeddings(
                 backbone = outputs.get("backbone")
                 post = outputs.get("posthead", None)
                 projected = outputs.get("projected", None)
-                print(f'Backbone shape: {backbone.shape if backbone is not None else "N/A"}')
+                # print(f'Backbone shape: {backbone.shape if backbone is not None else "N/A"}')
             # if tuple
             elif isinstance(outputs, tuple) and len(outputs) == 3:
                 backbone, post, projected = outputs
@@ -409,11 +415,11 @@ def _build_eurosat_loaders(
 ) -> Dict[str, DataLoader]:
     normalized = modality.lower()
     if normalized == "s1":
-        mean = [EUROSAT_S1_MEAN[b] for b in bands]
-        std = [EUROSAT_S1_STD[b] for b in bands]
-    else:
-        mean = [EUROSATMEAN[b] for b in bands]
-        std = [EUROSATSTD[b] for b in bands]
+        raise ValueError("EuroSAT dataset does not support Sentinel-1 modality")
+
+    # Compute per-band stats in the same order as the resolved band tuple
+    mean = [EUROSATMEAN[b] for b in bands]
+    std = [EUROSATSTD[b] for b in bands]
 
     target_size = int(config.eurosat_image_size)
     eval_resize = max(target_size, int(round(target_size * 256 / 224)))
@@ -470,20 +476,28 @@ def _build_neuco_loader(
     # if model is dino use 
 
     # if model is dino use SSL4EONormalize
-    # if config.model_type == 'croma':
-    #     print(f"Resizing neuco to 120 for CROMA model")
-    #     transform_steps.append(transforms.Resize((config.croma_image_resolution, config.croma_image_resolution)))
-    if config.model_type == "dino":
-        print(f"Using Divideby10000Normalize for DINO model")
-        transform_steps.append(Divideby10000Normalize())
+    if config.model_type == 'croma':
+        print(f"Resizing neuco to 120 for CROMA model")
+        transform_steps.append(transforms.Resize((config.croma_image_resolution, config.croma_image_resolution)))
+        transform_steps.append(CromaNormalize(use_8_bit=False))
+
     else:
-        print(f"Using SSL4EO Normalization for SSL4EO trained models")
-        transform_steps.append(SSL4EONormalize())
-    transform_steps.append(TemporalMean())
-    if config.neuco_resize is not None:
-        transform_steps.append(InputResizer(config.neuco_resize))
+        transform_steps.append(InputResizer(224))
+        weights = (config.model_weights or "").lower()
+        if weights == "dino":
+            print("Using Divideby10000Normalize for DINO model")
+            transform_steps.append(Divideby10000Normalize())
+        else:
+            print("Using SSL4EO Normalization for SSL4EO trained models")
+            transform_steps.append(SSL4EONormalize())
+    # transform_steps.append(TemporalMean())  # skip temporal averaging; keep per-season inputs
+    # if config.neuco_resize is not None:
+    #     transform_steps.append(InputResizer(config.neuco_resize))
     transform = transforms.Compose(transform_steps)
-    print(f"Building NeuCo dataset with modalities: {config.neuco_modalities}")
+
+
+    print(f"Building NeuCo dataset with modalities: {modalities}")
+    rgb = True if config.model_in_channels == 3 else False
     dataset = E2SChallengeDataset(
         data_path=str(config.neuco_root),
         modalities=list(modalities),
@@ -491,6 +505,7 @@ def _build_neuco_loader(
         concat=True,
         output_file_name=True,
         transform=transform,
+        rgb=rgb
     )
 
     # check size of datset
@@ -513,6 +528,7 @@ def _build_neuco_loader(
             image, _ = batch
         # print(f"NeuCo batch image shape: {image.shape if isinstance(image, torch.Tensor) else 'N/A'}")
     return loader
+
 def _build_ssl4eo_dataset(config: ModelEvalConfig) -> torch.utils.data.Dataset:
     if config.ssl4eo_root is None:
         raise RuntimeError("SSL4EO dataset root must be provided for diagnostics")
@@ -521,6 +537,7 @@ def _build_ssl4eo_dataset(config: ModelEvalConfig) -> torch.utils.data.Dataset:
 
     s2_transform = select_ssl4eo_transform(config.model_weights)
     if s2_transform is None:
+        print(f"Using default SSL4EO transform for tier {config.ssl4eo_s2_tier}")
         s2_transform = data.get_transform(config.ssl4eo_s2_tier, is_train=False)
 
     dataset = SSL4EODataset(
@@ -538,9 +555,6 @@ def _build_ssl4eo_dataset(config: ModelEvalConfig) -> torch.utils.data.Dataset:
     total = len(dataset)
     subset_size = config.ssl4eo_subset_size
     if subset_size > 0 and subset_size < total:
-        # rng = np.random.default_rng(config.ssl4eo_subset_seed)
-        # indices = sorted(rng.choice(total, size=subset_size, replace=False).tolist())
-        # random choice no seed
         indices = sorted(np.random.choice(total, size=subset_size, replace=False).tolist())
         dataset = Subset(dataset, indices)
     return dataset
@@ -551,6 +565,7 @@ def _extract_ssl4eo_embeddings(
     model: nn.Module,
     *,
     device: torch.device,
+    max_batches_cka: int
 ) -> Tuple[ModalityEmbeddings, ModalityEmbeddings, List[str]]:
     dataset = _build_ssl4eo_dataset(config)
 
@@ -570,6 +585,7 @@ def _extract_ssl4eo_embeddings(
         input_dtype=input_dtype,
         device=device,
         autocast=autocast,
+        max_batches_cka=max_batches_cka
     )
 
     assert s2_embeddings is not None, "S2 embeddings should not be None"
@@ -586,7 +602,7 @@ def _run_linear_probe(
     percents = (0.01, 0.05, 0.1, 0.25, 0.5, 1.0)
     rng = np.random.default_rng(config.random_seed)
 
-    def _evaluate(feature_key: str, batch_norm) -> Dict[float, Dict[str, float]]:
+    def _evaluate_logreg(feature_key: str, batch_norm: bool) -> Dict[float, Dict[str, float]]:
         results: Dict[float, Dict[str, float]] = {}
         # print(embeddings)
         train = embeddings["train"]
@@ -611,6 +627,49 @@ def _run_linear_probe(
             indices = rng.choice(len(train_feats), size=n_samples, replace=False)
 
             clf = LogisticRegression(max_iter=4000, multi_class="multinomial", solver="lbfgs")
+            clf.fit(train_feats[indices], train.labels[indices])
+
+            val_pred = clf.predict(val_feats)
+            test_pred = clf.predict(test_feats)
+
+            val_acc = accuracy_score(val.labels, val_pred)
+            val_f1 = f1_score(val.labels, val_pred, average="weighted")
+            test_acc = accuracy_score(test.labels, test_pred)
+            test_f1 = f1_score(test.labels, test_pred, average="weighted")
+
+            results[pct] = {
+                "val_accuracy": float(val_acc),
+                "val_f1": float(val_f1),
+                "test_accuracy": float(test_acc),
+                "test_f1": float(test_f1),
+            }
+
+        return results
+
+    def _evaluate_knn(feature_key: str, batch_norm: bool, n_neighbors: int = 20) -> Dict[float, Dict[str, float]]:
+        """Use train features as keys and classify val/test with kNN (k=20) across the same percents."""
+        results: Dict[float, Dict[str, float]] = {}
+        train = embeddings["train"]
+        val = embeddings["val"]
+        test = embeddings["test"]
+
+        train_feats = getattr(train, feature_key)
+        val_feats = getattr(val, feature_key)
+        test_feats = getattr(test, feature_key)
+
+        if batch_norm:
+            mean = train_feats.mean(axis=0, keepdims=True)
+            std = train_feats.std(axis=0, keepdims=True) + 1e-10
+            train_feats = (train_feats - mean) / std
+            val_feats = (val_feats - mean) / std
+            test_feats = (test_feats - mean) / std
+
+        for pct in percents:
+            n_samples = max(1, int(pct * len(train_feats)))
+            indices = rng.choice(len(train_feats), size=n_samples, replace=False)
+            k = min(n_neighbors, n_samples)
+
+            clf = KNeighborsClassifier(n_neighbors=k)
             clf.fit(train_feats[indices], train.labels[indices])
 
             val_pred = clf.predict(val_feats)
@@ -660,9 +719,12 @@ def _run_linear_probe(
     plots_dir = output_dir / "linear_probe"
     plots_dir.mkdir(parents=True, exist_ok=True)
     for feature_key, suffix, use_batch_norm in probe_specs:
-        metrics = _evaluate(feature_key, batch_norm=use_batch_norm)
+        lr_metrics = _evaluate_logreg(feature_key, batch_norm=use_batch_norm)
+        knn_metrics = _evaluate_knn(feature_key, batch_norm=use_batch_norm)
         with (plots_dir / f"{label}_{suffix}_metrics.json").open("w") as handle:
-            json.dump(metrics, handle, indent=2)
+            json.dump(lr_metrics, handle, indent=2)
+        with (plots_dir / f"{label}_{suffix}_knn_metrics.json").open("w") as handle:
+            json.dump(knn_metrics, handle, indent=2)
 
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
@@ -714,26 +776,57 @@ def _run_linear_probe(
     fig.savefig(plots_dir / f"{label}_combined_curves.png", dpi=200)
     plt.close(fig)
 
+    # KNN plots
+    fig_knn, (knn_ax1, knn_ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    
+    for feature_key, suffix, use_batch_norm in probe_specs:
+        metrics_file = plots_dir / f"{label}_{suffix}_knn_metrics.json"
+        with metrics_file.open("r", encoding="utf-8") as handle:
+            metrics = json.load(handle)
+
+        if not metrics:
+            continue
+
+        xs = sorted(float(x) for x in metrics.keys())
+        acc = [metrics[str(x)]["test_accuracy"] for x in xs]
+        linestyle = "--" if use_batch_norm else "-"
+        marker = marker_map.get(feature_key, "o")
+        label_suffix = "batch-norm" if use_batch_norm else "raw"
+        knn_ax1.plot(xs, acc, marker=marker, linestyle=linestyle, label=f"{feature_key} ({label_suffix})")
+
+    for feature_key, suffix, use_batch_norm in probe_specs:
+        metrics_file = plots_dir / f"{label}_{suffix}_knn_metrics.json"
+        with metrics_file.open("r", encoding="utf-8") as handle:
+            metrics = json.load(handle)
+
+        if not metrics:
+            continue
+
+        xs = sorted(float(x) for x in metrics.keys())
+        f1_vals = [metrics[str(x)]["test_f1"] for x in xs]
+        linestyle = "--" if use_batch_norm else "-"
+        marker = marker_map.get(feature_key, "o")
+        label_suffix = "batch-norm" if use_batch_norm else "raw"
+        knn_ax2.plot(xs, f1_vals, marker=marker, linestyle=linestyle, label=f"{feature_key} ({label_suffix})")
+
+    knn_ax1.set_xlabel("Training fraction")
+    knn_ax1.set_ylabel("Test Accuracy")
+    knn_ax1.set_title(f"KNN Test Accuracy ({label})")
+    knn_ax1.grid(alpha=0.3)
+    knn_ax1.legend()
+
+    knn_ax2.set_xlabel("Training fraction")
+    knn_ax2.set_ylabel("Test F1")
+    knn_ax2.set_title(f"KNN Test F1 ({label})")
+    knn_ax2.grid(alpha=0.3)
+    knn_ax2.legend()
+
+    fig_knn.tight_layout()
+    fig_knn.savefig(plots_dir / f"{label}_knn_combined_curves.png", dpi=200)
+    plt.close(fig_knn)
+
     logging.info("Linear probe results saved to %s", plots_dir)
 
-    #     xs = sorted(metrics)
-    #     acc = [metrics[x]["test_accuracy"] for x in xs]
-    #     f1_vals = [metrics[x]["test_f1"] for x in xs]
-
-    #     fig, ax = plt.subplots(figsize=(6, 4))
-    #     ax.plot(xs, acc, marker="o", label="test accuracy")
-    #     ax.plot(xs, f1_vals, marker="s", label="test F1")
-    #     ax.set_xlabel("Training fraction")
-    #     ax.set_ylabel("Score")
-    #     ax.set_title(f"Linear probe ({label}, {pretty})")
-    #     ax.grid(alpha=0.3)
-    #     ax.legend()
-    #     fig.tight_layout()
-    #     fig.savefig(plots_dir / f"{label}_{key}_curves.png", dpi=200)
-    #     plt.close(fig)
-
-    # # print the save path
-    # logging.info(f"Linear probe results saved to {plots_dir}")
 
 def _plot_eurosat_tsne(
     bundle: EmbeddingBundle,
@@ -851,39 +944,10 @@ def _run_embedding_diagnostics(
     print(f"Running embedding diagnostics")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    id_metrics: Dict[str, Dict[str, float]] = {}
-    for modality_name, bundle in ("s1", s1_bundle), ("s2", s2_bundle):
-        if bundle is None:
-            continue
-
-        for feature_name, tensor in (
-            ("backbone", getattr(bundle, "backbone", None)),
-            ("posthead", getattr(bundle, "raw", None)),
-            ("projected", getattr(bundle, "projected", None)),
-        ):
-            Z = prepare_embeddings_for_id(tensor) if tensor is not None else None
-            if Z is None:
-                continue
-            try:
-                metrics = compute_global_id_metrics(Z)
-                id_metrics[f"{modality_name}_{feature_name}"] = metrics
-                logging.info(
-                    "ID metrics for %s %s – FisherS: %.4f, MLE: %.4f, MoM: %.4f, TLE: %.4f",
-                    modality_name,
-                    feature_name,
-                    metrics["fishers"],
-                    metrics["mle"],
-                    metrics["mom"],
-                    metrics["tle"],
-                )
-            except Exception as exc:  # pragma: no cover - diagnostic path
-                logging.warning("Failed to compute ID metrics for %s %s: %s", modality_name, feature_name, exc)
-
-    save_id_metrics(id_metrics, output_dir / "global_id_results.txt")
-
     import CKA
     device = s2_bundle.backbone.device if s2_bundle.backbone is not None else torch.device("cpu")
-    cuda_cka = CKA.CudaCKA(device=device)
+    # print(device)
+    cuda_cka = CKA.CudaCKA(device='cuda')
 
     def _detach_or_none(tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
         return tensor.detach() if tensor is not None else None
@@ -985,6 +1049,7 @@ def _run_embedding_diagnostics(
     # --------------------
     if modality_tensors["s1"] and modality_tensors["s1"]["layers"]:
         s1_all_dict = modality_tensors["s1"]["layers"]  # type: ignore[arg-type]
+        # print
         s1_layers, s1_within = compute_within_encoder_cka(s1_all_dict, cuda_cka) # 32x32
 
         layer_names = list(s1_all_dict.keys())
@@ -1030,6 +1095,7 @@ def _run_embedding_diagnostics(
     if modality_tensors["s2"] and modality_tensors["s2"]["layers"]:
         s2_all_dict = modality_tensors["s2"]["layers"]  # type: ignore[arg-type]
 
+        # print('')
         s2_layers, s2_within = compute_within_encoder_cka(s2_all_dict, cuda_cka)
 
         layer_names = list(s2_all_dict.keys())
@@ -1082,22 +1148,7 @@ def _run_embedding_diagnostics(
     s2_projected_singular = _maybe_singular("s2", "projected")
     s2_backbone_singular = _maybe_singular("s2", "backbone")
 
-        # ----- Projected-space CKA (scalar between S1 and S2 projected features) -----
-    projected_cka: Optional[float] = None
-    if (
-        modality_tensors["s1"]
-        and modality_tensors["s1"].get("projected") is not None
-        and modality_tensors["s2"]
-        and modality_tensors["s2"].get("projected") is not None
-    ):
-        device = "cpu"
-        cuda_cka = CudaCKA(device=device)
-        projected_cka_tensor = cuda_cka.linear_CKA(
-            modality_tensors["s1"]["projected"].to(device),  # type: ignore[arg-type]
-            modality_tensors["s2"]["projected"].to(device),  # type: ignore[arg-type]
-        )
-        # store as plain Python float
-        projected_cka = float(projected_cka_tensor.detach().cpu().item())
+   
 
     # ----- Package CKA results (full, odd, even, cross, projected) -----
     cka_payload: Dict[str, object] = {
@@ -1303,9 +1354,10 @@ def _run_embedding_diagnostics(
 
     normalized_weights = (config.model_weights or "").lower()
     is_transformer = config.model_type in ("croma", "croma_vit", "croma_s1s2") or any(
-        token in normalized_weights for token in ("dofa", "scalemae", "vitsmall", "vit")
+        token in normalized_weights for token in ("dofa", "scalemae", "vitsmall", "vit", 'visiontransformer')
     )
-    is_scalemae = any(token in normalized_weights for token in ("scalemae", "dofa"))
+    is_scalemae = any(token in normalized_weights for token in ("scalemae", "dofa", 'visiontransformer', 'vit'))
+    print(f"Model type: {config.model_type}, Weights: {normalized_weights}, is_transformer: {is_transformer}, is_scalemae: {is_scalemae}")
     is_resnet_based = (
         config.model_type == "torchgeo_resnet50"
         or normalized_weights.startswith("resnet")
@@ -1324,7 +1376,7 @@ def _run_embedding_diagnostics(
                 epoch_diagnostics, output_dir, label="transformer_hooks"
             )
         else:
-            plot_epoch_diagnostics_transformer(
+            plot_epoch_diagnostics_croma(
                 epoch_diagnostics, output_dir, label="transformer_hooks"
             )
     elif is_ciip_or_moco:
@@ -1483,11 +1535,6 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
 
     if config.model_type == "croma":
         config.eurosat_image_size = config.croma_image_resolution
-        if config.neuco_resize is None:
-            config.neuco_resize = (
-                config.croma_image_resolution,
-                config.croma_image_resolution,
-            )
 
     adapter = build_evaluation_adapter(
         model_type=config.model_type,
@@ -1497,7 +1544,10 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
         croma_weights=config.croma_weights,
         croma_image_resolution=config.croma_image_resolution,
     )
-    device = torch.device('cpu') ##torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+    device = torch.device(torch.device("cuda") if torch.cuda.is_available() else "cpu")
+    if not torch.cuda.is_available():
+        raise ValueError
+    print(device)
     adapter = adapter.to(device)
     adapter.eval()
     base_model = getattr(adapter, "base_model", adapter)
@@ -1535,7 +1585,7 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
 
         # check if dir exists
         eurosat_output_dir = output_dir / "linear_probe"
-        if True: #not eurosat_output_dir.exists():
+        if True:
             eurosat_loaders = _build_eurosat_loaders(
                 config, bands=eurosat_bands, modality=target_modality
             )
@@ -1559,86 +1609,94 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
                 model_title=config.model_path,
             )
 
+        # clean up dataset, not needed anymore
+
+
 
     if args.disable_neuco == False:
-        # first check if the output csvs already exist
         neuco_output_dir = output_dir / "neuco"
-        neuco_modalities: List[str] = list(config.neuco_modalities)
-        if target_modality == "s1":
-            neuco_modalities = ["s1"]
-        elif not neuco_modalities:
-            neuco_modalities = ["s2l1c"]
+        base_modalities: List[str] = list(config.neuco_modalities)
+        s2_candidates = [m for m in base_modalities if m in ("s2l2a", "s2l1c")]
+        has_dual_neuco = (
+            len(base_modalities) == 2
+            and "s1" in base_modalities
+            and len(s2_candidates) > 0
+            and config.model_type in {"torchgeo_resnet50", "ciip_checkpoint", "croma"}
+        )
 
-        if len(neuco_modalities) > 1:
-            print('Only useing 1st modality for neuco benchmark')
-        modality = neuco_modalities[0]
-        csv_out_backbone = neuco_output_dir / "neuco_export" / f"neuco_{modality}_backbone.csv"
-        csv_out_posthead = neuco_output_dir / "neuco_export" / f"neuco_{modality}_posthead.csv"
-        csv_out_projected = neuco_output_dir / "neuco_export" /f"neuco_{modality}_projected.csv"
-        
-        if csv_out_backbone.exists() and csv_out_posthead.exists() and csv_out_projected.exists():
-            print("NeuCo embeddings already exist, skipping extraction.")
-        if csv_out_backbone.exists() and args.model_type in ["croma", "torchgeo_resnet50"]:
-            print("NeuCo embeddings already exist for model type {}, skipping extraction.".format(args.model_type))
-        else:
-            print("csvs at {}, {}, {} do not exist, extracting NeuCo embeddings.".format(csv_out_backbone, csv_out_posthead, csv_out_projected))
-            neuco_output_dir.mkdir(parents=True, exist_ok=True)
-            neuco_loader = _build_neuco_loader(
-                config, modalities=neuco_modalities
-            )
-            with _use_adapter_modality(adapter, target_modality):
-                neuco_bundle = _extract_embeddings(
-                    adapter,
-                    neuco_loader,
-                    device=device,
-                    require_ids=True,
-                    expected_in_channels=model_channels,
-                    modality=target_modality,
+        def _run_single_neuco(modality: str, active_modality: str) -> None:
+            csv_out_backbone = neuco_output_dir / "neuco_export" / f"neuco_{modality}_backbone.csv"
+            csv_out_posthead = neuco_output_dir / "neuco_export" / f"neuco_{modality}_posthead.csv"
+            csv_out_projected = neuco_output_dir / "neuco_export" / f"neuco_{modality}_projected.csv"
+
+            if csv_out_backbone.exists() and csv_out_posthead.exists() and csv_out_projected.exists():
+                print(f"NeuCo embeddings already exist for modality {modality}, skipping extraction.")
+                neuco_bundle = None
+            else:
+                print(f"Extracting NeuCo embeddings for modality {modality} into {csv_out_backbone.parent}")
+                neuco_output_dir.mkdir(parents=True, exist_ok=True)
+                neuco_loader = _build_neuco_loader(config, modalities=[modality])
+
+                expected_channels = (
+                    _infer_model_in_channels(adapter, config.model_in_channels, modality=active_modality)
                 )
-        
-            _export_neuco(neuco_bundle, neuco_output_dir / "neuco_export", label=modality)
-            print('Saved NeuCo embeddings to ', neuco_output_dir / "neuco_export")
-        
-        # check neuco output dir
-        import subprocess
-        if config.model_type == "croma":
-            embedding_dim_backbone = "768"
-            embedding_dim_posthead = None
-        # if torchgeo resnet50
-        elif config.model_type == "torchgeo_resnet50":
-            embedding_dim_backbone = "2048"
-            embedding_dim_posthead = None
-        else:
-            backbone_shape = getattr(neuco_bundle.backbone, "shape", None)
-            posthead_shape = getattr(neuco_bundle.posthead, "shape", None)
-            embedding_dim_backbone = (
-                str(backbone_shape[1]) if backbone_shape is not None else "2048"
-            )
-            embedding_dim_posthead = (
-                str(posthead_shape[1]) if posthead_shape is not None else None
-            )
-            # if model type ois torchgeo resnet
-            if config.model_type == "torchgeo_resnet50":
+                with _use_adapter_modality(adapter, active_modality):
+                    neuco_bundle = _extract_embeddings(
+                        adapter,
+                        neuco_loader,
+                        device=device,
+                        require_ids=True,
+                        expected_in_channels=expected_channels,
+                        modality=active_modality,
+                    )
+
+                _export_neuco(neuco_bundle, neuco_output_dir / "neuco_export", label=modality)
+                print("Saved NeuCo embeddings to ", neuco_output_dir / "neuco_export")
+
+            if config.model_type == "croma":
+                embedding_dim_backbone = "768"
+            elif config.model_type == "torchgeo_resnet50":
                 embedding_dim_backbone = "2048"
-                embedding_dim_posthead = "2048"
+            else:
+                backbone_tensor = getattr(neuco_bundle, "backbone", None) if neuco_bundle is not None else None
+                embedding_dim_backbone = (
+                    str(backbone_tensor.shape[1]) if backbone_tensor is not None else "2048"
+                )
 
-        print(f"NeuCo embedding dimension: {embedding_dim_backbone}")
+            print(f"NeuCo embedding dimension for {modality}: {embedding_dim_backbone}")
 
-        cmd = [
-            "python", "/local/ms-data/NeuCo-Bench/benchmark/main.py",
-            "--annotation_path", "/local/ms-data/SSL4EO-S12-downstream/labels",
-            "--output_dir", neuco_output_dir,
-            "--config", "/local/ms-data/NeuCo-Bench/benchmark/config.yaml",
-            "--method_name", "backbone",
-            "--phase", "testing",
-            "--submission_file", csv_out_backbone,
-            "--embedding_dim", embedding_dim_backbone
-        ]
-        env = os.environ.copy()
-        env["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
-        subprocess.run(cmd, check=True, env=env)
+            cmd = [
+                "python", "/local/ms-data/NeuCo-Bench/benchmark/main.py",
+                "--annotation_path", "/local/ms-data/SSL4EO-S12-downstream/labels",
+                "--output_dir", neuco_output_dir,
+                "--config", "/local/ms-data/NeuCo-Bench/benchmark/config.yaml",
+                "--method_name", "backbone",
+                "--phase", "testing",
+                "--submission_file", csv_out_backbone,
+                "--embedding_dim", embedding_dim_backbone
+            ]
+            env = os.environ.copy()
+            env["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+            subprocess.run(cmd, check=True, env=env)
 
+        if has_dual_neuco:
+            print("Dual NeuCo modalities detected; running S2 and S1 evaluations separately.")
+            s2_modality = s2_candidates[0]
+            _run_single_neuco(s2_modality, "s2")
+            _run_single_neuco("s1", "s1")
+        else:
+            neuco_modalities: List[str] = base_modalities
+            print('NeuCo modalities from config: ', neuco_modalities)
+            print('Target modality: ', target_modality)
+            if target_modality == "s1":
+                neuco_modalities = ["s1"]
+            elif not neuco_modalities:
+                neuco_modalities = ["s2l1c"]
 
+            if len(neuco_modalities) > 1:
+                print('Only useing 1st modality for neuco benchmark')
+            modality = neuco_modalities[0]
+            _run_single_neuco(modality, target_modality)
 
 
     ssl4eo_available = (
@@ -1650,11 +1708,13 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
     assert ssl4eo_available or not config.enable_ssl4eo, "SSL4EO diagnostics requested but not available"
 
     s1_ssl4eo = s2_ssl4eo = None
+    max_batches_cka=20
     if ssl4eo_available:
         s1_ssl4eo, s2_ssl4eo, ssl4eo_ids = _extract_ssl4eo_embeddings(
             config,
             adapter,
             device=device,
+            max_batches_cka=max_batches_cka
         )
 
         # create Path fo diagnostics
@@ -1708,55 +1768,57 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
         return
     
 
-    use_backbone_retrieval = (
-        config.model_type == "croma"
-        or config.model_weights == 'moco'
-        or s1_ssl4eo.projected is None
-        or s2_ssl4eo.projected is None
-    )
+    # use_backbone_retrieval = (
+    #     config.model_type == "croma"
+    #     or config.model_weights == 'moco'
+    # )
+    # use_projected_retrieval = (
+    #     config.model_type == 'ciip_checkpoints'
+    #     and not use_backbone_retrieval
+    # )
 
-    if use_backbone_retrieval:
-        logging.info(
-            "Using backbone embeddings for cross-modal retrieval (model_type=%s, model_weights=%s)",
-            config.model_type,
-            config.model_weights,
-        )
-        retrieval_s1 = s1_ssl4eo.backbone
-        retrieval_s2 = s2_ssl4eo.backbone
+    # if use_backbone_retrieval:
+    #     logging.info(
+    #         "Using backbone embeddings for cross-modal retrieval (model_type=%s, model_weights=%s)",
+    #         config.model_type,
+    #         config.model_weights,
+    #     )
+    #     retrieval_s1 = s1_ssl4eo.backbone
+    #     retrieval_s2 = s2_ssl4eo.backbone
 
-        retrieval_metrics = compute_cross_modal_retrieval(retrieval_s1, retrieval_s2, curvature=curvature)
-        #output_dir / "ssl4eo_retrieval.json"
-        retrieval_path = Path(output_dir) / "ssl4eo_retrieval_backbone.json"
-        retrieval_path.write_text(json.dumps(retrieval_metrics, indent=2, sort_keys=True))
-        logging.info("SSL4EO cross-modal retrieval metrics: %s", retrieval_metrics)
+    #     retrieval_metrics = compute_cross_modal_retrieval(retrieval_s1, retrieval_s2, curvature=curvature)
+    #     retrieval_metrics['num_samples'] = s1_ssl4eo.backbone.shape[0]
+    #     #output_dir / "ssl4eo_retrieval.json"
+    #     retrieval_path = Path(output_dir) / "ssl4eo_retrieval_backbone.json"
+    #     retrieval_path.write_text(json.dumps(retrieval_metrics, indent=2, sort_keys=True))
+    #     logging.info("SSL4EO cross-modal retrieval metrics: %s", retrieval_metrics)
 
-    else:
-        # print the attributes of s1_ssl4eo
-        print("SSL4EO S1 EmbeddingBundle attributes:", dir(s1_ssl4eo))
-        logging.info("Using projected and posthead embeddings for cross-modal retrieval")
-        retrieval_s1 = s1_ssl4eo.projected
-        retrieval_s2 = s2_ssl4eo.projected
-        retrieval_metrics = compute_cross_modal_retrieval(retrieval_s1, retrieval_s2, curvature=curvature)
-        retrieval_path = Path(output_dir) / "ssl4eo_retrieval_projected.json"
-        retrieval_path.write_text(json.dumps(retrieval_metrics, indent=2, sort_keys=True))
-        logging.info("SSL4EO projected cross-modal retrieval metrics: %s", retrieval_metrics)
+    # elif use_projected_retrieval:
+    #     # print the attributes of s1_ssl4eo
+    #     # print("SSL4EO S1 EmbeddingBundle attributes:", dir(s1_ssl4eo))
+    #     logging.info("Using projected embeddings for cross-modal retrieval")
+    #     # print number of samples
+    #     print(f'Num samples for cross-modal: {s1_ssl4eo.projected.shape[0]}')
+    #     retrieval_s1 = s1_ssl4eo.projected
+    #     retrieval_s2 = s2_ssl4eo.projected
+    #     retrieval_metrics = compute_cross_modal_retrieval(retrieval_s1, retrieval_s2, curvature=curvature)
+    #     retrieval_path = Path(output_dir) / "ssl4eo_retrieval_projected.json"
+    #     retrieval_metrics['num_samples'] = s1_ssl4eo.projected.shape[0]
+    #     retrieval_path.write_text(json.dumps(retrieval_metrics, indent=2, sort_keys=True))
+    #     logging.info("SSL4EO projected cross-modal retrieval metrics: %s", retrieval_metrics)
 
-        # retrieval_s1 = s1_ssl4eo.posthead
-        # retrieval_s2 = s2_ssl4eo.posthead
-        # retrieval_metrics = compute_cross_modal_retrieval(retrieval_s1, retrieval_s2, curvature=curvature)
-        # retrieval_path = Path(output_dir) / "ssl4eo_retrieval_posthead.json"
-        # retrieval_path.write_text(json.dumps(retrieval_metrics, indent=2, sort_keys=True))
-        # logging.info("SSL4EO posthead cross-modal retrieval metrics: %s", retrieval_metrics)
+    # else:
+    #     print('Did not do cross-modal retrieval')
+
 
 
 __all__ = ["ModelEvalConfig", "run_full_evaluation"]
 
 
-# python evaluation/unified_evaluation.py --model-in-channels 12 --ssl4eo-subset-size 3 --ciip-epoch 10 --model-path '2025_11_22-08_31_28-model_resnet50-lr_0.001-b_6-j_6-p_amp_bfloat16';
-# python evaluation/unified_evaluation.py --model-in-channels 12 --ssl4eo-subset-size 3 --ciip-epoch 30 --model-path '2025_11_22-08_31_28-model_resnet50-lr_0.001-b_6-j_6-p_amp_bfloat16';
-# python evaluation/unified_evaluation.py --model-in-channels 12 --ssl4eo-subset-size 3 --ciip-epoch 75;
-# python evaluation/unified_evaluation.py --model-in-channels 12 --ssl4eo-subset-size 3 --ciip-epoch 40;
-# python evaluation/unified_evaluation.py --model-in-channels 12 --disable-eurosat --disable-neuco --ssl4eo-subset-size 3
+# python evaluation/unified_evaluation.py --model-in-channels 12 --ciip-epoch 10 --ssl4eo-subset-size 50 --model-path '2025_11_22-08_31_28-model_resnet50-lr_0.001-b_6-j_6-p_amp_bfloat16';
+# python evaluation/unified_evaluation.py --model-in-channels 12 --ciip-epoch 30 --ssl4eo-subset-size 50 --model-path '2025_11_22-08_31_28-model_resnet50-lr_0.001-b_6-j_6-p_amp_bfloat16';
+# python evaluation/unified_evaluation.py --model-in-channels 12 --ciip-epoch 90 --ssl4eo-subset-size 50 --model-path '2025_11_22-08_31_28-model_resnet50-lr_0.001-b_6-j_6-p_amp_bfloat16';
+# python evaluation/unified_evaluation.py --model-in-channels 12 --ciip-epoch 75 --ssl4eo-subset-size 50;
 
 
 if __name__ == "__main__":
@@ -1793,18 +1855,18 @@ if __name__ == "__main__":
     
     parser.add_argument("--tsne-samples", type=int, default=1500, help="Samples used for t-SNE visualisations.")
     parser.add_argument("--pca-samples", type=int, default=5000, help="Samples used for PCA visualisations.")
-    parser.add_argument("--ssl4eo-subset-size", type=int, default=150, help="Subset size for SSL4EO embedding extraction.")
+    parser.add_argument("--ssl4eo-subset-size", type=int, default=5, help="Subset size for SSL4EO embedding extraction.")
     parser.add_argument("--ssl4eo-subset-seed", type=int, default=0, help="Subset seed for SSL4EO sampling.")
     parser.add_argument("--neuco-modalities", nargs="*", default=["s2l2a"], help="NeuCo modalities to export.")
     parser.add_argument("--ssl4eo-s2-tier", choices=['s2l1c', 's2l2a'], default='s2l2a', help="Sentinel-2 data tier to use for SSL4EO embeddings.")
-    parser.add_argument("--neuco-seasons", type=int, default=4, help="Number of seasons for NeuCo extraction.") # i believe these are averaged
+    parser.add_argument("--neuco-seasons", type=int, default=1, help="Number of seasons for NeuCo extraction.") # i believe these are averaged
     parser.add_argument(
         "--evaluation-modality",
         choices=["s1", "s2"],
         default="s2",
         help="Sentinel modality to use for EuroSAT and NeuCo evaluations.",
     )
-    parser.add_argument("--neuco-resize", type=int, nargs=2, help="Resize dimensions for NeuCo images.")
+    # parser.add_argument("--neuco-resize", type=int, nargs=2, help="Resize dimensions for NeuCo images.")
 
     parser.add_argument("--disable-eurosat", action="store_true", help="Skip EuroSAT linear probe evaluation.")
     parser.add_argument("--disable-neuco", action="store_true", help="Skip NeuCo benchmark evaluation.")
@@ -1825,15 +1887,16 @@ if __name__ == "__main__":
     # '2025_11_12-12_28_55-model_resnet50-lr_0.001-b_2-j_6-p_amp': 'curv_init_0.1', epochs ..., increased lr for curvature param
 
     # if model_path arg is empty, set default
-    if args.model_in_channels and args.neuco_modalities:
+    if args.model_in_channels:# and args.neuco_modalities:
         if args.model_in_channels == 12:
             print('Setting modalities to s2l2a')
-            args.neuco_modalities = ['s2l2a']
+            # args.neuco_modalities = ['s2l2a']
             args.ssl4eo_s2_tier = 's2l2a'
         if args.model_in_channels == 13:
             print('Setting modalities to s2l1c')
-            args.neuco_modalities = ['s2l1c']
+            # args.neuco_modalities = ['s2l1c']
             args.ssl4eo_s2_tier = 's2l1c'
+        
 
         
             
@@ -1867,6 +1930,10 @@ if __name__ == "__main__":
         args.checkpoint = None
     args.eurosat_root=Path("/local/ms-data/EuroSAT/")
     args.neuco_root=Path("/local/ms-data/SSL4EO-S12-downstream/data")
+
+    if args.model_type == "scalemae_large_rgb" or 'rgb' in (args.model_weights or ''):
+        args.ssl4eo_s2_tier = 'rgb'
+
 
     
     if args.model_type == 'croma':
@@ -1916,5 +1983,3 @@ if __name__ == "__main__":
         ssl4eo_s2_tier=args.ssl4eo_s2_tier,
     )
     run_full_evaluation(cfg)
-
-

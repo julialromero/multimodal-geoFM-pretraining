@@ -28,7 +28,7 @@ from torchgeo.models import (
 )
 
 from ciip.model_ciip import CIIP, LorentzCIIP
-
+from torchvision.models import resnet152, ResNet152_Weights
 
 _CROMA_MODULE: Optional[ModuleType] = None
 
@@ -54,6 +54,9 @@ class RandomConvFeatures(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         features = self.conv(x)
         return features.mean(dim=(2, 3))
+
+
+
 
 
 def _load_croma_module() -> ModuleType:
@@ -101,7 +104,7 @@ class EvaluationAdapter(nn.Module):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Return backbone, post-head and projected embeddings for ``images``."""
 
-        print(f'Image shape in compute_embeddings: {images.shape if isinstance(images, torch.Tensor) else "N/A"}')
+        # print(f'Image shape in compute_embeddings: {images.shape if isinstance(images, torch.Tensor) else "N/A"}')
 
         backbone = self.compute_backbone(images, modality=modality)
         posthead = self.compute_posthead(images, modality=modality)
@@ -119,7 +122,7 @@ class EvaluationAdapter(nn.Module):
             raise TypeError("Multi-modal dictionaries are not supported by this adapter")
 
         tensor = batch
-        print(f'Preparing inputs for modality: {modality}, tensor shape: {tensor.shape if isinstance(tensor, torch.Tensor) else "N/A"}')
+        # print(f'Preparing inputs for modality: {modality}, tensor shape: {tensor.shape if isinstance(tensor, torch.Tensor) else "N/A"}')
         if tensor.ndim == 5 and tensor.shape[1] == 1:  # (B, T, C, H, W)
             tensor = tensor.squeeze(1)
 
@@ -195,6 +198,7 @@ class CiipEvaluationAdapter(EvaluationAdapter):
                 replaced_modules.append((attr, module))
                 setattr(encoder, attr, nn.Identity())
         try:
+
             features = encoder(images.type(dtype))
         finally:
             for attr, module in replaced_modules:
@@ -382,10 +386,43 @@ class TorchGeoResNetAdapter(EvaluationAdapter):
         return features
 
 
+# Sentinel-2 central wavelengths in microns (13 bands, B1..B12 incl. B10)
+S2_WAVELENGTHS_UM: List[float] = [
+    0.443,  # B1
+    0.490,  # B2
+    0.560,  # B3
+    0.665,  # B4
+    0.705,  # B5
+    0.740,  # B6
+    0.783,  # B7
+    0.842,  # B8
+    0.865,  # B8A
+    0.945,  # B9
+    1.375,  # B10 (cirrus)
+    1.610,  # B11
+    2.190,  # B12
+]
+
+# CROMA uses 12 optical bands (B1–B12 without B10)
+S2_WAVELENGTHS_UM_OPTICAL_12: List[float] = [
+    w for i, w in enumerate(S2_WAVELENGTHS_UM) if i != 10
+]
+
 def _extract_backbone_outputs(backbone: nn.Module, images: torch.Tensor) -> torch.Tensor:
     """Forward images through a backbone and pool features for evaluation."""
 
-    if hasattr(backbone, "forward_features"):
+    # if backbone is tpe dofa
+    if backbone.__class__.__name__ == "DOFA":
+        # print(images.shape)
+        features = backbone.forward_features(images, wavelengths=S2_WAVELENGTHS_UM)
+        # print(features.shape)
+        if features.ndim == 3:
+            features = features.mean(dim=1)  # (B, D)
+        elif features.ndim != 2:
+            raise RuntimeError(f"Unexpected DOFA feature shape: {features.shape}")
+
+
+    elif hasattr(backbone, "forward_features"):
         features = backbone.forward_features(images)
     else:
         features = backbone(images)
@@ -434,6 +471,14 @@ class BackboneOnlyAdapter(EvaluationAdapter):
         self.dtype_s1 = dtype
 
     def compute_backbone(self, images: torch.Tensor, modality: str = "s2") -> torch.Tensor:
+        # # get in channels
+        # in_channels = images.shape[1]
+        # model_in_channels = self.encoder_s2.conv1.in_channels
+        # if in_channels != model_in_channels:
+        #     if model_in_channels == 3:
+        #         # select rgb from images (3,2,1)
+        #         images = images[:, [3, 2, 1], :, :]
+
         if modality.lower() != "s2":
             raise ValueError("This adapter only supports Sentinel-2 imagery.")
         return _extract_backbone_outputs(self.encoder_s2, images)
@@ -441,6 +486,14 @@ class BackboneOnlyAdapter(EvaluationAdapter):
     def compute_embeddings(
         self, images: Any, modality: str = "s2"
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+        # # get in channels
+        # in_channels = images.shape[1]
+        # model_in_channels = self.encoder_s2.conv1.in_channels
+        # if in_channels != model_in_channels:
+        #     if model_in_channels == 3:
+        #         # select rgb from images (3,2,1)
+        #         images = images[:, [3, 2, 1], :, :]
+
         backbone = self.compute_backbone(images, modality=modality)
         return backbone, None, None
 
@@ -559,7 +612,7 @@ class CromaEvaluationAdapter(EvaluationAdapter):
                     "CROMA adapters expect tensors or modality dictionaries for embedding extraction."
                 )
             candidate = {"optical": None, "sar": None}
-            print(modality)
+            # print(modality)
             if modality.lower() == "s1":
                 candidate["sar"] = images
             else:
@@ -610,8 +663,8 @@ class CromaEvaluationAdapter(EvaluationAdapter):
 
         with torch.no_grad():
             if modality == 's2':
-                print('Encoding Optical modality')
-                print(inputs.shape)
+                # print('Encoding Optical modality')
+                # print(inputs.shape)
                 optical_enc = self.base_model.s2_encoder(imgs=inputs, attn_bias=attn_bias)
                 optical_gap = self.base_model.GAP_FFN_s2(optical_enc.mean(dim=1))
                 outputs["optical_encodings"] = optical_enc
@@ -619,7 +672,7 @@ class CromaEvaluationAdapter(EvaluationAdapter):
 
             elif modality == 's1': 
                 # print('Encoding SAR modality')
-                print(inputs.shape)
+                # print(inputs.shape)
                 sar_enc = self.base_model.s1_encoder(imgs=inputs, attn_bias=attn_bias)
                 sar_gap = self.base_model.GAP_FFN_s1(sar_enc.mean(dim=1))
                 outputs["sar_encodings"] = sar_enc
@@ -693,15 +746,10 @@ class CromaEvaluationAdapter(EvaluationAdapter):
                 return value
         return None
     
-
-
-    
-
 def _clean_state_dict(raw_state: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
     """Strip DataParallel prefixes from checkpoint state dictionaries."""
 
     return {key.replace("module.", ""): value for key, value in raw_state.items()}
-
 
 def _infer_projection_dims(state_dict: Dict[str, torch.Tensor]) -> Tuple[int, int]:
     """Infer embedding and pre-projection dimensionality from the checkpoint."""
@@ -753,14 +801,9 @@ def build_model_from_checkpoint(checkpoint: Path) -> Tuple[nn.Module, bool]:
 
     print(f'Is Lorentz model: {is_lorentz}')
 
-
-
     # infer nummber of s2 bands in checkpoint
     s2_bands = _infer_s2_bands(cleaned)
     logging.info(f"Inferred S2 bands from checkpoint: {s2_bands}")
-
-    # quit()
-
 
     kwargs = dict(
         embed_dim=embed_dim,
@@ -784,7 +827,7 @@ def build_model_from_checkpoint(checkpoint: Path) -> Tuple[nn.Module, bool]:
         model = CIIP(**kwargs)
 
     missing, unexpected = model.load_state_dict(cleaned, strict=True)
-    print(cleaned.keys())
+    # print(cleaned.keys())
     #
     if missing or unexpected:
         logging.warning("Checkpoint loaded with missing=%s, unexpected=%s", missing, unexpected)

@@ -52,13 +52,17 @@ S2L1C_STD = [786.523, 849.702, 875.318, 1143.578, 1126.248, 1161.98, 1273.505, 1
 S2L2A_MEAN = [1793.243, 1924.863, 2184.553, 2340.936, 2671.402, 3240.082, 3468.412, 3563.244, 3627.704, 3711.071, 3416.714, 2849.625]
 S2L2A_STD = [1160.144, 1201.092, 1219.943, 1397.225, 1400.035, 1373.136, 1429.17, 1485.025, 1447.836, 1652.703, 1471.002, 1365.307]
 
+S2L2A_RGB_MEAN = [2340.936, 2184.553, 1924.863]
+S2L2A_RGB_STD = [1397.225, 1219.943, 1201.092]
+
 S1GRD_MEAN = [-12.577, -20.265]
 S1GRD_STD = [5.179, 5.872]
 
 MODALITY_STATS: Dict[str, Tuple[np.ndarray, np.ndarray]] = {
     "s2l1c": (S2L1C_MEAN, S2L1C_STD),
     "s2l2a": (S2L2A_MEAN, S2L2A_STD),
-    # add s1 if you use it
+    "s1": (S1GRD_MEAN, S1GRD_STD),
+    "s2l2a_rgb": (S2L2A_RGB_MEAN, S2L2A_RGB_STD)
 }
 
 # # ------------------------
@@ -408,6 +412,7 @@ class E2SChallengeDataset(Dataset):
                  concat: bool = True,
                  output_file_name: bool = False,
                  shift_s2_channels: bool = True,
+                 rgb: bool = False
                 ):
         """Dataset class for the embed2scale challenge data
 
@@ -446,6 +451,7 @@ class E2SChallengeDataset(Dataset):
         self.transform = transform
         self.modalities = modalities
         self.dataset_name = dataset_name
+        self.rgb = rgb
         assert isinstance(seasons, int) and (1 <= seasons <= 4), "Number of seasons must be integer between 1 and 4."
         
         self.seasons = seasons
@@ -502,6 +508,9 @@ class E2SChallengeDataset(Dataset):
         # if there are 5 dimensions, remove the first dimension
         if data.ndim == 5 and data.shape[0] == 1:
             data = data.squeeze(0)
+
+        if self.rgb:
+            data = data[:, [3, 2, 1], :, :]  # select RGB 
         
         # Transform
         if self.transform is not None:
@@ -524,7 +533,7 @@ class E2SChallengeDataset(Dataset):
 
 def collate_fn(batch):
     print("Collating batch of size:", len(batch))
-    print(batch.shape if isinstance(batch, torch.Tensor) else "Batch is a list.")
+    # print(batch.shape if isinstance(batch, torch.Tensor) else "Batch is a list.")
     if isinstance(batch, dict) or isinstance(batch, torch.Tensor):
         # Single sample
         return batch
@@ -577,6 +586,8 @@ class SSL4EONormalize:
             modality = 's2l1c'
         elif C == 12:
             modality = 's2l2a'
+        elif C == 3:
+            modality = 's2l2a_rgb'
         elif C == 2:
             modality = 's1'
         else:
@@ -591,7 +602,31 @@ class SSL4EONormalize:
         img = img.float()
         return (img - self.mean.to(img.device)) / self.std.to(img.device)
     
+class CromaNormalize(nn.Module):
+    def __init__(self, use_8_bit: bool = False):
+        super().__init__()
+        self.use_8_bit = use_8_bit
 
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # taken from SatMAE and SeCo
+        x = x.float()
+
+        imgs = []
+        for channel in range(x.shape[1]):
+            min_value = x[:, channel, :, :].mean() - 2 * x[:, channel, :, :].std()
+            max_value = x[:, channel, :, :].mean() + 2 * x[:, channel, :, :].std()
+
+            if self.use_8_bit:
+                img = (x[:, channel, :, :] - min_value) / (max_value - min_value) * 255.0
+                img = torch.clip(img, 0, 255).unsqueeze(dim=1).to(torch.uint8)
+                imgs.append(img)
+            else:
+                img = (x[:, channel, :, :] - min_value) / (max_value - min_value)
+                img = torch.clip(img, 0, 1).unsqueeze(dim=1)
+                imgs.append(img)
+
+        return torch.cat(imgs, dim=1)
+        
 class Divideby10000Normalize:
     """
     Normalizes image tensor for DINO: scales to [0,1] range by dividing by 10000.
@@ -599,7 +634,7 @@ class Divideby10000Normalize:
 
     def __call__(self, img: torch.Tensor) -> torch.Tensor:
         img = img.float() / 10000.0
-        return torch.clamp(img, 0.0, 1.0)
+        return img #torch.clamp(img, 0.0, 1.0)
 
 class TemporalMean(nn.Module):
     """

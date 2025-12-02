@@ -344,6 +344,7 @@ class CIIP(nn.Module):
     def encode_s1(self, s1, normalize, post_head: bool = True):
         if not post_head and normalize:
             raise ValueError("Cannot normalize before projection head. Set post_head=True when normalize=True.")
+        # print("encoding s1 with shape: {}".format(s1.shape))
         features = self.encoder_s1(s1.type(self.dtype_s1))
         if post_head:
             proj_layer = getattr(self.encoder_s1, "proj", None)

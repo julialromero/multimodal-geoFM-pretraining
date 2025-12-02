@@ -305,6 +305,7 @@ def _prepare_cka_tensor(tensor: torch.Tensor, take: Optional[int] = None) -> Opt
     # if take is not None and take > 0:
     #     tensor = tensor[:take]
     # print("Prepared CKA tensor with shape:", tensor.shape)
+    # tensor = tensor.to('cuda')
     return tensor.to(dtype=torch.float32)
 
 
@@ -319,81 +320,274 @@ _SUFFIX_ORDER = {
 }
 
 def _layer_sort_key(name: str) -> Tuple[int, int, int, str]:
-    # Expects something like "layer1.0.conv1"
+    """
+    Sort key for layer names that handles multiple naming conventions:
+    - ResNet: "layer1.0.conv1" -> (layer_idx=1, block_idx=0, suffix_rank, suffix)
+    - CROMA: "layer0.attn.ln" -> (layer_idx=0, sublayer_rank, operation_rank, operation)
+    - DOFA/ScaleMAE: "blocks.0.attn.layernorm" -> (layer_idx=0, sublayer_rank, operation_rank, operation)
+    """
     parts = name.split(".")
-    if len(parts) != 3:
-        # Fallback: put weird names at the end, sorted by name
-        return (999, 999, 999, name)
-
-    layer_str, block_str, suffix = parts
-
-    # "layer1" -> 1
-    layer_idx = int(layer_str.replace("layer", ""))
-    block_idx = int(block_str)
-
-    suffix_rank = _SUFFIX_ORDER.get(suffix, 998)  # unknown suffixes before total fallback
-
-    return (layer_idx, block_idx, suffix_rank, suffix)
+    
+    # Handle 4-part names: "blocks.0.attn.layernorm"
+    if len(parts) == 4 and parts[0] == "blocks":
+        _, layer_str, sublayer, operation = parts
+        
+        if layer_str.isdigit():
+            layer_idx = int(layer_str)
+            
+            # DOFA/ScaleMAE sublayer and operation mapping
+            sublayer_rank = {"attn": 0, "mlp": 1}.get(sublayer, 999)
+            operation_rank = {
+                "layernorm": 0, "ln": 0,           # Layer norm
+                "op": 1, "core": 1,                # Core operation  
+                "scale": 2,                        # Scale (DOFA-specific)
+                "residual": 3                      # Residual
+            }.get(operation, 999)
+            
+            return (layer_idx, sublayer_rank, operation_rank, f"{sublayer}.{operation}")
+        else:
+            return (999, 999, 999, name)
+    
+    # Handle 3-part names: "layer0.attn.ln" or "layer1.0.conv1"
+    elif len(parts) == 3:
+        layer_str, middle_str, suffix = parts
+        
+        # Extract layer index
+        if layer_str.startswith("layer"):
+            layer_idx = int(layer_str.replace("layer", ""))
+        else:
+            return (999, 999, 999, name)
+        
+        # Check if middle part is numeric (ResNet) or text (CROMA)
+        if middle_str.isdigit():
+            # ResNet style: "layer1.0.conv1"
+            block_idx = int(middle_str)
+            suffix_rank = _SUFFIX_ORDER.get(suffix, 998)
+            return (layer_idx, block_idx, suffix_rank, suffix)
+        
+        else:
+            # CROMA style: "layer0.attn.ln"
+            sublayer = middle_str
+            operation = suffix
+            
+            sublayer_rank = {"attn": 0, "ffn": 1, "mlp": 1}.get(sublayer, 999)
+            operation_rank = {
+                "ln": 0, "layernorm": 0,           # Layer norm
+                "core": 1, "op": 1,                # Core operation
+                "scale": 2,                        # Scale
+                "residual": 3                      # Residual
+            }.get(operation, 999)
+            
+            return (layer_idx, sublayer_rank, operation_rank, f"{sublayer}.{operation}")
+    
+    # Fallback for other patterns
+    return (999, 999, 999, name)
 
 
 def _order_layers(layer_dict: Dict[str, torch.Tensor]) -> List[str]:
     return sorted(layer_dict.keys(), key=_layer_sort_key)
 
 
-def compute_within_encoder_cka(layer_features: Dict[str, torch.Tensor], cuda_cka) -> Tuple[List[str], Optional[np.ndarray]]:
-    print(f'Computing wihtin encoder CKa')
-    ordered = _order_layers(layer_features) # layer_features #
-    print(f'Ordered layers: {ordered}')
+def compute_cross_encoder_cka(
+    s1_layers: Dict[str, torch.Tensor],
+    s2_layers: Dict[str, torch.Tensor],
+    cuda_cka,
+) -> Tuple[List[str], List[str], Optional[np.ndarray]]:
+    device = "cuda"
+    max_samples = 200
+
+    # Order layer names
+    names_s1 = _order_layers(s1_layers)
+    names_s2 = _order_layers(s2_layers)
+
+    if not names_s1 or not names_s2:
+        return [], [], None
+
+    # ---- Decide shared subsampling indices from first layer of each encoder ----
+    first_s1 = names_s1[0]
+    t1 = _prepare_cka_tensor(s1_layers[first_s1])
+    if t1 is None:
+        raise ValueError(f"CKA preparation returned None for S1 layer {first_s1}")
+
+    first_s2 = names_s2[0]
+    t2 = _prepare_cka_tensor(s2_layers[first_s2])
+    if t2 is None:
+        raise ValueError(f"CKA preparation returned None for S2 layer {first_s2}")
+
+    N1 = t1.shape[0]
+    N2 = t2.shape[0]
+    if N1 != N2:
+        raise ValueError(
+            f"S1 and S2 must have same #samples for CKA: "
+            f"S1[{first_s1}] has {N1}, S2[{first_s2}] has {N2}"
+        )
+
+    N = N1
+    if N > max_samples:
+        idx = torch.randperm(N)[:max_samples]
+        t1 = t1[idx]
+        t2 = t2[idx]
+    else:
+        idx = None
+
+    # ---- Prepare S1 on CPU with shared idx ----
+    prepared_s1: Dict[str, torch.Tensor] = {first_s1: t1}
+    for name in names_s1[1:]:
+        t = _prepare_cka_tensor(s1_layers[name])
+        if t is None:
+            raise ValueError(f"CKA preparation returned None for S1 layer {name}")
+        if t.shape[0] != N:
+            raise ValueError(
+                f"All S1 layers must have same #samples for CKA: "
+                f"{first_s1} has {N}, but {name} has {t.shape[0]}"
+            )
+        if idx is not None:
+            t = t[idx]
+        prepared_s1[name] = t
+
+    # ---- Prepare S2 on CPU with same idx ----
+    prepared_s2: Dict[str, torch.Tensor] = {first_s2: t2}
+    for name in names_s2[1:]:
+        t = _prepare_cka_tensor(s2_layers[name])
+        if t is None:
+            raise ValueError(f"CKA preparation returned None for S2 layer {name}")
+        if t.shape[0] != N:
+            raise ValueError(
+                f"All S2 layers must have same #samples for CKA: "
+                f"{first_s2} has {N}, but {name} has {t.shape[0]}"
+            )
+        if idx is not None:
+            t = t[idx]
+        prepared_s2[name] = t
+
+    names_1 = [name for name in names_s1 if name in prepared_s1]
+    names_2 = [name for name in names_s2 if name in prepared_s2]
+
+    if not names_1 or not names_2:
+        return [], [], None
+
+    matrix = np.full((len(names_1), len(names_2)), np.nan, dtype=np.float32)
+
+    # ---- Pairwise CKA: only current pair on CUDA ----
+    for i, name_i in enumerate(names_1):
+        x_cpu = prepared_s1[name_i]  # [N', D]
+        x = x_cpu.to(device, non_blocking=True)
+
+        for j, name_j in enumerate(names_2):
+            y_cpu = prepared_s2[name_j]
+            assert x_cpu.dtype == y_cpu.dtype, (
+                f"Mismatched dtypes in CKA computation: "
+                f"{x_cpu.dtype} vs {y_cpu.dtype}"
+            )
+
+            y = y_cpu.to(device, non_blocking=True)
+
+            value = cuda_cka.linear_CKA(x, y)
+            if value is None:
+                raise ValueError("CKA computation returned None")
+
+            val = float(value.clamp(0.0, 1.0).item())
+            matrix[i, j] = val
+
+            del y, value
+
+        del x
+
+    return names_1, names_2, matrix
+
+
+
+
+def compute_within_encoder_cka(
+    layer_features: Dict[str, torch.Tensor],
+    cuda_cka,
+) -> Tuple[List[str], Optional[np.ndarray]]:
+    # print("Computing within encsoder CKA")
+
+    device = "cuda"
+    max_samples = 200
+
+    # Order layer names
+    # print(layer_features.keys())
+    ordered = _order_layers(layer_features)
+
+    # Prepare features and choose ONE subsampling index shared by all layers
     prepared: Dict[str, torch.Tensor] = {}
-    for name in ordered:
-        tensor = _prepare_cka_tensor(layer_features[name])
-        if tensor is not None:
-            prepared[name] = tensor
-        else:
+
+    if not ordered:
+        return [], None
+
+    # Use the first layer to decide subsampling indices
+    first_name = ordered[0]
+    t0 = _prepare_cka_tensor(layer_features[first_name])
+    if t0 is None:
+        raise ValueError(f"CKA preparation returned None for layer {first_name}")
+
+    N = t0.shape[0]
+    if N > max_samples:
+        idx = torch.randperm(N)[:max_samples]
+        t0 = t0[idx]
+    else:
+        idx = None  # no subsampling needed
+
+    prepared[first_name] = t0
+
+    # Prepare all other layers with the SAME idx
+    for name in ordered[1:]:
+        t = _prepare_cka_tensor(layer_features[name])
+        if t is None:
             raise ValueError(f"CKA preparation returned None for layer {name}")
+
+        if t.shape[0] != N:
+            raise ValueError(
+                f"All layers must have same #samples for CKA: "
+                f"{first_name} has {N}, but {name} has {t.shape[0]}"
+            )
+
+        if idx is not None:
+            t = t[idx]
+
+        prepared[name] = t
+
     names = [name for name in ordered if name in prepared]
     size = len(names)
     if size == 0:
         return [], None
+
     matrix = np.full((size, size), np.nan, dtype=np.float32)
-    for i, name_i in enumerate(names):
-        x = prepared[name_i]
+
+    # Diagonal is 1.0 by definition
+    for i in range(size):
         matrix[i, i] = 1.0
+
+    # Pairwise CKA – only current row/column on CUDA
+    for i, name_i in enumerate(names):
+        x_cpu = prepared[name_i]  # [N', D] on CPU
+        x = x_cpu.to(device, non_blocking=True)
+
         for j in range(i + 1, size):
-            # assert that dtype matches
-            assert x.dtype == prepared[names[j]].dtype, "Mismatched dtypes in CKA computation: {} vs {}".format(x.dtype, prepared[names[j]].dtype)  
-            value = cuda_cka.linear_CKA(x, prepared[names[j]])
+            y_cpu = prepared[names[j]]
+            assert x_cpu.dtype == y_cpu.dtype, (
+                f"Mismatched dtypes in CKA computation: "
+                f"{x_cpu.dtype} vs {y_cpu.dtype}"
+            )
+
+            y = y_cpu.to(device, non_blocking=True)
+
+            value = cuda_cka.linear_CKA(x, y)
             if value is None:
                 raise ValueError("CKA computation returned None")
-            if value >1.1:
-                raise ValueError("CKA computation returned value > 1.1: {}".format(value))
-            matrix[i, j] = matrix[j, i] = np.clip(value.cpu(), 0.0, 1.0)
+
+            val = float(value.clamp(0.0, 1.0).item())
+            matrix[i, j] = matrix[j, i] = val
+
+            del y, value
+
+        del x
+        torch.cuda.empty_cache()
+
     return names, matrix
 
-
-def compute_cross_encoder_cka(
-    s1_layers: Dict[str, torch.Tensor],
-    s2_layers: Dict[str, torch.Tensor],
-    cuda_cka
-) -> Tuple[List[str], List[str], Optional[np.ndarray]]:
-    names_s1 = _order_layers(s1_layers)
-    names_s2 = _order_layers(s2_layers)
-    prepared_s1 = {name: _prepare_cka_tensor(s1_layers[name]) for name in names_s1}
-    prepared_s1 = {k: v for k, v in prepared_s1.items() if v is not None}
-    prepared_s2 = {name: _prepare_cka_tensor(s2_layers[name]) for name in names_s2}
-    prepared_s2 = {k: v for k, v in prepared_s2.items() if v is not None}
-    names_1 = [name for name in names_s1 if name in prepared_s1]
-    names_2 = [name for name in names_s2 if name in prepared_s2]
-    if not names_1 or not names_2:
-        return [], [], None
-    matrix = np.full((len(names_1), len(names_2)), np.nan, dtype=np.float32)
-    for i, name_i in enumerate(names_1):
-        for j, name_j in enumerate(names_2):
-            value = cuda_cka.linear_CKA(prepared_s1[name_i], prepared_s2[name_j])
-            if value is None:
-                raise ValueError("CKA computation returned None")
-            matrix[i, j] = np.clip(value.cpu(), 0.0, 1.0)
-    return names_1, names_2, matrix
 
 
 def _build_ssl4eo_dataset(
@@ -441,6 +635,7 @@ def _register_layer_hooks(
             tensor = tensor.detach()
             tensor = tensor.flatten(start_dim=1)
             tensor = tensor.to(dtype=torch.float32)
+            tensor = tensor.detach().to("cpu")
             cache.append(tensor)
 
         return hook
@@ -454,11 +649,45 @@ def _register_layer_hooks(
 
         return block_hook
     
+    def _attach_layers_rcf(encoder: nn.Module, key: str):
+        """
+        Attach hooks for RandomConvFeatures:
+
+        conv[0] : first conv  (in_chans -> 256)   -> "<key>: conv.0"
+        conv[2] : second conv (256 -> out_dim)    -> "<key>: conv.2"
+        encoder : final pooled embedding          -> "<key>: block_out"
+        """
+        if not hasattr(encoder, "conv") or not isinstance(encoder.conv, nn.Sequential):
+            raise ValueError(f"Expected encoder with .conv Sequential, got: {type(encoder)}")
+
+        # First conv: conv[0]
+        if len(encoder.conv) > 0 and isinstance(encoder.conv[0], nn.Conv2d):
+            conv1_name = "conv.0"
+            handles.append(
+                encoder.conv[0].register_forward_hook(
+                    _make_layer_hook(key, conv1_name)
+                )
+            )
+        # Second conv: conv[2]
+        if len(encoder.conv) > 2 and isinstance(encoder.conv[2], nn.Conv2d):
+            conv2_name = "conv.2"
+            handles.append(
+                encoder.conv[2].register_forward_hook(
+                    _make_layer_hook(key, conv2_name)
+                )
+            )
+        # Final pooled representation (what forward() returns)
+        block_out_name = "block_out"
+        handles.append(
+            encoder.register_forward_hook(
+                _make_block_hook(key, block_out_name)
+            )
+        )
+
+
 
     def _attach_layers_resnet(encoder: nn.Module, key: str):
         for name, module in encoder.named_modules():
-            # print('Examining module:', name, module.__class__.__name__)
-            # Treat any 'Bottleneck' with a bn3 as a bottleneck block
             if module.__class__.__name__ == "Bottleneck" and hasattr(module, "bn2"):
                 bn2_name = f"{name}.bn2"
                 handles.append(
@@ -466,38 +695,13 @@ def _register_layer_hooks(
                         _make_layer_hook(key, bn2_name)
                     )
                 )
-
                 block_out_name = f"{name}.block_out"
                 handles.append(
                     module.register_forward_hook(
                         _make_block_hook(key, block_out_name)
                     )
                 )
-            # else:
-                layer_names = [
-                    "conv1",
-                    "bn1",
-                    'conv2',
-                    # 'bn2',
-                    'conv3',
-                    'bn3',
-                    # "fc",
-                ]
-
-                for ln in layer_names:
-                    if module.__class__.__name__ == "Bottleneck" and hasattr(module, ln):
-                        handles.append(
-                            module.register_forward_hook(
-                                _make_layer_hook(key, name + '.' + ln)
-                            )
-                        )
-                        # print('Attached hook to layer:', name + '.' + ln)
-            # for name in layer_names:
-                # module = getattr(encoder, name, None)
-                # print('Checking for layer:', name, 'Found:', module is not None)
-                # if not isinstance(module, nn.Module):
-                #     continue
-                # handles.append(module.register_forward_hook(_make_layer_hook(key, name)))
+               
 
     def _attach_layers_croma_vit(vit: nn.Module, key: str):
         """
@@ -722,163 +926,161 @@ def _register_layer_hooks(
                     )
 
     def _attach_layers_scalemae(encoder: nn.Module, key: str):
-    """
-    Attach 4 hook points for each sublayer (attention + MLP) in each ScaleMAE ViT Block.
+        """
+        Attach 4 hook points for each sublayer (attention + MLP) in each ScaleMAE ViT Block.
 
-    For a Block named "blocks.i":
+        For a Block named "blocks.i":
 
-      Attention sublayer:
-        blocks.i.attn.layernorm : output of norm1(x)
-        blocks.i.attn.scale     : output of ls1(attn_out)
-        blocks.i.attn.op        : output of attn(norm1(x))
-        blocks.i.attn.residual  : x_in + drop_path1(ls1(attn(norm1(x))))
+        Attention sublayer:
+            blocks.i.attn.layernorm : output of norm1(x)
+            blocks.i.attn.scale     : output of ls1(attn_out)
+            blocks.i.attn.op        : output of attn(norm1(x))
+            blocks.i.attn.residual  : x_in + drop_path1(ls1(attn(norm1(x))))
 
-      MLP sublayer:
-        blocks.i.mlp.layernorm  : output of norm2(x_attn)
-        blocks.i.mlp.scale      : output of ls2(mlp_out)
-        blocks.i.mlp.op         : output of mlp(norm2(x_attn))
-        blocks.i.mlp.residual   : x_attn + drop_path2(ls2(mlp(norm2(x_attn))))
+        MLP sublayer:
+            blocks.i.mlp.layernorm  : output of norm2(x_attn)
+            blocks.i.mlp.scale      : output of ls2(mlp_out)
+            blocks.i.mlp.op         : output of mlp(norm2(x_attn))
+            blocks.i.mlp.residual   : x_attn + drop_path2(ls2(mlp(norm2(x_attn))))
 
-    Assumes timm-style Block forward:
-        x = x + drop_path1(ls1(attn(norm1(x))))
-        x = x + drop_path2(ls2(mlp(norm2(x))))
-    """
-    # Per-block buffers keyed by module id
-    block_buf = {}
+        Assumes timm-style Block forward:
+            x = x + drop_path1(ls1(attn(norm1(x))))
+            x = x + drop_path2(ls2(mlp(norm2(x))))
+        """
+        # Per-block buffers keyed by module id
+        block_buf = {}
 
-    for name, module in encoder.named_modules():
-        # ScaleMAE uses timm-like ViT Block modules
-        if module.__class__.__name__ == "Block":
-            block_id = id(module)
-            block_name = name  # e.g. "blocks.0", "blocks.1", ...
+        for name, module in encoder.named_modules():
+            # ScaleMAE uses timm-like ViT Block modules
+            if module.__class__.__name__ == "Block":
+                block_id = id(module)
+                block_name = name  # e.g. "blocks.0", "blocks.1", ...
 
-            block_buf[block_id] = {
-                "name": block_name,
-                "x_in": None,    # input to the whole block
-                "dp1_out": None, # output of drop_path1(ls1(attn_out))
-                "dp2_out": None, # output of drop_path2(ls2(mlp_out))
-            }
-            buf = block_buf[block_id]
+                block_buf[block_id] = {
+                    "name": block_name,
+                    "x_in": None,    # input to the whole block
+                    "dp1_out": None, # output of drop_path1(ls1(attn_out))
+                    "dp2_out": None, # output of drop_path2(ls2(mlp_out))
+                }
+                buf = block_buf[block_id]
 
-            # ---------- Block-level hooks to reconstruct residuals ----------
+                # ---------- Block-level hooks to reconstruct residuals ----------
 
-            def _block_pre_hook(m, inputs, buf=buf):
-                # Save input to the whole block
-                x_in = inputs[0]
-                buf["x_in"] = x_in
+                def _block_pre_hook(m, inputs, buf=buf):
+                    # Save input to the whole block
+                    x_in = inputs[0]
+                    buf["x_in"] = x_in
 
-            def _block_post_hook(m, inputs, output, buf=buf):
-                """
-                At this point, the block forward is done and we have:
-                  x_in      : input to the block
-                  dp1_out   : drop_path1(ls1(attn_out))
-                  dp2_out   : drop_path2(ls2(mlp_out))
+                def _block_post_hook(m, inputs, output, buf=buf):
+                    """
+                    At this point, the block forward is done and we have:
+                    x_in      : input to the block
+                    dp1_out   : drop_path1(ls1(attn_out))
+                    dp2_out   : drop_path2(ls2(mlp_out))
 
-                We reconstruct:
-                  x_attn = x_in + dp1_out
-                  x_mlp  = x_attn + dp2_out
-                and feed them through _make_layer_hook as "residual" activations.
-                """
-                x_in = buf["x_in"]
-                dp1_out = buf["dp1_out"]
-                dp2_out = buf["dp2_out"]
-                block_name = buf["name"]
+                    We reconstruct:
+                    x_attn = x_in + dp1_out
+                    x_mlp  = x_attn + dp2_out
+                    and feed them through _make_layer_hook as "residual" activations.
+                    """
+                    x_in = buf["x_in"]
+                    dp1_out = buf["dp1_out"]
+                    dp2_out = buf["dp2_out"]
+                    block_name = buf["name"]
 
-                if x_in is None or dp1_out is None or dp2_out is None:
-                    # Incomplete info; don't crash
-                    return
+                    if x_in is None or dp1_out is None or dp2_out is None:
+                        # Incomplete info; don't crash
+                        return
 
-                # Attention residual (after first sublayer)
-                x_attn = x_in + dp1_out
-                # MLP residual (after second sublayer)
-                x_mlp = x_attn + dp2_out
+                    # Attention residual (after first sublayer)
+                    x_attn = x_in + dp1_out
+                    # MLP residual (after second sublayer)
+                    x_mlp = x_attn + dp2_out
 
-                # Use your existing hook factory to store these
-                attn_res_name = f"{block_name}.attn.residual"
-                mlp_res_name = f"{block_name}.mlp.residual"
+                    # Use your existing hook factory to store these
+                    attn_res_name = f"{block_name}.attn.residual"
+                    mlp_res_name = f"{block_name}.mlp.residual"
 
-                attn_res_hook = _make_layer_hook(key, attn_res_name)
-                mlp_res_hook = _make_layer_hook(key, mlp_res_name)
+                    attn_res_hook = _make_layer_hook(key, attn_res_name)
+                    mlp_res_hook = _make_layer_hook(key, mlp_res_name)
 
-                # Signature: hook(module, inputs, output)
-                attn_res_hook(m, (None,), x_attn)
-                mlp_res_hook(m, (None,), x_mlp)
+                    # Signature: hook(module, inputs, output)
+                    attn_res_hook(m, (None,), x_attn)
+                    mlp_res_hook(m, (None,), x_mlp)
 
-                # Reset buffer
-                buf["x_in"] = None
-                buf["dp1_out"] = None
-                buf["dp2_out"] = None
+                    # Reset buffer
+                    buf["x_in"] = None
+                    buf["dp1_out"] = None
+                    buf["dp2_out"] = None
 
-            handles.append(module.register_forward_pre_hook(_block_pre_hook))
-            handles.append(module.register_forward_hook(_block_post_hook))
+                handles.append(module.register_forward_pre_hook(_block_pre_hook))
+                handles.append(module.register_forward_hook(_block_post_hook))
 
-            # ---------- Attention sublayer hooks ----------
+                # ---------- Attention sublayer hooks ----------
 
-            if hasattr(module, "norm1"):
-                ln_name = f"{block_name}.attn.layernorm"
-                handles.append(
-                    module.norm1.register_forward_hook(
-                        _make_layer_hook(key, ln_name)
+                if hasattr(module, "norm1"):
+                    ln_name = f"{block_name}.attn.layernorm"
+                    handles.append(
+                        module.norm1.register_forward_hook(
+                            _make_layer_hook(key, ln_name)
+                        )
                     )
-                )
 
-            if hasattr(module, "attn"):
-                op_name = f"{block_name}.attn.op"
-                handles.append(
-                    module.attn.register_forward_hook(
-                        _make_layer_hook(key, op_name)
+                if hasattr(module, "attn"):
+                    op_name = f"{block_name}.attn.op"
+                    handles.append(
+                        module.attn.register_forward_hook(
+                            _make_layer_hook(key, op_name)
+                        )
                     )
-                )
 
-            if hasattr(module, "ls1"):
-                scale_name = f"{block_name}.attn.scale"
-                handles.append(
-                    module.ls1.register_forward_hook(
-                        _make_layer_hook(key, scale_name)
+                if hasattr(module, "ls1"):
+                    scale_name = f"{block_name}.attn.scale"
+                    handles.append(
+                        module.ls1.register_forward_hook(
+                            _make_layer_hook(key, scale_name)
+                        )
                     )
-                )
 
-            if hasattr(module, "drop_path1"):
-                def _dp1_hook(m, inputs, output, buf=buf):
-                    buf["dp1_out"] = output
-                handles.append(
-                    module.drop_path1.register_forward_hook(_dp1_hook)
-                )
-
-            # ---------- MLP sublayer hooks ----------
-
-            if hasattr(module, "norm2"):
-                ln2_name = f"{block_name}.mlp.layernorm"
-                handles.append(
-                    module.norm2.register_forward_hook(
-                        _make_layer_hook(key, ln2_name)
+                if hasattr(module, "drop_path1"):
+                    def _dp1_hook(m, inputs, output, buf=buf):
+                        buf["dp1_out"] = output
+                    handles.append(
+                        module.drop_path1.register_forward_hook(_dp1_hook)
                     )
-                )
 
-            if hasattr(module, "mlp"):
-                mlp_op_name = f"{block_name}.mlp.op"
-                handles.append(
-                    module.mlp.register_forward_hook(
-                        _make_layer_hook(key, mlp_op_name)
+                # ---------- MLP sublayer hooks ----------
+
+                if hasattr(module, "norm2"):
+                    ln2_name = f"{block_name}.mlp.layernorm"
+                    handles.append(
+                        module.norm2.register_forward_hook(
+                            _make_layer_hook(key, ln2_name)
+                        )
                     )
-                )
 
-            if hasattr(module, "ls2"):
-                mlp_scale_name = f"{block_name}.mlp.scale"
-                handles.append(
-                    module.ls2.register_forward_hook(
-                        _make_layer_hook(key, mlp_scale_name)
+                if hasattr(module, "mlp"):
+                    mlp_op_name = f"{block_name}.mlp.op"
+                    handles.append(
+                        module.mlp.register_forward_hook(
+                            _make_layer_hook(key, mlp_op_name)
+                        )
                     )
-                )
 
-            if hasattr(module, "drop_path2"):
-                def _dp2_hook(m, inputs, output, buf=buf):
-                    buf["dp2_out"] = output
-                handles.append(
-                    module.drop_path2.register_forward_hook(_dp2_hook)
-                )
+                if hasattr(module, "ls2"):
+                    mlp_scale_name = f"{block_name}.mlp.scale"
+                    handles.append(
+                        module.ls2.register_forward_hook(
+                            _make_layer_hook(key, mlp_scale_name)
+                        )
+                    )
 
-
+                if hasattr(module, "drop_path2"):
+                    def _dp2_hook(m, inputs, output, buf=buf):
+                        buf["dp2_out"] = output
+                    handles.append(
+                        module.drop_path2.register_forward_hook(_dp2_hook)
+                    )
 
 
 
@@ -892,6 +1094,8 @@ def _register_layer_hooks(
 
     print('ENCODER S1 TYPE:', type(encoder_s1))
     print('ENCODER S2 TYPE:', type(encoder_s2))
+    # print model architecture
+
 
     # if the encoders are resnets
     if encoder_s1 is not None:
@@ -899,7 +1103,7 @@ def _register_layer_hooks(
         if 'ResNet' in enc_type1:
             print('Attaching ResNet S1 layers')
             _attach_layers_resnet(encoder_s1, "s1")
-        elif 'ViT' in enc_type1:
+        elif 'croma' in enc_type1.lower():
             print('Attaching CromaViT S1 layers')
             _attach_layers_croma_vit(encoder_s1, "s1")
         else:
@@ -912,20 +1116,24 @@ def _register_layer_hooks(
             print("Attaching ResNet S2 layers")
             _attach_layers_resnet(encoder_s2, "s2")
 
-        elif "DOFA" in enc_type:
+        elif "DOFA" in enc_type or "ScaleMAE" in enc_type or 'VisionTransformer' in enc_type:
             print("Attaching DOFA ViT S2 layers")
             _attach_layers_dofa(encoder_s2, "s2")
 
-        elif "ScaleMAE" in enc_type:
-            print("Attaching ScaleMAE ViT S2 layers")
-            _attach_layers_scalemae(encoder_s2, "s2")
+        # elif "ScaleMAE" in enc_type:
+        #     print("Attaching ScaleMAE ViT S2 layers")
+        #     _attach_layers_scalemae(encoder_s2, "s2")
 
-        elif "ViT" in enc_type:
+        elif "croma" in enc_type.lower():
             # This is your CROMA ViT (and any other plain ViT you want to treat the same way)
             print("Attaching CromaViT S2 layers")
             _attach_layers_croma_vit(encoder_s2, "s2")
+        elif "RandomConvFeatures" in enc_type:
+            print('Attaching RandomConvFeatures S2 layers')
+            _attach_layers_rcf(encoder_s2, "s2")
 
         else:
+            print(enc_type)
             raise NotImplementedError(
                 f"Layer hooks not implemented for S2 encoder type: {type(encoder_s2)}"
             )
@@ -933,7 +1141,7 @@ def _register_layer_hooks(
  
 
     print("Registered layer hooks for embedding extraction.")
-    print("Layers for S1 encoder:", list(layer_caches["s1"].keys()))
+    # print("Layers for S1 encoder:", list(layer_caches["s1"].keys()))
     # print("Layers for S2 encoder:", list(layer_caches["s2"].keys()))
     print("Total hooks registered:", len(handles))
     # print("Hook handles:", handles)
@@ -945,87 +1153,120 @@ def _encoder_accepts_lorentz(method) -> bool:
     inst = getattr(method, "__self__", None)  
     return getattr(inst, "is_lorentz", False)
     
-def plot_epoch_diagnostics_transformer(
+def plot_epoch_diagnostics_croma(
     epoch_diag: EpochDiagnostics, output_dir: Path, label: str
-    ) -> Path:
+) -> Path:
     """
     Plot CKA diagnostics for CROMA-style Transformer encoders.
 
-    Layout (1x4):
-      Row 0 (S2): [all] [LN hooks] [core hooks] [residual hooks]
+    Layout (2x4):
+      Row 0 (S1): [all] [LN hooks] [core hooks] [residual hooks]
+      Row 1 (S2): [all] [LN hooks] [core hooks] [cross-encoder]
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    fig, axes = plt.subplots(1, 4, figsize=(20, 5))
+    fig, axes = plt.subplots(2, 4, figsize=(20, 10))
 
     print(
-        f"Plotting Transformer CKA matrices:\n"
-        # f"  S1 layers={epoch_diag.s1_layers}\n"
-        # f"  S2 layers={epoch_diag.s2_layers}"
+        f"Plotting CROMA CKA matrices:\n"
+        f"  S1 layers={epoch_diag.s1_layers}\n"
+        f"  S2 layers={epoch_diag.s2_layers}"
     )
 
-    # [0]: S2 full (all hooks)
+    # === TOP ROW (S1 ENCODER) ===
+    
+    # [0,0]: S1 full (all hooks)
     _plot_cka(
-        axes[0],
+        axes[0, 0],
+        epoch_diag.s1_within_cka,
+        epoch_diag.s1_layers,
+        epoch_diag.s1_layers,
+        title="S1 within-encoder (all hooks)",
+    )
+
+    # [0,1]: S1 LN hooks
+    s1_ln_cka = epoch_diag.s1_group_within_cka.get("ln")
+    s1_ln_layers = epoch_diag.s1_group_layers.get("ln", [])
+    _plot_cka(
+        axes[0, 1],
+        s1_ln_cka,
+        s1_ln_layers,
+        s1_ln_layers,
+        title="S1 within-encoder (LN hooks)",
+    )
+
+    # [0,2]: S1 core hooks  
+    s1_core_cka = epoch_diag.s1_group_within_cka.get("core")
+    s1_core_layers = epoch_diag.s1_group_layers.get("core", [])
+    _plot_cka(
+        axes[0, 2],
+        s1_core_cka,
+        s1_core_layers,
+        s1_core_layers,
+        title="S1 within-encoder (core hooks)",
+    )
+
+    # [0,3]: S1 residual hooks
+    s1_residual_cka = epoch_diag.s1_group_within_cka.get("residual")
+    s1_residual_layers = epoch_diag.s1_group_layers.get("residual", [])
+    _plot_cka(
+        axes[0, 3],
+        s1_residual_cka,
+        s1_residual_layers,
+        s1_residual_layers,
+        title="S1 within-encoder (residual hooks)",
+    )
+
+    # === BOTTOM ROW (S2 ENCODER) ===
+    
+    # [1,0]: S2 full (all hooks)
+    _plot_cka(
+        axes[1, 0],
         epoch_diag.s2_within_cka,
         epoch_diag.s2_layers,
         epoch_diag.s2_layers,
         title="S2 within-encoder (all hooks)",
-        xlabel="Layer",
-        ylabel="Layer",
     )
 
-    if epoch_diag.s2_within_cka is not None and epoch_diag.s2_layers:
-        s2_groups = _split_transformer_hook_indices(epoch_diag.s2_layers)
+    # [1,1]: S2 LN hooks
+    s2_ln_cka = epoch_diag.s2_group_within_cka.get("ln")
+    s2_ln_layers = epoch_diag.s2_group_layers.get("ln", [])
+    _plot_cka(
+        axes[1, 1],
+        s2_ln_cka,
+        s2_ln_layers,
+        s2_ln_layers,
+        title="S2 within-encoder (LN hooks)",
+    )
 
-        def _plot_subset(ax, indices: list[int], title: str) -> None:
-            if not indices:
-                ax.text(
-                    0.5,
-                    0.5,
-                    "CKA unavailable",
-                    ha="center",
-                    va="center",
-                    transform=ax.transAxes,
-                    color="gray",
-                )
-                ax.set_title(title)
-                ax.set_xticks([])
-                ax.set_yticks([])
-                return
+    # [1,2]: S2 core hooks
+    s2_core_cka = epoch_diag.s2_group_within_cka.get("core")
+    s2_core_layers = epoch_diag.s2_group_layers.get("core", [])
+    _plot_cka(
+        axes[1, 2],
+        s2_core_cka,
+        s2_core_layers,
+        s2_core_layers,
+        title="S2 within-encoder (core hooks)",
+    )
 
-            sub_mat = epoch_diag.s2_within_cka[np.ix_(indices, indices)]
-            sub_names = [epoch_diag.s2_layers[i] for i in indices]
-            _plot_cka(
-                ax,
-                sub_mat,
-                sub_names,
-                sub_names,
-                title=title,
-            )
-
-        # [1]: LN hooks
-        _plot_subset(axes[1], s2_groups["ln"], "S2 within-encoder (LN hooks)")
-
-        # [2]: core hooks
-        _plot_subset(axes[2], s2_groups["core"], "S2 within-encoder (core hooks)")
-
-        # [3]: residual hooks
-        _plot_subset(
-            axes[3], s2_groups["residual"], "S2 within-encoder (residual hooks)"
-        )
-    else:
-        for j in range(1, 4):
-            axes[j].axis("off")
+    # [1,3]: Cross-encoder CKA
+    _plot_cka(
+        axes[1, 3],
+        epoch_diag.cross_cka,
+        epoch_diag.cross_s2_layers,
+        epoch_diag.cross_s1_layers,
+        title="Cross encoder",
+    )
 
     fig.suptitle(
-        f"Transformer embedding diagnostics — {epoch_diag.label}\n"
+        f"CROMA embedding diagnostics — {epoch_diag.label}\n"
         f"Epoch {epoch_diag.epoch} | Samples: {len(epoch_diag.ids)}*64={len(epoch_diag.ids)*64}",
         fontsize=16,
     )
     fig.tight_layout(rect=[0, 0, 1, 0.94])
 
-    output_path = output_dir / "embedding_diagnostics_transformer.png"
+    output_path = output_dir / "embedding_diagnostics_croma.png"
     fig.savefig(output_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
     return output_path
@@ -1050,8 +1291,8 @@ def plot_epoch_diagnostics_scalemae(
         epoch_diag.s2_layers,
         epoch_diag.s2_layers,
         title="S2 within-encoder (all hooks)",
-        xlabel="Layer",
-        ylabel="Layer",
+        # xlabel="Layer",
+        # ylabel="Layer",
     )
 
     if epoch_diag.s2_within_cka is not None and epoch_diag.s2_layers:
@@ -1117,10 +1358,25 @@ def extract_embeddings_for_dataset(
     *,
     input_dtype: torch.dtype,
     device: torch.device,
+    max_batches_cka: int,
     autocast,
+    register_layer_hooks: bool = True,
 ) -> Tuple[ModalityEmbeddings, ModalityEmbeddings, List[str]]:
     base_dataset, indices = _unwrap_subset(dataset)
-    layer_cache, handles, capture_controller = _register_layer_hooks(model)
+    if register_layer_hooks:
+        layer_cache, handles, capture_controller = _register_layer_hooks(model)
+    else:
+        layer_cache = {"s1": {}, "s2": {}}
+        handles = []
+
+        class _NoopController:
+            enabled = False
+            @contextlib.contextmanager
+            def suspend(self):
+                yield
+
+        capture_controller = _NoopController()
+
     s1_vectors: List[torch.Tensor] = []
     s2_vectors: List[torch.Tensor] = []
     s1_norm_vectors: List[torch.Tensor] = []
@@ -1139,16 +1395,20 @@ def extract_embeddings_for_dataset(
     def _to_tensor(array) -> torch.Tensor:
         tensor = torch.as_tensor(array)
         if tensor.ndim == 3:
-            return tensor
+            # Add batch dimension for single patch samples.
+            return tensor.unsqueeze(0)
         if tensor.ndim == 4:
-            return tensor.squeeze(0)
+            # Preserve batch if it already exists; only squeeze explicit singleton.
+            return tensor if tensor.shape[0] != 1 else tensor.squeeze(0)
         raise ValueError("Unsupported sample shape for embedding extraction")
 
-    # print len of dataset
     print("Extracting embeddings for num files (64 images per file)", len(indices))
+
+    # -------- NEW: counter for how many samples contributed to CKA --------
+    cka_samples = 0
+    cka_limit = max_batches_cka  # e.g., 40
+
     with torch.no_grad():
-        # Keep hooks active across the entire extraction loop so CKA receives
-        # activations from every sample before we clean them up.
         try:
             for dataset_idx in indices:
                 sample = base_dataset[dataset_idx]
@@ -1163,22 +1423,14 @@ def extract_embeddings_for_dataset(
                 if s1_img is None or s2_img is None:
                     continue
 
-                # print shape of s1 and s2 images
-                # print(f"Sample UID={uid}: S1 image shape={s1_img.shape}, S2 image shape={s2_img.shape}")
-
-                # S1 tensor shape with unsqueeze(0): torch.Size([1, 64, 2, 224, 224])
-                # without unsqueeze(0): S1 shape=torch.Size([64, 2, 224, 224])
                 s1_tensor = _to_tensor(s1_img).to(device=device, dtype=input_dtype)
                 s2_tensor = _to_tensor(s2_img).to(device=device, dtype=input_dtype)
 
-                # print shapes
-                # print(f"Processing sample UID={uid}: S1 shape={s1_tensor.shape}, S2 shape={s2_tensor.shape}")
-
                 ctx = (
-                        torch.cuda.amp.autocast(enabled=False)
-                        if s2_tensor.is_cuda
-                        else contextlib.nullcontext()
-                        )
+                    torch.autocast(device_type="cuda")
+                    if s2_tensor.is_cuda
+                    else contextlib.nullcontext()
+                )
 
                 s1_raw = None
                 s2_raw = None
@@ -1188,91 +1440,138 @@ def extract_embeddings_for_dataset(
                 s2_backbone = None
 
                 with ctx:
-                    # print(model)
-                    assert has_posthead == has_projected, "Model must have both posthead and projected methods or re-implement."
+                    assert has_posthead == has_projected, (
+                        "Model must have both posthead and projected methods or re-implement."
+                    )
 
                     if has_posthead:
-                        # print('Extracting raw embeddings')
-                        if model.encoder_s1 is not None:
-                            s1_raw = model.compute_posthead(s1_tensor, modality='s1')
-                        s2_raw = model.compute_posthead(s2_tensor, modality='s2')
+                        # --------------------------------------------------
+                        # Decide whether this sample should be captured for CKA
+                        # --------------------------------------------------
+                        capture_for_cka = cka_samples < cka_limit
 
-                        assert s2_raw is not None, "S2 raw embedding extraction returned None"
+                        if capture_for_cka:
+                            # Hooks ACTIVE: this sample contributes to CKA
+                            if model.encoder_s1 is not None:
+                                s1_raw = model.compute_posthead(s1_tensor, modality="s1")
+                            s2_raw = model.compute_posthead(s2_tensor, modality="s2")
 
+                            assert s2_raw is not None, "S2 raw embedding extraction returned None"
 
+                            cka_samples += 1  # this sample counted toward the 40
+                        else:
+                            # Hooks SUSPENDED: no more CKA activations after limit
+                            with capture_controller.suspend():
+                                if model.encoder_s1 is not None:
+                                    s1_raw = model.compute_posthead(s1_tensor, modality="s1")
+                                s2_raw = model.compute_posthead(s2_tensor, modality="s2")
+                                assert s2_raw is not None, "S2 raw embedding extraction returned None"
+
+                        # Backbone / projected embeddings never contribute to CKA
+                        # so they stay under suspend as you already had:
                         with capture_controller.suspend():
-                            # now extract backbone embeddings
-                            # print('Extracting backbone embeddings')
                             if model.encoder_s1 is not None:
                                 s1_backbone = model.compute_backbone(
-                                    s1_tensor.float(), modality='s1'
+                                    s1_tensor.float(), modality="s1"
                                 )
                             s2_backbone = model.compute_backbone(
-                            s2_tensor.float(), modality='s2')
+                                s2_tensor.float(), modality="s2"
+                            )
 
-
-                            # print('Extracting norm embeddings')
                             if model.encoder_s1 is not None:
-                                s1_norm = model.compute_projected(s1_tensor, modality='s1')
-
-                            s2_norm = model.compute_projected(s2_tensor, modality='s2')
-
+                                s1_norm = model.compute_projected(s1_tensor, modality="s1")
+                            s2_norm = model.compute_projected(s2_tensor, modality="s2")
 
                     else:
-                        # print('Extracting backbone embeddings')
+                        # No posthead: just backbone (already under no hooks for CKA)
                         if model.encoder_s1 is not None:
                             s1_backbone = model.compute_backbone(
-                                s1_tensor.float(), modality='s1'
+                                s1_tensor.float(), modality="s1"
                             )
                             assert s1_backbone is not None, "S1 backbone extraction returned None"
                         s2_backbone = model.compute_backbone(
-                            s2_tensor.float(), modality='s2')
+                            s2_tensor.float(), modality="s2"
+                        )
 
-
+                # --- rest of your code unchanged: push vectors to lists, etc. ---
+                def _flatten_embeddings(t: torch.Tensor) -> torch.Tensor:
+                    return t.flatten(start_dim=1) if t.ndim > 2 else t
 
                 if s1_raw is not None:
-                    if s1_raw.squeeze(0).dim() != 2:
-                        raise ValueError("Extracted S1 embeddings must be 2D after squeezing")
-                    s1_vectors.append(s1_raw.squeeze(0).cpu().to(torch.float32))
+                    s1_vectors.append(_flatten_embeddings(s1_raw).cpu().to(torch.float32))
                 if s1_norm is not None:
-                    if s1_norm.squeeze(0).dim() != 2:
-                        raise ValueError("Extracted normalized S1 embeddings must be 2D after squeezing")
-                    s1_norm_vectors.append(s1_norm.squeeze(0).cpu().to(torch.float32))
+                    s1_norm_vectors.append(_flatten_embeddings(s1_norm).cpu().to(torch.float32))
 
                 if s2_raw is not None:
-                    if s2_raw.squeeze(0).dim() != 2:
-                        raise ValueError("Extracted S2 embeddings must be 2D after squeezing")
-                    s2_vectors.append(s2_raw.squeeze(0).cpu().to(torch.float32))
+                    s2_vectors.append(_flatten_embeddings(s2_raw).cpu().to(torch.float32))
                 if s2_norm is not None:
-                    if s2_norm.squeeze(0).dim() != 2:
-                        raise ValueError("Extracted normalized S2 embeddings must be 2D after squeezing")
-                    s2_norm_vectors.append(s2_norm.squeeze(0).cpu().to(torch.float32))
+                    s2_norm_vectors.append(_flatten_embeddings(s2_norm).cpu().to(torch.float32))
 
                 if model.encoder_s1 is not None and s1_backbone is not None:
-                    s1_backbone_vectors.append(s1_backbone.squeeze(0).cpu().to(torch.float32))
+                    s1_backbone_vectors.append(_flatten_embeddings(s1_backbone).cpu().to(torch.float32))
                 if s2_backbone is not None:
-                    s2_backbone_vectors.append(s2_backbone.squeeze(0).cpu().to(torch.float32))
+                    s2_backbone_vectors.append(_flatten_embeddings(s2_backbone).cpu().to(torch.float32))
+
                 sample_ids.append(str(uid))
+
         finally:
             for handle in handles:
                 handle.remove()
+
 
     
 
     def _stack(list_tensors: List[torch.Tensor]) -> Optional[torch.Tensor]:
         if not list_tensors:
             return None
-        # if there are 2 dims, stack on first dim
         if list_tensors[0].dim() == 2:
-            # if the first dim is 64
-            assert list_tensors[0].shape[0] == 64, "Expected first dimension to be 64"
             return torch.cat(list_tensors, dim=0)
         return torch.stack(list_tensors, dim=0)
     
     print('Gathering layer activations')
     
-    s1_layers = {name: torch.cat(tensors, dim=0) for name, tensors in layer_cache["s1"].items() if tensors}
-    s2_layers = {name: torch.cat(tensors, dim=0) for name, tensors in layer_cache["s2"].items() if tensors}
+    # s1_layers = {name: torch.cat(tensors, dim=0) for name, tensors in layer_cache["s1"].items() if tensors}
+    # s2_layers = {name: torch.cat(tensors, dim=0) for name, tensors in layer_cache["s2"].items() if tensors}
+
+    # Process layers incrementally to avoid memory explosion
+    s1_layers = {}
+    s2_layers = {}
+    
+    # Process S1 layers
+    for name, tensors in layer_cache["s1"].items():
+        if tensors:
+            # print(f"Processing S1 layer: {name} with {len(tensors)} tensors")
+            try:
+                s1_layers[name] = torch.cat(tensors, dim=0)
+            except RuntimeError as e:
+                print(f"Failed to concatenate S1 layer {name}: {e}")
+                # Clear the tensors to free memory
+                del tensors
+                layer_cache["s1"][name] = []
+                torch.cuda.empty_cache() if torch.cuda.is_available() else None
+                continue
+            # Clear the cache immediately after processing
+            layer_cache["s1"][name] = []
+
+    # Process S2 layers
+    for name, tensors in layer_cache["s2"].items():
+        if tensors:
+            # print(f"Processing S2 layer: {name} with {len(tensors)} tensors")
+            try:
+                s2_layers[name] = torch.cat(tensors, dim=0)
+            except RuntimeError as e:
+                print(f"Failed to concatenate S2 layer {name}: {e}")
+                # Clear the tensors to free memory
+                del tensors
+                layer_cache["s2"][name] = []
+                torch.cuda.empty_cache() if torch.cuda.is_available() else None
+                continue
+            # Clear the cache immediately after processing
+            layer_cache["s2"][name] = []
+
+    # Clear the entire cache
+    layer_cache.clear()
+    torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
     # for name, tensors in layer_cache["s2"].items():
     #     print(f"S2 Layer captured: {name} with {len(tensors)} tensors")
@@ -1625,11 +1924,11 @@ def plot_epoch_diagnostics(epoch_diag: EpochDiagnostics, output_dir: Path, label
 
     fig, axes = plt.subplots(2, 4, figsize=(20, 10))
 
-    print(
-        f'Plotting CKA matrices:\n'
-        # f'  S1 layers={epoch_diag.s1_layers}\n'
-        # f'  S2 layers={epoch_diag.s2_layers}'
-    )
+    # print(
+    #     f'Plotting CKA matrices:\n'
+    #     # f'  S1 layers={epoch_diag.s1_layers}\n'
+    #     # f'  S2 layers={epoch_diag.s2_layers}'
+    # )
 
 
     # === TOP ROW (S1) ===
