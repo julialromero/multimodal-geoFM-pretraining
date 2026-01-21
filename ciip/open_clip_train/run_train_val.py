@@ -65,7 +65,10 @@ def main(args: DictConfig, start_epoch=0):
     framework=args.model.framework,
     pretrain=args.model.pretrain.load,
     s1_weights=args.model.pretrain.s1_weights,
-    s2_weights=args.model.pretrain.s2_weights)
+    s2_weights=args.model.pretrain.s2_weights,
+    patch_masking=getattr(args.model, "patch_masking", False),
+    patch_mask_ratio=getattr(args.model, "patch_mask_ratio", 0.0),
+    patch_mask_overlap=getattr(args.model, "patch_mask_overlap", 0.0))
 
   model = model.to(args.train.device)
 

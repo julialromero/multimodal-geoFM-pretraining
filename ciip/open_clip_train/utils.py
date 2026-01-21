@@ -135,6 +135,14 @@ def create_loss(args):
     if isinstance(vc_covariance_weights, (DictConfig, ListConfig)):
         vc_covariance_weights = OmegaConf.to_object(vc_covariance_weights)
 
+    matryoshka_dims = _resolve_value("matryoshka_dims", loss_cfg, args, default=None)
+    if isinstance(matryoshka_dims, (DictConfig, ListConfig)):
+        matryoshka_dims = OmegaConf.to_object(matryoshka_dims)
+
+    matryoshka_relative_weights = _resolve_value("matryoshka_weights", loss_cfg, args, default=None)
+    if isinstance(matryoshka_relative_weights, (DictConfig, ListConfig)):
+        matryoshka_relative_weights = OmegaConf.to_object(matryoshka_relative_weights)
+
     return CiipLoss(
         local_loss=_resolve_value("local_loss", loss_cfg, args, default=False),
         gather_with_grad=_resolve_value("gather_with_grad", loss_cfg, args, default=False),
@@ -158,6 +166,11 @@ def create_loss(args):
         centroid_lambda=_resolve_value("centroid_lambda", loss_cfg, args, default=0.0),
         centroid_p=_resolve_value("centroid_p", loss_cfg, args, default=1.0),
         centroid_q=_resolve_value("centroid_q", loss_cfg, args, default=0.5),
+        matryoshka_enabled=_resolve_value("matryoshka_enabled", loss_cfg, args, default=False),
+        matryoshka_weight=_resolve_value("matryoshka_weight", loss_cfg, args, default=1.0),
+        matryoshka_dims=matryoshka_dims,
+        matryoshka_relative_weights=matryoshka_relative_weights,
+        matryoshka_normalize=_resolve_value("matryoshka_normalize", loss_cfg, args, default=True),
     )
 
 
@@ -219,17 +232,20 @@ def create_model(args, device, **model_kwargs):
 
     # pre_projection_dim = getattr(args.model, "pre_projection_dim", args.model.embed_dim)
 
+    def _maybe_to_object(value):
+        return OmegaConf.to_object(value) if OmegaConf.is_config(value) else value
+
     if args.loss.hyperbolic:
         print("Using hyperbolic model")
         model = LorentzCIIP(embed_dim=args.model.embed_dim,
             # pre_projection_dim=pre_projection_dim,
             s1_resolution=args.model.s1_resolution,
-            s1_layers=OmegaConf.to_object(args.model.s1_layers),
+            s1_layers=_maybe_to_object(args.model.s1_layers),
             s1_width=args.model.width,
             s1_patch_size=args.model.s1_patch_size, # used by transformer
             s1_bands=len(args.model.s1_bands),
             s2_resolution=args.model.s2_resolution,
-            s2_layers=OmegaConf.to_object(args.model.s2_layers), #Resnet-34
+            s2_layers=_maybe_to_object(args.model.s2_layers), #Resnet-34
             s2_width=args.model.width,
             s2_patch_size=args.model.s2_patch_size, # used by transformer
             s2_bands=len(args.model.s2_bands),
@@ -237,6 +253,9 @@ def create_model(args, device, **model_kwargs):
             pretrain=args.model.pretrain.load,
             s1_weights=args.model.pretrain.s1_weights,
             s2_weights=args.model.pretrain.s2_weights,
+            patch_masking=getattr(args.model, "patch_masking", False),
+            patch_mask_ratio=getattr(args.model, "patch_mask_ratio", 0.0),
+            patch_mask_overlap=getattr(args.model, "patch_mask_overlap", 0.0),
             init_logit_scale=init_logit_scale,
             init_logit_bias=init_logit_bias,
             curv_init=args.loss.curvature_init,
@@ -247,12 +266,12 @@ def create_model(args, device, **model_kwargs):
         model = CIIP(embed_dim=args.model.embed_dim,
             # pre_projection_dim=1024,#pre_projection_dim,
             s1_resolution=args.model.s1_resolution,
-            s1_layers=OmegaConf.to_object(args.model.s1_layers),
+            s1_layers=_maybe_to_object(args.model.s1_layers),
             s1_width=args.model.width,
             s1_patch_size=args.model.s1_patch_size, # used by transformer
             s1_bands=len(args.model.s1_bands),
             s2_resolution=args.model.s2_resolution,
-            s2_layers=OmegaConf.to_object(args.model.s2_layers), #Resnet-34
+            s2_layers=_maybe_to_object(args.model.s2_layers), #Resnet-34
             s2_width=args.model.width,
             s2_patch_size=args.model.s2_patch_size, # used by transformer
             s2_bands=len(args.model.s2_bands),
@@ -260,6 +279,9 @@ def create_model(args, device, **model_kwargs):
             pretrain=args.model.pretrain.load,
             s1_weights=args.model.pretrain.s1_weights,
             s2_weights=args.model.pretrain.s2_weights,
+            patch_masking=getattr(args.model, "patch_masking", False),
+            patch_mask_ratio=getattr(args.model, "patch_mask_ratio", 0.0),
+            patch_mask_overlap=getattr(args.model, "patch_mask_overlap", 0.0),
             init_logit_scale=init_logit_scale,
             init_logit_bias=init_logit_bias)
     # , 

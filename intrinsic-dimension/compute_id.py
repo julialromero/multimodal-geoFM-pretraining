@@ -18,6 +18,25 @@ from s2geo_dataset import S2Geo
 S2_100K_ROOT = Path("/local/ms-data/S2_100K")
 from ciip.evaluation.model_utils import build_model_from_checkpoint
 
+# SSL4EO V1.1
+S2L1C_MEAN = [2607.345, 2393.068, 2320.225, 2373.963, 2562.536, 3110.071, 3392.832, 3321.154, 3583.77, 1838.712, 1021.753, 3205.112, 2545.798]
+S2L1C_STD = [786.523, 849.702, 875.318, 1143.578, 1126.248, 1161.98, 1273.505, 1246.79, 1342.755, 576.795, 45.626, 1340.347, 1145.036]
+
+S2L2A_MEAN = [1793.243, 1924.863, 2184.553, 2340.936, 2671.402, 3240.082, 3468.412, 3563.244, 3627.704, 3711.071, 3416.714, 2849.625]
+S2L2A_STD = [1160.144, 1201.092, 1219.943, 1397.225, 1400.035, 1373.136, 1429.17, 1485.025, 1447.836, 1652.703, 1471.002, 1365.307]
+
+S1GRD_MEAN = [-12.577, -20.265]
+S1GRD_STD = [5.179, 5.872]
+
+S2RGB_MEAN = [2340.936, 2184.553, 1924.863]
+S2RGB_STD = [1397.225, 1219.943, 1201.092]
+
+ssl4eo_s2a_norm_transform = T.Normalize(mean=S2L2A_MEAN, std=S2L2A_STD)
+ssl4eo_s2c_norm_transform = T.Normalize(mean=S2L1C_MEAN, std=S2L1C_STD)
+ssl4eo_s1_norm_transform = T.Normalize(mean=S1GRD_MEAN, std=S1GRD_STD)
+ssl4eo_rgb_norm_transform = T.Normalize(mean=S2RGB_MEAN, std=S2RGB_STD)
+
+
 # ---------------------------------------------------------------------------
 # TorchGeo / Torch models
 # ---------------------------------------------------------------------------
@@ -83,6 +102,7 @@ def build_s2_ssl4eo_loader(
     batch_size: int = 64,
     num_workers: int = 4,
     # rgb_mode: bool = False,
+    return_all_timestamps: bool = False,
 ) -> DataLoader:
     # if s2_transform is None:
     tier = 's2l1c' if in_chans == 13 else 's2l2a'
@@ -93,6 +113,7 @@ def build_s2_ssl4eo_loader(
         s2_tier=tier,
         seasons=[0,1,2,3],
         num_timestamps=4,
+        return_all_timestamps=return_all_timestamps,
         # s2_bands=list(config.ssl4eo_s2_bands),
         transforms=None, # {'s1': data.get_transform('s1', is_train=False), 's2': s2_transform},
         is_train=False,
@@ -121,6 +142,9 @@ def build_s2_ssl4eo_loader(
 
             if x.ndim == 3 and x.shape[0] not in (3, 12, 13):
                 x = x.permute(2, 0, 1).contiguous()
+            elif x.ndim == 5:
+                # (P, T, C, H, W) -> keep shape; channel selection handled below
+                pass
 
             if self.rgb_mode:
                 # print("Before RGB selection:", x.shape)
@@ -132,6 +156,10 @@ def build_s2_ssl4eo_loader(
                     # [P, C, H, W]
                     if x.shape[1] >= 4:
                         x = x[:, [3, 2, 1], ...]
+                elif x.ndim == 5:
+                    # [P, T, C, H, W]
+                    if x.shape[2] >= 4:
+                        x = x[:, :, [3, 2, 1], ...]
                 # print("After RGB selection:", x.shape)
 
             return {"image": x.float(), "label": int(y)}
@@ -236,6 +264,7 @@ def build_s1_ssl4eo_loader(
         num_timestamps=4,
         transforms=None, 
         is_train=False,
+        temporal_agg='mean'
     )
 
     # wrap to return dicts with "image" and "label" keys
@@ -735,14 +764,15 @@ def build_model_specs() -> List[ModelSpec]:
 
     specs.append(
         ModelSpec(
-            name="11-22 CIIP, Epoch10",
+            name="text CIIP, Epoch70",
             in_chans=12,
             rgb_mode=False,
-            builder=lambda: build_model_from_checkpoint('/local/ms-data/SSL4EO/model/2025_11_22-08_31_28-model_resnet50-lr_0.001-b_6-j_6-p_amp_bfloat16/checkpoints/epoch_10.pt')[0], # first returned is model, second is is_loretnz
+            builder=lambda: build_model_from_checkpoint('/local/ms-data/SSL4EO/model/2025_12_2-text-s2/checkpoints/epoch_70.pt')[0], # first returned is model, second is is_loretnz
             feature_fn=_ciip_feature_fn,
             transform=T.Compose([
                 T.CenterCrop((224, 224)),
                 S2ScaleTransform(scale=10000.0),
+                # ssl4eo_s2a_norm_transform,
                 # no additional normalization in the ID pipeline
             ]) #get_transform('s2a', is_train=False)
         )
@@ -750,101 +780,36 @@ def build_model_specs() -> List[ModelSpec]:
 
     specs.append(
         ModelSpec(
-            name="11-22 CIIP, Epoch20",
+            name="11-22 CIIP, Epoch50",
             in_chans=12,
             rgb_mode=False,
-            builder=lambda: build_model_from_checkpoint('/local/ms-data/SSL4EO/model/2025_11_22-08_31_28-model_resnet50-lr_0.001-b_6-j_6-p_amp_bfloat16/checkpoints/epoch_20.pt')[0], # first returned is model, second is is_loretnz
+            builder=lambda: build_model_from_checkpoint('/local/ms-data/SSL4EO/model/2025_11_22-08_31_28-model_resnet50-lr_0.001-b_6-j_6-p_amp_bfloat16/checkpoints/epoch_50.pt')[0], # first returned is model, second is is_loretnz
             feature_fn=_ciip_feature_fn,
             transform=T.Compose([
                 T.CenterCrop((224, 224)),
-                S2ScaleTransform(scale=10000.0),
+                S2ScaleTransform(scale=10000.0)
+                # ssl4eo_s2a_norm_transform,
                 # no additional normalization in the ID pipeline
             ]) #get_transform('s2a', is_train=False)
         )
     )
+
 
     specs.append(
         ModelSpec(
-            name="11-22 CIIP, Epoch30",
+            name="Hyperbolic CIIP, Curv=0.1, Epoch70",
             in_chans=12,
             rgb_mode=False,
-            builder=lambda: build_model_from_checkpoint('/local/ms-data/SSL4EO/model/2025_11_22-08_31_28-model_resnet50-lr_0.001-b_6-j_6-p_amp_bfloat16/checkpoints/epoch_30.pt')[0], # first returned is model, second is is_loretnz
+            builder=lambda: build_model_from_checkpoint('/local/ms-data/SSL4EO/model/2025_11_29-20_57_06-model_resnet50-lr_0.001-b_6-j_6-p_amp_bfloat16/checkpoints/epoch_70.pt')[0], # first returned is model, second is is_loretnz
             feature_fn=_ciip_feature_fn,
             transform=T.Compose([
                 T.CenterCrop((224, 224)),
-                S2ScaleTransform(scale=10000.0),
-                # no additional normalization in the ID pipeline
-            ]) #get_transform('s2a', is_train=False)
+                S2ScaleTransform(scale=10000.0)
+                # ssl4eo_s2a_norm_transform,
+                ]
+            )
         )
     )
-
-    specs.append(
-        ModelSpec(
-            name="11-22 CIIP, Epoch90",
-            in_chans=12,
-            rgb_mode=False,
-            builder=lambda: build_model_from_checkpoint('/local/ms-data/SSL4EO/model/2025_11_22-08_31_28-model_resnet50-lr_0.001-b_6-j_6-p_amp_bfloat16/checkpoints/epoch_90.pt')[0], # first returned is model, second is is_loretnz
-            feature_fn=_ciip_feature_fn,
-            transform=T.Compose([
-                T.CenterCrop((224, 224)),
-                S2ScaleTransform(scale=10000.0),
-                # no additional normalization in the ID pipeline
-            ]) #get_transform('s2a', is_train=False)
-        )
-    )
-
-    # specs.append(
-    #     ModelSpec(
-    #         name="VanillaCIIP, Epoch10",
-    #         in_chans=13,
-    #         rgb_mode=False,
-    #         builder=lambda: build_model_from_checkpoint("/local/ms-data/SSL4EO/model/2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints/epoch_10.pt")[0], # first returned is model, second is is_loretnz
-    #         feature_fn=_ciip_feature_fn,
-    #         transform = get_transform('s2a', is_train=False)
-    #     )
-    # )
-
-    # specs.append(
-    #     ModelSpec(
-    #         name="VanillaCIIP, Epoch10",
-    #         in_chans=13,
-    #         rgb_mode=False,
-    #         builder=lambda: build_model_from_checkpoint("/local/ms-data/SSL4EO/model/2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints/epoch_10.pt")[0], # first returned is model, second is is_loretnz
-    #         feature_fn=_ciip_feature_fn,
-    #         transform = get_transform('s2a', is_train=False)
-    #     )
-    # )
-
-    # specs.append(
-    #     ModelSpec(
-    #         name="VanillaCIIP, Epoch40",
-    #         in_chans=13,
-    #         rgb_mode=False,
-    #         builder=lambda: build_model_from_checkpoint("/local/ms-data/SSL4EO/model/2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints/epoch_40.pt")[0], # first returned is model, second is is_loretnz
-    #         feature_fn=_ciip_feature_fn,
-    #         transform = get_transform('s2a', is_train=False)
-    #     )
-    # )
-
-    # specs.append(
-    #     ModelSpec(
-    #         name="VanillaCIIP, Epoch40",
-    #         in_chans=13,
-    #         rgb_mode=False,
-    #         builder=lambda: build_model_from_checkpoint("/local/ms-data/SSL4EO/model/2025_09_11-14_15_30-model_resnet50-lr_0.0005-b_128-j_6-p_amp/checkpoints/epoch_40.pt")[0], # first returned is model, second is is_loretnz
-    #         feature_fn=_ciip_feature_fn,
-    #     )
-    # )
-
-    # specs.append(
-    #     ModelSpec(
-    #         name="Hyperbolic CIIP, Curv=1, Epoch10",
-    #         in_chans=13,
-    #         rgb_mode=False,
-    #         builder=lambda: build_model_from_checkpoint('/local/ms-data/SSL4EO/model/2025_11_05-21_04_44-model_resnet50-lr_0.001-b_128-j_6-p_amp/checkpoints/epoch_10.pt')[0], # first returned is model, second is is_loretnz
-    #         feature_fn=_ciip_feature_fn,
-    #     )
-    # )
 
     # specs.append(
     #     ModelSpec(
@@ -1113,38 +1078,48 @@ def ssl4eo_collate(batch):
     """
     batch: list of dicts from _SSL4EOWrapped.__getitem__
       each dict has:
-        "image": [64, C, H, W]
+        "image": [P, C, H, W] or [P, T, C, H, W]
         "label": scalar (per 64-pack)
 
     Returns:
-      "image": [B*64, C, H, W]
-      "label": [B*64]  (broadcasted per sample)
+      "image": [B*T*P, C, H, W]  (T=1 in legacy mode)
+      "label": [B*T*P]  (broadcasted per sample)
+      "time_dim": scalar T
+      "patches_per_file": scalar P
     """
-    # Stack along new batch dim: [B, 64, C, H, W]
-    images = torch.stack([b["image"] for b in batch], dim=0)
+    images = torch.stack([b["image"] for b in batch], dim=0)  # [B, P, ...]
     labels = torch.tensor([b["label"] for b in batch], dtype=torch.long)
 
-    B, P, C, H, W = images.shape  # P should be 64
+    # Normalize to [B, P, T, C, H, W]
+    if images.ndim == 5:
+        # [B, P, C, H, W]
+        images = images.unsqueeze(2)
+    elif images.ndim != 6:
+        raise RuntimeError(f"Unexpected SSL4EO batch image shape: {images.shape}")
 
-    # Flatten the (B, P) into one sample dim: [B*P, C, H, W]
-    images = images.view(B * P, C, H, W)
+    B, P, T, C, H, W = images.shape  # P should be 64
+    # Move time dimension before patches for easier flattening
+    images = images.permute(0, 2, 1, 3, 4, 5)  # [B, T, P, C, H, W]
 
-    # Broadcast labels per patch if you want one label per sample
-    labels = labels.repeat_interleave(P)  # [B*P]
+    images = images.reshape(B * T * P, C, H, W)
 
-    return {"image": images, "label": labels}
+    labels = labels.repeat_interleave(T * P)  # [B*T*P]
+
+    return {"image": images, "label": labels, "time_dim": T, "patches_per_file": P}
 
 def build_ssl4eo_like_loader(
     in_chans: int,
     batch_size: int = 64,
     num_workers: int = 12,
     rgb_mode: bool = False,
+    return_all_timestamps: bool = False,
 ) -> DataLoader:
   
     loader = build_s2_ssl4eo_loader(
         in_chans=in_chans,
         batch_size=batch_size,
         num_workers=num_workers,
+        return_all_timestamps=return_all_timestamps,
     )
 
     # bands = _resolve_eurosat_bands(in_chans)
@@ -1176,6 +1151,8 @@ def extract_embeddings_model(
                 x = batch[0]
             else:
                 image, labels = batch['image'], batch['label']
+                time_dim = batch.get("time_dim", 1)
+                patches_per_file = batch.get("patches_per_file", 1)
             image = image.to(device)
             model = model.to(device)
 
@@ -1187,7 +1164,7 @@ def extract_embeddings_model(
                 print('No transform applied during feature extraction.')
 
             # print bandwise averages/stds
-            print(f"Batch {b_idx}: image band means: {image.mean(dim=[0,2,3])}, stds: {image.std(dim=[0,2,3])}")
+            # print(f"Batch {b_idx}: image band means: {image.mean(dim=[0,2,3])}, stds: {image.std(dim=[0,2,3])}")
             # print(image.shape)
             # if band dim differs,
             if in_chans != image.shape[1]:
@@ -1207,6 +1184,17 @@ def extract_embeddings_model(
                 # print model class
                 print(type(model))
                 raise RuntimeError(f"Expected (B, D) features, got {z.shape}")
+            # If time_dim > 1, reshape and average embeddings across the temporal axis per patch
+            if time_dim > 1:
+                # B_total = batch_size_files * T * P
+                # Recover batch_size_files
+                if patches_per_file is None or patches_per_file == 0:
+                    raise RuntimeError("Invalid patches_per_file for temporal averaging.")
+                batch_files = z.shape[0] // (time_dim * patches_per_file)
+                if batch_files == 0:
+                    raise RuntimeError("Failed to infer batch size for temporal averaging.")
+                z = z.view(batch_files, time_dim, patches_per_file, -1).mean(dim=1)  # (B_files, P, D)
+                z = z.reshape(batch_files * patches_per_file, -1)  # (B_files * P, D)
             feats_list.append(z.cpu())
 
             if max_batches is not None and (b_idx + 1) >= max_batches:
@@ -1250,7 +1238,7 @@ def compute_tle(Z: np.ndarray) -> float:
 # ---------------------------------------------------------------------------
 def main() -> None:
     # device = torch.device("cuda")
-    device = 'cuda' #torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = 'cuda:1' #torch.device("cuda" if torch.cuda.is_available() else "cpu")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     specs = build_model_specs() #_s1
@@ -1272,9 +1260,10 @@ def main() -> None:
 
         loader = build_ssl4eo_like_loader(
             in_chans=spec.in_chans,
-            batch_size=16,
+            batch_size=8,
             num_workers=12,
             rgb_mode=spec.rgb_mode,
+            return_all_timestamps=True,  # use all four seasons and average embeddings
         )
 
         # loader = build_ssl4eo_s1_like_loader(

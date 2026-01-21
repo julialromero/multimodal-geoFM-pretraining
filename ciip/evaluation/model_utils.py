@@ -104,12 +104,20 @@ class EvaluationAdapter(nn.Module):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Return backbone, post-head and projected embeddings for ``images``."""
 
-        # print(f'Image shape in compute_embeddings: {images.shape if isinstance(images, torch.Tensor) else "N/A"}')
-
         backbone = self.compute_backbone(images, modality=modality)
-        posthead = self.compute_posthead(images, modality=modality)
         projected = self.compute_projected(images, modality=modality)
-        return backbone, posthead, projected
+        return backbone, None, projected
+
+    def forward(self, images: Any, *, modality: str = "s2", output: str = "projected"):
+        if output == "backbone":
+            return self.compute_backbone(images, modality=modality)
+        if output == "projected":
+            return self.compute_projected(images, modality=modality)
+        if output == "both":
+            backbone = self.compute_backbone(images, modality=modality)
+            projected = self.compute_projected(images, modality=modality)
+            return backbone, projected
+        raise ValueError(f"Unsupported output mode '{output}'.")
 
     def prepare_inputs(self, batch: Any, *, device: torch.device, modality='s2') -> Any:
         """Prepare a batch prior to embedding extraction.
@@ -210,20 +218,6 @@ class CiipEvaluationAdapter(EvaluationAdapter):
             features = features.flatten(start_dim=1)
         return features
 
-    def compute_posthead(self, images: torch.Tensor, modality='s2') -> torch.Tensor:
-        _, dtype, stream = self._default_stream()
-        tensor = images.type(self.dtype_s2 if modality == "s2" else self.dtype_s1)
-
-        if modality == "s1":
-            encode_fn = self.base_model.encode_s1
-        else:
-            encode_fn = self.base_model.encode_s2
-
-        if self.is_lorentz:
-            return encode_fn(tensor, normalize=False, lorentz=False)
-        return encode_fn(tensor, normalize=False)
-    
-
     def compute_projected(self, images: torch.Tensor, modality='s2') -> torch.Tensor:
         # _, dtype, stream = self._default_stream()
         tensor = images.type(self.dtype_s2 if modality == "s2" else self.dtype_s1)
@@ -263,10 +257,19 @@ class TorchGeoResNetAdapter(EvaluationAdapter):
         s2_weights = weights[1]
         if s2_weights is not None:
             state_dict = s2_weights.get_state_dict(progress=True)
-            missing, unexpected = backbone.load_state_dict(state_dict, strict=False)
-            if missing or unexpected:
+            expected_s2_in = state_dict.get("conv1.weight", torch.empty(0)).shape[1] if isinstance(state_dict, dict) else None
+            configured_s2_in = backbone.conv1.weight.shape[1]
+            if expected_s2_in is None or expected_s2_in == configured_s2_in:
+                missing, unexpected = backbone.load_state_dict(state_dict, strict=False)
+                if missing or unexpected:
+                    logging.warning(
+                        "Loaded ResNet50 weights with missing=%s, unexpected=%s", missing, unexpected
+                    )
+            else:
                 logging.warning(
-                    "Loaded ResNet50 weights with missing=%s, unexpected=%s", missing, unexpected
+                    "Skipping S2 weights load: checkpoint expects %d channels but model is configured for %d.",
+                    expected_s2_in,
+                    configured_s2_in,
                 )
         # TorchGeo exposes the classification head via ``fc``. Preserve it as a
         # projection module if available, otherwise fall back to identity.
@@ -303,6 +306,10 @@ class TorchGeoResNetAdapter(EvaluationAdapter):
 
             self.encoder_s1 = s1_backbone
 
+        # If we only configured an S1 encoder (e.g., in_chans != 13), prefer it as the base.
+        if self.encoder_s2 is None and self.encoder_s1 is not None:
+            self.base_model = self.encoder_s1
+
             # # replace fc wtih identity
             # self.encoder_s1.fc = nn.Identity()
             # self.encoder_s2.fc = nn.Identity()
@@ -338,11 +345,6 @@ class TorchGeoResNetAdapter(EvaluationAdapter):
     def compute_embeddings(self, images, modality = "s2"):
         backbone = self.compute_backbone(images, modality=modality)
         return backbone, None, None
-
-    # def compute_posthead(
-    #     self, images: torch.Tensor, modality: str = "s2"
-    # ) -> Optional[torch.Tensor]:
-    #     return None
 
     # def compute_projected(
     #     self, images: torch.Tensor, modality: str = "s2"
@@ -496,6 +498,52 @@ class BackboneOnlyAdapter(EvaluationAdapter):
 
         backbone = self.compute_backbone(images, modality=modality)
         return backbone, None, None
+
+
+class OpenClipVisionAdapter(EvaluationAdapter):
+    """Adapter for OpenCLIP vision encoders (RGB-only)."""
+
+    supports_ssl4eo = True
+
+    def __init__(self, clip_model: nn.Module) -> None:
+        super().__init__()
+        self.base_model = clip_model
+        self.encoder_s2 = getattr(clip_model, "visual", clip_model)
+        self.encoder_s1 = None
+
+        try:
+            self.dtype_s2 = next(self.encoder_s2.parameters()).dtype
+        except StopIteration:
+            self.dtype_s2 = torch.float32
+        self.dtype_s1 = self.dtype_s2
+
+    def prepare_inputs(self, batch: Any, *, device: torch.device, modality: str = "s2") -> torch.Tensor:
+        tensor = super().prepare_inputs(batch, device=device, modality=modality)
+        if isinstance(tensor, torch.Tensor) and tensor.ndim == 3:
+            tensor = tensor.unsqueeze(0)
+        return tensor
+
+    def compute_backbone(self, images: torch.Tensor, modality: str = "s2") -> torch.Tensor:
+        features = self.encoder_s2(images)
+        if isinstance(features, (tuple, list)):
+            features = features[0]
+        if features.ndim == 3:
+            features = features[:, 0]
+        elif features.ndim > 2:
+            features = features.mean(dim=tuple(range(2, features.ndim)))
+        return features
+
+    def compute_projected(self, images: torch.Tensor, modality: str = "s2") -> Optional[torch.Tensor]:
+        encode_image = getattr(self.base_model, "encode_image", None)
+        if encode_image is None:
+            return None
+
+        projected = encode_image(images)
+        if isinstance(projected, (tuple, list)):
+            projected = projected[0]
+        if projected.ndim == 3:
+            projected = projected[:, 0]
+        return projected
 
 
 class CromaEvaluationAdapter(EvaluationAdapter):
@@ -758,6 +806,14 @@ def _infer_projection_dims(state_dict: Dict[str, torch.Tensor]) -> Tuple[int, in
         weight = state_dict["encoder_s2.proj.weight"]
         print(f'Using proj weight to infer dims: {weight.shape}')
         return int(weight.shape[0]), int(weight.shape[1])
+    if "encoder_s2.proj" in state_dict:
+        weight = state_dict["encoder_s2.proj"]
+        print(f'Using proj tensor to infer dims: {weight.shape}')
+        return int(weight.shape[1]), int(weight.shape[0])
+    if "encoder_s1.proj" in state_dict:
+        weight = state_dict["encoder_s1.proj"]
+        print(f'Using S1 proj tensor to infer dims: {weight.shape}')
+        return int(weight.shape[1]), int(weight.shape[0])
     if "encoder_s2.fc.weight" in state_dict:
         weight = state_dict["encoder_s2.fc.weight"]
         print(f'Using fc weight to infer dims: {weight.shape}')
@@ -790,11 +846,60 @@ def _infer_s2_bands(state_dict: Dict[str, torch.Tensor]) -> int:
     logging.warning("Could not infer S2 bands from checkpoint, defaulting to 13")
     return 13
 
-def build_model_from_checkpoint(checkpoint: Path) -> Tuple[nn.Module, bool]:
+def _infer_vit_params(state_dict: Dict[str, torch.Tensor], prefix: str) -> Tuple[int, int, int]:
+    """Infer ViT width, depth, and patch size from checkpoint keys."""
+    conv_key = f"{prefix}.conv1.weight"
+    if conv_key not in state_dict:
+        raise RuntimeError(f"Unable to infer ViT parameters; missing {conv_key}")
+    conv_weight = state_dict[conv_key]
+    width = int(conv_weight.shape[0])
+    patch_size = int(conv_weight.shape[-1])
+
+    layer_indices = set()
+    marker = f"{prefix}.transformer.resblocks."
+    for key in state_dict.keys():
+        if key.startswith(marker):
+            remainder = key[len(marker):]
+            idx_str = remainder.split(".", 1)[0]
+            if idx_str.isdigit():
+                layer_indices.add(int(idx_str))
+    layers = max(layer_indices) + 1 if layer_indices else 0
+    if layers == 0:
+        raise RuntimeError(f"Unable to infer ViT depth from {prefix} resblocks")
+    return width, layers, patch_size
+
+def _infer_ciip_framework(state_dict: Dict[str, torch.Tensor]) -> str:
+    """Heuristic to distinguish CIIP ResNet vs ViT-style encoders."""
+    transformer_markers = (
+        "encoder_s1.transformer.",
+        "encoder_s2.transformer.",
+        "encoder_s1.positional_embedding",
+        "encoder_s2.positional_embedding",
+        "encoder_s1.proj",
+        "encoder_s2.proj",
+    )
+    for key in state_dict:
+        if any(marker in key for marker in transformer_markers):
+            return "transformer"
+    return "resnet50"
+
+
+def build_model_from_checkpoint(
+    checkpoint: Path,
+    *,
+    framework: Optional[str] = None,
+) -> Tuple[nn.Module, bool]:
     """Instantiate a CIIP or LorentzCIIP model from a checkpoint path."""
     ckpt = torch.load(checkpoint, map_location="cpu",  weights_only=False)
     state_dict = ckpt["state_dict"] if "state_dict" in ckpt else ckpt
     cleaned = _clean_state_dict(state_dict)
+
+    # Drop text encoder weights for backwards compatibility. New checkpoints may
+    # include a CLIP-style text tower that the eval wrappers do not consume.
+    cleaned = {
+        k: v for k, v in cleaned.items()
+        if not k.startswith("encoder_text.")
+    }
     embed_dim, pre_dim = _infer_projection_dims(cleaned)
     print(f'Inferred embed_dim: {embed_dim}, pre_dim: {pre_dim}')
     is_lorentz = any(key.startswith("curv") or "lorentz" in key for key in cleaned)
@@ -805,20 +910,31 @@ def build_model_from_checkpoint(checkpoint: Path) -> Tuple[nn.Module, bool]:
     s2_bands = _infer_s2_bands(cleaned)
     logging.info(f"Inferred S2 bands from checkpoint: {s2_bands}")
 
+    if framework is None:
+        framework = _infer_ciip_framework(cleaned)
+    logging.info("Using CIIP framework: %s", framework)
+
+    if framework == "transformer":
+        s1_width, s1_layers, s1_patch_size = _infer_vit_params(cleaned, "encoder_s1")
+        s2_width, s2_layers, s2_patch_size = _infer_vit_params(cleaned, "encoder_s2")
+    else:
+        s1_width, s1_layers, s1_patch_size = 32, (3, 4, 6, 3), 16
+        s2_width, s2_layers, s2_patch_size = 32, (3, 4, 6, 3), 16
+
     kwargs = dict(
         embed_dim=embed_dim,
         # pre_projection_dim=pre_dim,
         s1_resolution=224,
-        s1_layers=(3, 4, 6, 3),
-        s1_width=32,
-        s1_patch_size=16,
+        s1_layers=s1_layers,
+        s1_width=s1_width,
+        s1_patch_size=s1_patch_size,
         s1_bands=2,
         s2_resolution=224,
-        s2_layers=(3, 4, 6, 3),
-        s2_width=32,
-        s2_patch_size=16,
+        s2_layers=s2_layers,
+        s2_width=s2_width,
+        s2_patch_size=s2_patch_size,
         s2_bands=s2_bands,
-        framework="resnet50",
+        framework=framework,
     )
 
     if is_lorentz:
@@ -826,15 +942,9 @@ def build_model_from_checkpoint(checkpoint: Path) -> Tuple[nn.Module, bool]:
     else:
         model = CIIP(**kwargs)
 
-    missing, unexpected = model.load_state_dict(cleaned, strict=True)
-    # print(cleaned.keys())
-    #
+    missing, unexpected = model.load_state_dict(cleaned, strict=False)
     if missing or unexpected:
         logging.warning("Checkpoint loaded with missing=%s, unexpected=%s", missing, unexpected)
-        raise RuntimeError(
-            "Checkpoint incompatible with model "
-            f"(missing={missing}, unexpected={unexpected})"
-        )
 
     model.eval()
     return model, is_lorentz
@@ -851,7 +961,107 @@ def _resolve_resnet_weights(name: Optional[str]) -> Optional[ResNet50_Weights]:
     raise ValueError(f"Unsupported ResNet50 weights '{name}'. Expected 'dino' or 'moco'.")
 
 
-def _build_backbone_adapter(model_weights: Optional[str]) -> BackboneOnlyAdapter:
+def _build_llama3_ms_clip_adapter() -> EvaluationAdapter:
+    try:
+        import open_clip  # type: ignore
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise ImportError(
+            "open_clip is required to load the Llama3-MS-CLIP-base model for evaluation."
+        ) from exc
+
+    weights_path = Path("/home/juro4948/ciip/ciip/Llama3_MS_CLIP_weights.pt")
+
+    model_cfg = open_clip.get_model_config("ViT-B-16")
+    desired_in_chans = 10
+
+    if weights_path.exists():
+        logging.info("Loading Llama3-MS-CLIP weights from %s", weights_path)
+        model, _, _ = open_clip.create_model_and_transforms(
+            "ViT-B-16",
+            pretrained=None,
+            text_cfg=model_cfg.get("text_cfg"),
+        )
+
+        conv_key = "visual.conv1.weight"
+        old_conv = model.visual.conv1
+        new_conv = nn.Conv2d(
+            in_channels=desired_in_chans,
+            out_channels=old_conv.out_channels,
+            kernel_size=old_conv.kernel_size,
+            stride=old_conv.stride,
+            bias=False,
+        )
+        model.visual.conv1 = new_conv
+
+        target_state = model.state_dict()
+
+        raw_state = torch.load(weights_path, map_location="cpu")
+        if isinstance(raw_state, dict) and "state_dict" in raw_state:
+            raw_state = raw_state["state_dict"]
+
+        prefixes = (
+            "clip_base_model.model.",
+            "image_encoder.model.",
+            "text_encoder.model.",
+        )
+
+        #print the sate dict keys
+        print(f'Raw state dict keys: {list(raw_state.keys())}')
+        # print dim of clip_base_model.model.visual.conv1.weight
+        print(f'Raw conv1 weight shape: {raw_state["clip_base_model.model.visual.conv1.weight"].shape}')
+        
+        filtered = {}
+        for key, tensor in raw_state.items():
+            trimmed = key
+            for prefix in prefixes:
+                if trimmed.startswith(prefix):
+                    trimmed = trimmed[len(prefix) :]
+                    break
+            if trimmed in target_state and target_state[trimmed].shape == tensor.shape:
+                filtered[trimmed] = tensor
+
+        
+        # Always try to load conv1 by padding/truncating channels to match target.
+        if conv_key in raw_state:
+            w_ckpt = raw_state[conv_key]
+            if w_ckpt.shape[1] != desired_in_chans:
+                if w_ckpt.shape[1] < desired_in_chans:
+                    pad = w_ckpt.new_zeros(
+                        w_ckpt.shape[0],
+                        desired_in_chans - w_ckpt.shape[1],
+                        *w_ckpt.shape[2:],
+                    )
+                    w_ckpt = torch.cat([w_ckpt, pad], dim=1)
+                else:
+                    w_ckpt = w_ckpt[:, :desired_in_chans, :, :]
+            filtered[conv_key] = w_ckpt
+
+        missing, unexpected = model.load_state_dict(filtered, strict=False)
+        if missing:
+            logging.info("MS-CLIP load: missing keys (ignored): %s", missing)
+        if unexpected:
+            logging.info("MS-CLIP load: unexpected keys (ignored): %s", unexpected)
+    else:
+        raise FileNotFoundError(
+            f"Local MS-CLIP weights not found at {weights_path}. "
+            "Please download the weights and place them at this path."
+        )
+        # # Fallback to the published vision encoder (ViT-B/16, LAION-2B) that underpins MS-CLIP.
+        # logging.warning(
+        #     "Local MS-CLIP weights not found at %s; using open_clip pretrained vision backbone.",
+        #     weights_path,
+        # )
+        # model, _, _ = open_clip.create_model_and_transforms(
+        #     "ViT-B-16",
+        #     pretrained="laion2b_s34b_b88k",
+        #     text_cfg=model_cfg.get("text_cfg"),
+        # )
+
+    model.eval()
+    return OpenClipVisionAdapter(model)
+
+
+def _build_backbone_adapter(model_weights: Optional[str]) -> EvaluationAdapter:
     if model_weights is None:
         raise ValueError("model_weights must be provided for backbone-only models")
 
@@ -876,6 +1086,8 @@ def _build_backbone_adapter(model_weights: Optional[str]) -> BackboneOnlyAdapter
         model.fc = nn.Identity()
     elif normalized == "vitsmall16_s2_all_moco":
         model = vit_small_patch16_224(weights=ViTSmall16_Weights.SENTINEL2_ALL_MOCO)
+    elif normalized == "llama3_ms_clip_base":
+        return _build_llama3_ms_clip_adapter()
     else:
         raise ValueError(f"Unsupported backbone-only weights '{model_weights}'.")
 
@@ -891,13 +1103,14 @@ def build_evaluation_adapter(
     in_chans: int = 13,
     croma_weights: Optional[Path] = None,
     croma_image_resolution: int = 120,
+    ciip_framework: Optional[str] = None,
 ) -> EvaluationAdapter:
     """Create an evaluation adapter based on the requested model type."""
 
     if model_type == "ciip_checkpoint":
         if checkpoint is None:
             raise ValueError("checkpoint must be provided when using 'ciip_checkpoint'")
-        model, is_lorentz = build_model_from_checkpoint(checkpoint)
+        model, is_lorentz = build_model_from_checkpoint(checkpoint, framework=ciip_framework)
         return CiipEvaluationAdapter(model, is_lorentz=is_lorentz)
 
     if model_type == "torchgeo_resnet50":
@@ -926,8 +1139,8 @@ __all__ = [
     "CiipEvaluationAdapter",
     "TorchGeoResNetAdapter",
     "BackboneOnlyAdapter",
+    "OpenClipVisionAdapter",
     "CromaEvaluationAdapter",
     "build_model_from_checkpoint",
     "build_evaluation_adapter",
 ]
-

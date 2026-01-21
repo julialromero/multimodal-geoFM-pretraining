@@ -19,6 +19,8 @@ import json
 import logging
 import contextlib
 import re
+import tempfile
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
@@ -29,7 +31,8 @@ import torch
 import torch.utils.data
 from sklearn.decomposition import PCA
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, f1_score
+from sklearn.metrics import accuracy_score, f1_score, average_precision_score
+from sklearn.multiclass import OneVsRestClassifier
 from sklearn.neighbors import KNeighborsClassifier
 from torch import nn
 from torch.utils.data import DataLoader, Subset
@@ -38,7 +41,7 @@ from sklearn.manifold import TSNE
 # from ciip.evaluation.ssl4eo_retrieval import compute_cross_modal_retrieval
 import subprocess
 
-from torchgeo.datasets import EuroSAT
+from torchgeo.datasets import EuroSAT, BigEarthNet
 from torchvision import transforms
 
 from ciip.eval_utils import CustomTransform
@@ -106,6 +109,41 @@ EUROSAT_CLASS_NAMES = {
 }
 ##
 
+# BigEarthNet uses Sentinel-2 imagery without B10 (12 bands).
+BIGEARTHNET_BANDS = tuple(b for b in EUROSATBANDS if b != "B10")
+BIGEARTHNET_MEAN = [
+    383.02593994140625,   # B01
+    487.1451721191406,    # B02
+    707.4555053710938,    # B03
+    726.1536254882812,    # B04
+    1098.5545654296875,   # B05
+    1900.9755859375,      # B06
+    2184.544189453125,    # B07
+    2329.376953125,       # B08
+    2387.28515625,        # B8A
+    2358.551513671875,    # B09
+    1878.415283203125,    # B11
+    1237.1298828125,      # B12
+]
+BIGEARTHNET_STD = [
+    455.3548889160156,    # B01
+    511.12603759765625,   # B02
+    543.4214477539062,    # B03
+    678.1015625,          # B04
+    686.7001953125,       # B05
+    992.5777587890625,    # B06
+    1162.4130859375,      # B07
+    1267.3634033203125,   # B08
+    1245.698974609375,    # B8A
+    1190.7650146484375,   # B09
+    1112.59716796875,     # B11
+    879.724609375,        # B12
+]
+BIGEARTHNET_STATS = {
+    band: {"mean": mean, "std": std}
+    for band, mean, std in zip(BIGEARTHNET_BANDS, BIGEARTHNET_MEAN, BIGEARTHNET_STD)
+}
+
 
 def _first_conv_in_channels(module: Optional[nn.Module]) -> Optional[int]:
     if module is None:
@@ -144,6 +182,9 @@ def _infer_model_in_channels(
 def _resolve_eurosat_bands(num_channels: int) -> Tuple[str, ...]:
     """Return the EuroSAT band tuple matching the model channel budget."""
 
+    if num_channels == 10:
+        # Drop B01 and B10 (and B09) to align to MS-CLIP 10-channel inputs.
+        return ("B02", "B03", "B04", "B05", "B06", "B07", "B08", "B8A", "B11", "B12")
     if num_channels >= len(EUROSATBANDS):
         return EUROSATBANDS
     if num_channels == 12:
@@ -158,6 +199,26 @@ def _resolve_eurosat_bands(num_channels: int) -> Tuple[str, ...]:
         num_channels,
     )
     return tuple(EUROSATBANDS[:num_channels])
+
+
+def _resolve_bigearthnet_bands(num_channels: int) -> Tuple[str, ...]:
+    """Return the BigEarthNet band tuple matching the model channel budget."""
+
+    if num_channels == 10:
+        # Drop B01 and B09/B10 equivalents to fit 10-channel MS-CLIP inputs.
+        return ("B02", "B03", "B04", "B05", "B06", "B07", "B08", "B8A", "B11", "B12")
+    if num_channels >= len(BIGEARTHNET_BANDS):
+        return BIGEARTHNET_BANDS
+    if num_channels == 3:
+        return ("B04", "B03", "B02")
+    if num_channels < 1:
+        raise ValueError("Model must expose at least one Sentinel-2 channel")
+    logging.warning(
+        "Model exposes %d Sentinel-2 channels; defaulting to the first %d BigEarthNet bands.",
+        num_channels,
+        num_channels,
+    )
+    return tuple(BIGEARTHNET_BANDS[:num_channels])
 
 
 def _align_s2_channels(image: torch.Tensor, expected_channels: Optional[int]) -> torch.Tensor:
@@ -178,11 +239,52 @@ def _align_s2_channels(image: torch.Tensor, expected_channels: Optional[int]) ->
     if current_channels == expected_channels:
         return image
 
+    if expected_channels == 10 and current_channels >= 10:
+        indices = torch.arange(current_channels, device=image.device)
+        if current_channels == 13:
+            # EuroSAT ordering: drop B01 (0), B09 (9), B10 (10)
+            keep = [1, 2, 3, 4, 5, 6, 7, 8, 11, 12]
+        elif current_channels == 12:
+            # BigEarthNet ordering (no B10): drop B01 (0) and B09 (9)
+            keep = [1, 2, 3, 4, 5, 6, 7, 8, 10, 11]
+        else:
+            # Fallback: drop first two channels
+            keep = list(range(2, min(current_channels, expected_channels + 2)))
+        keep_indices = indices[keep]
+        return torch.index_select(image, channel_dim, keep_indices)
+
     if current_channels == 13 and expected_channels == 12:
         # Drop B10 (0-indexed channel 10) to match 12-band encoders.
         indices = torch.arange(current_channels, device=image.device)
         keep_indices = torch.cat([indices[:10], indices[11:]])
         return torch.index_select(image, channel_dim, keep_indices)
+
+    if current_channels == 12 and expected_channels == 13:
+        # Insert zeroed B10 channel to align to 13-band encoders.
+        if channel_dim == 0:
+            zeros = torch.zeros(
+                (1, *image.shape[1:]),
+                dtype=image.dtype,
+                device=image.device,
+            )
+            return torch.cat([image[:10], zeros, image[10:]], dim=0)
+        if channel_dim == 1:
+            zeros = torch.zeros(
+                (image.size(0), 1, *image.shape[2:]),
+                dtype=image.dtype,
+                device=image.device,
+            )
+            return torch.cat([image[:, :10], zeros, image[:, 10:]], dim=1)
+        if channel_dim == 2:
+            zeros = torch.zeros(
+                (image.size(0), image.size(1), 1, *image.shape[3:]),
+                dtype=image.dtype,
+                device=image.device,
+            )
+            return torch.cat(
+                [image[:, :, :10], zeros, image[:, :, 10:]],
+                dim=2,
+            )
 
     logging.warning(
         "Unable to automatically align Sentinel-2 channels (expected %s, observed %s).",
@@ -218,6 +320,7 @@ from ciip.evaluation.export_neuco_embeddings import (  # type: ignore
     E2SChallengeDataset,
     InputResizer,
     SSL4EONormalize,
+    NeuCoNormalize,
     Divideby10000Normalize,
     CromaNormalize,
     TemporalMean,
@@ -267,6 +370,17 @@ from ciip.evaluation.id_metrics import (
 )
 from ciip.open_clip_train.data import SSL4EODataset
 
+NORMALIZATION_METHOD_DIVIDE = "divideby10000"
+NORMALIZATION_METHOD_BANDWISE = "bandwisenorm"
+NORMALIZATION_METHOD_SSL4EO = "ssl4eonorm"
+NORMALIZATION_METHODS = (
+    NORMALIZATION_METHOD_DIVIDE,
+    NORMALIZATION_METHOD_BANDWISE,
+    NORMALIZATION_METHOD_SSL4EO,
+)
+DEFAULT_NORMALIZATION_METHOD = NORMALIZATION_METHOD_DIVIDE
+
+
 @dataclass
 class ModelEvalConfig:
     eurosat_root: Path
@@ -275,6 +389,7 @@ class ModelEvalConfig:
     checkpoint: Optional[Path] = None
     model_type: str = "ciip_checkpoint"
     model_weights: Optional[str] = None
+    ciip_framework: Optional[str] = None
     model_in_channels: int = 13
     evaluation_modality: str = "s2"
     croma_weights: Optional[Path] = None
@@ -294,19 +409,98 @@ class ModelEvalConfig:
     ssl4eo_s2_bands: Sequence[str] = DEFAULT_S2_BANDS
     ssl4eo_image_dimension: int = 224
     eurosat_image_size: int = 224
+    bigearthnet_root: Optional[Path] = None
+    bigearthnet_image_size: int = 224
+    normalization_method: str = DEFAULT_NORMALIZATION_METHOD
+    matryoshka_dims: Optional[Sequence[int]] = None
+    matryoshka_feature: str = "backbone"
+    stats_max_batches: int = 0
 
 
 @dataclass
 class EmbeddingBundle:
     backbone: Optional[np.ndarray]
-    posthead: Optional[np.ndarray]
     projected: Optional[np.ndarray]
     labels: Optional[np.ndarray] = None
+    multi_labels: Optional[np.ndarray] = None
     ids: Optional[List[str]] = None
 
 
 def _to_numpy(tensor: torch.Tensor) -> np.ndarray:
     return tensor.detach().cpu().to(torch.float32).numpy()
+
+
+def _extract_image_tensor(batch) -> Optional[torch.Tensor]:
+    if isinstance(batch, dict):
+        return batch.get("image") if "image" in batch else batch.get("data")
+    if isinstance(batch, (list, tuple)):
+        return batch[0]
+    return None
+
+
+def _to_nchw(tensor: torch.Tensor) -> torch.Tensor:
+    if tensor.ndim == 3:
+        return tensor.unsqueeze(0)
+    if tensor.ndim == 4:
+        return tensor
+    if tensor.ndim == 5:
+        channel_candidates = {1, 2, 3, 4, 10, 12, 13}
+        if tensor.shape[1] in {10, 12, 13}:
+            b, c, t, h, w = tensor.shape
+            return tensor.permute(0, 2, 1, 3, 4).reshape(b * t, c, h, w)
+        if tensor.shape[2] in {10, 12, 13}:
+            b, t, c, h, w = tensor.shape
+            return tensor.permute(0, 2, 1, 3, 4).reshape(b * t, c, h, w)
+        if tensor.shape[1] in channel_candidates and tensor.shape[2] not in channel_candidates:
+            b, c, t, h, w = tensor.shape
+            return tensor.permute(0, 2, 1, 3, 4).reshape(b * t, c, h, w)
+        if tensor.shape[2] in channel_candidates:
+            b, t, c, h, w = tensor.shape
+            return tensor.permute(0, 2, 1, 3, 4).reshape(b * t, c, h, w)
+    raise ValueError(f"Unsupported tensor shape {tuple(tensor.shape)} for band stats")
+
+
+def _print_band_stats(
+    label: str,
+    loader: DataLoader,
+    *,
+    bands: Optional[Sequence[str]] = None,
+    max_batches: int = 0,
+) -> None:
+    total_sum: Optional[torch.Tensor] = None
+    total_sumsq: Optional[torch.Tensor] = None
+    total_pixels = 0
+    batches = 0
+
+    for idx, batch in enumerate(loader):
+        if max_batches and idx >= max_batches:
+            break
+        images = _extract_image_tensor(batch)
+        if images is None:
+            continue
+        if not isinstance(images, torch.Tensor):
+            images = torch.as_tensor(images)
+        images = _to_nchw(images.detach()).to(dtype=torch.float64, device="cpu")
+        total_pixels += images.shape[0] * images.shape[2] * images.shape[3]
+        batch_sum = images.sum(dim=(0, 2, 3))
+        batch_sumsq = (images ** 2).sum(dim=(0, 2, 3))
+        total_sum = batch_sum if total_sum is None else total_sum + batch_sum
+        total_sumsq = batch_sumsq if total_sumsq is None else total_sumsq + batch_sumsq
+        batches += 1
+
+    if total_sum is None or total_sumsq is None or total_pixels == 0:
+        print(f"{label}: unable to compute band stats (no samples).")
+        return
+
+    mean = total_sum / total_pixels
+    var = (total_sumsq / total_pixels) - mean ** 2
+    std = torch.sqrt(torch.clamp(var, min=0.0))
+    band_note = f" bands={list(bands)}" if bands is not None else ""
+    batch_note = f" batches={batches}" + (f"/{max_batches}" if max_batches else "")
+    print(
+        f"{label} bandwise stats after transforms:{band_note}{batch_note} "
+        f"mean={mean.tolist()} std={std.tolist()}"
+    )
 
 
 ### FOR EUROSAT and NEUCOBENCH
@@ -318,22 +512,39 @@ def _extract_embeddings(
     require_ids: bool = False,
     expected_in_channels: Optional[int] = None,
     modality: str = "s2",
+    pca_output_dir: Optional[Path] = None,
 ) -> EmbeddingBundle:
     backbone_vectors: List[np.ndarray] = []
-    posthead_vectors: List[np.ndarray] = []
     projected_vectors: List[np.ndarray] = []
     labels: List[int] = []
+    multi_labels: List[List[int]] = []
     ids: List[str] = []
 
-    
-    for batch in dataloader:
+    pca_tensor: torch.Tensor    
+    for i, batch in enumerate(dataloader):
         if isinstance(batch, dict):
             image = batch.get("image") if "image" in batch else batch.get("data")
             batch_labels = batch.get("label")
+            batch_multi_labels = batch.get("multi_label")
             batch_ids = batch.get("file_name")
         else:
             image, batch_labels = batch
+            batch_multi_labels = None
             batch_ids = None
+
+        # print bandwise mean std of images
+        # if i % 20 == 0:
+        #     print(f'Batch {i} image bandwise mean: {image.mean(dim=[0,2,3]) if isinstance(image, torch.Tensor) else "N/A"}')
+
+        # if any pixels is outside of 0-1, print the band stats
+        # if isinstance(image, torch.Tensor):
+        #     if (image < 0).any() or (image > 1).any():
+        #         print(f'Batch {i} image bandwise stats:')
+        #         for b in range(image.shape[1]):
+        #             band = image[:, b, :, :]
+        #             print(f'  Band {b}: min {band.min().item()}, max {band.max().item()}, mean {band.mean().item()}, std {band.std().item()}')
+
+        # keep a running mean of each band across batches, print out at the end of training
 
         # move to cuda
         image = image.to(device)
@@ -345,6 +556,13 @@ def _extract_embeddings(
         if isinstance(image, dict) and not getattr(adapter, "supports_multimodal_dict", False):
             image = image[next(iter(image))]
 
+        reshape_back = False
+        seasons = 1
+        if isinstance(image, torch.Tensor) and image.ndim == 5:
+            # Flatten temporal and batch dimensions before feeding the model.
+            batch_size, seasons, channels, height, width = image.shape
+            image = image.reshape(batch_size * seasons, channels, height, width)
+            reshape_back = True
         if modality.lower() == "s2" and isinstance(image, torch.Tensor):
             image = _align_s2_channels(image, expected_in_channels)
 
@@ -355,33 +573,79 @@ def _extract_embeddings(
                 prepared_inputs, modality=modality
             )
 
-            # if outputs is a dict with keys 'backbone', 'posthead', 'projected'
-            if isinstance(outputs, dict):
-                backbone = outputs.get("backbone")
-                post = outputs.get("posthead", None)
-                projected = outputs.get("projected", None)
-                # print(f'Backbone shape: {backbone.shape if backbone is not None else "N/A"}')
-            # if tuple
-            elif isinstance(outputs, tuple) and len(outputs) == 3:
-                backbone, post, projected = outputs
-            else:
-                raise RuntimeError("Unexpected outputs from compute_embeddings")
+        if isinstance(outputs, dict):
+            backbone = outputs.get("backbone")
+            projected = outputs.get("projected", None)
+            # print(f'Backbone shape: {backbone.shape if backbone is not None else "N/A"}')
+        elif isinstance(outputs, tuple) and len(outputs) == 3:
+            backbone, _, projected = outputs
+        else:
+            raise RuntimeError("Unexpected outputs from compute_embeddings")
+
+        if reshape_back:
+            # Restore (batch, seasons, ...) layout for downstream consumers.
+            if backbone is not None:
+                backbone = backbone.reshape(batch_size, seasons, *backbone.shape[1:])
+                # if i == 0:
+                #     pca_tensor = backbone
+                # else:
+                #     pca_tensor = torch.cat((pca_tensor, backbone), dim=0)
+                # # plot pca color coded by season dimension (4 seasons)
+                # if i == 20:
+                #     try:
+                #         if backbone is not None and isinstance(backbone, torch.Tensor):
+                #             # backbone is (batch, seasons, dim) after reshape_back above
+                #             # use pca tensor
+                #             ## TODO
+                #             batch_n, n_seasons = backbone.shape[0], backbone.shape[1]
+                #             flat = backbone.reshape(batch_n * n_seasons, -1).cpu().numpy()
+                #             # need at least 2 samples and 2 dims for PCA
+                #             if flat.shape[0] >= 2 and flat.shape[1] >= 2:
+                #                 pca = PCA(n_components=2, random_state=0)
+                #                 coords = pca.fit_transform(flat)
+                #                 season_labels = np.tile(np.arange(n_seasons), batch_n)
+                #                 cmap = plt.get_cmap("tab10")
+                #                 fig, ax = plt.subplots(figsize=(6, 5))
+                #                 for s in range(n_seasons):
+                #                     mask = season_labels == s
+                #                     ax.scatter(coords[mask, 0], coords[mask, 1], s=16, color=cmap(s), label=f"season_{s}", alpha=1)
+                #                 ax.set_title("PCA of Backbone Embeddings (colored by season)")
+                #                 ax.set_xlabel("PC 1")
+                #                 ax.set_ylabel("PC 2")
+                #                 ax.legend(title="Season", fontsize="small", markerscale=1.5)
+                #                 ax.grid(alpha=0.2)
+                #                 fig.tight_layout()
+                #                 # save a small diagnostic file to the requested directory (defaults to temp)
+                #                 save_dir = Path(pca_output_dir) if pca_output_dir is not None else Path(tempfile.gettempdir())
+                #                 save_dir.mkdir(parents=True, exist_ok=True)
+                #                 out_path = save_dir / f"_batch_pca_seasons_{int(time.time()*1000)}.png"
+                #                 fig.savefig(out_path, dpi=150)
+                #                 plt.close(fig)
+                #                 # logging.info("Saved per-batch season PCA to %s", out_path)
+                #     except Exception as exc:  # keep extraction robust
+                #         logging.warning("Skipping per-batch season PCA: %s", exc)
+            if projected is not None:
+                projected = projected.reshape(batch_size, seasons, *projected.shape[1:])
+            
 
         if backbone is None:
             raise RuntimeError("Backbone embeddings cannot be None")
-
+        # if backbone has 3 dims average over seasons
+        if backbone.ndim == 3:
+            backbone = backbone.mean(dim=1)
+        
+        # print(f'Backbone shape: {backbone.shape if backbone is not None else "N/A"}')
         backbone_np = _to_numpy(backbone)
         backbone_vectors.append(backbone_np)
         # batch_size = backbone_np.shape[0]
-
-        if post is not None:
-            posthead_vectors.append(_to_numpy(post))
 
         if projected is not None:
             projected_vectors.append(_to_numpy(projected))
 
         if batch_labels is not None:
             labels.extend(batch_labels.cpu().tolist())
+        if batch_multi_labels is not None:
+            multi_labels.extend(batch_multi_labels.cpu().tolist())
         if require_ids and batch_ids is not None:
             ids.extend([str(item) for item in batch_ids])
 
@@ -391,22 +655,18 @@ def _extract_embeddings(
     else:
         backbone_array = None
 
-    posthead_array = (
-        np.concatenate(posthead_vectors, axis=0) if posthead_vectors else None
-    )
     projected_array = (
         np.concatenate(projected_vectors, axis=0) if projected_vectors else None
     )
 
     bundle = EmbeddingBundle(
         backbone=backbone_array,
-        posthead=posthead_array,
         projected=projected_array,
         labels=np.asarray(labels, dtype=np.int64) if labels else None,
+        multi_labels=np.asarray(multi_labels, dtype=np.int64) if multi_labels else None,
         ids=ids if ids else None,
     )
     return bundle
-
 
 
 
@@ -424,19 +684,27 @@ def _build_eurosat_loaders(
     target_size = int(config.eurosat_image_size)
     eval_resize = max(target_size, int(round(target_size * 256 / 224)))
 
+    normalization_method = config.normalization_method.lower()
+    if normalization_method == NORMALIZATION_METHOD_BANDWISE:
+        norm_layer = transforms.Normalize(mean=mean, std=std)
+    elif normalization_method == NORMALIZATION_METHOD_SSL4EO:
+        norm_layer = SSL4EONormalize()
+    else:
+        norm_layer = Divideby10000Normalize()
+    print(f"EuroSAT using normalization method: {norm_layer}")
     data_transforms = {
         "train": transforms.Compose(
             [
                 transforms.RandomResizedCrop(target_size),
                 transforms.RandomHorizontalFlip(),
-                transforms.Normalize(mean=mean, std=std),
+                norm_layer,
             ]
         ),
         "eval": transforms.Compose(
             [
                 transforms.Resize(eval_resize),
                 transforms.CenterCrop(target_size),
-                transforms.Normalize(mean=mean, std=std),
+                norm_layer,
             ]
         ),
     }
@@ -461,9 +729,224 @@ def _build_eurosat_loaders(
     }
     # print each split
     for split, dataset in datasets.items():
-        print(f"EuroSAT {split} dataset size: {len(dataset)} samples")
+        # print(f"EuroSAT {split} dataset size: {len(dataset)} samples")
         assert len(dataset) > 0, f"EuroSAT {split} dataset is empty!"
     return loaders
+
+
+class _SingleLabelBigEarthNet(torch.utils.data.Dataset):
+    """Wrap BigEarthNet multi-label targets into a single class via argmax."""
+
+    def __init__(self, dataset: torch.utils.data.Dataset):
+        self.dataset = dataset
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def __getitem__(self, idx: int):
+        sample = self.dataset[idx]
+        if isinstance(sample, dict):
+            image = sample.get("image") if "image" in sample else sample.get("data")
+            label = sample.get("label") if "label" in sample else sample.get("labels")
+        else:
+            image, label = sample
+
+        multi_label = None
+        if isinstance(label, torch.Tensor):
+            if label.ndim > 0 and label.numel() > 1:
+                label_idx = int(torch.argmax(label).item())
+                multi_label = label
+            else:
+                label_idx = int(label.item())
+        elif isinstance(label, (list, tuple)):
+            label_idx = int(label[0])
+        else:
+            label_idx = int(label)
+
+        return {"image": image, "label": label_idx, "multi_label": multi_label}
+
+
+def _filter_missing_bigearthnet_samples(dataset: BigEarthNet) -> None:
+    """Drop BigEarthNet entries missing required band folders/files."""
+    data_root = Path(dataset.root) / dataset.metadata["s2"]["directory"]
+    if not data_root.exists() or not any(data_root.iterdir()):
+        print(
+            f"BigEarthNet: expected imagery under {data_root} but found none; "
+            "marking dataset as empty."
+        )
+        dataset.folders = []
+        return
+
+    required_keys = []
+    uses_s2 = dataset.bands in ("s2", "all") or (
+        isinstance(dataset.bands, (list, tuple))
+        and all(isinstance(b, str) and b.startswith("B") for b in dataset.bands)
+    )
+    if uses_s2:
+        required_keys.append("s2")
+    if dataset.bands in ("s1", "all"):
+        required_keys.append("s1")
+
+    def _has_band_folder(folder_path: str, band_key: str) -> bool:
+        path = Path(folder_path)
+        if not path.is_dir():
+            return False
+
+        # Fast path: check the expected band file; fall back to any .tif presence.
+        suffix = "B01.tif" if band_key == "s2" else "VV.tif"
+        expected_file = path / f"{path.name}_{suffix}"
+        if expected_file.exists():
+            return True
+        return any(path.glob("*.tif"))
+
+    valid_folders = []
+    missing = 0
+    for folder in dataset.folders:
+        if all(_has_band_folder(folder[key], key) for key in required_keys):
+            valid_folders.append(folder)
+        else:
+            missing += 1
+
+    if missing:
+        print(
+            f"BigEarthNet: filtered out {missing} samples missing required "
+            f"{str(dataset.bands).upper()} imagery (kept {len(valid_folders)})."
+        )
+    dataset.folders = valid_folders
+
+
+def _bigearthnet_stats_for_bands(bands: Sequence[str]) -> Tuple[List[float], List[float]]:
+    mean: List[float] = []
+    std: List[float] = []
+    for band in bands:
+        stats = BIGEARTHNET_STATS.get(band)
+        if stats is None:
+            raise KeyError(f"Unknown BigEarthNet band '{band}' in requested band set {bands}")
+        mean.append(stats["mean"])
+        std.append(stats["std"])
+    return mean, std
+
+
+def _resolve_bigearthnet_root(root: Path) -> Path:
+    """Handle nested BigEarthNet extracts (root/BigEarthNet-v1.0/BigEarthNet-v1.0)."""
+    base = Path(root)
+    csv_present = (base / "bigearthnet-train.csv").exists()
+    nested = base / "BigEarthNet-v1.0"
+    double_nested = nested / "BigEarthNet-v1.0"
+
+    if csv_present:
+        return base
+    if (nested / "bigearthnet-train.csv").exists():
+        print(f"BigEarthNet: detected nested layout with CSVs, using root {nested}")
+        return nested
+    if (double_nested / "bigearthnet-train.csv").exists():
+        print(f"BigEarthNet: detected double-nested layout with CSVs, using root {double_nested}")
+        return double_nested
+    # Fall back to base so TorchGeo can still attempt to verify.
+    return base
+
+
+def _build_bigearthnet_loaders(
+    config: ModelEvalConfig, *, expected_channels: Optional[int] = None
+) -> Tuple[Dict[str, DataLoader], Sequence[str]]:
+    if config.bigearthnet_root is None:
+        raise ValueError("bigearthnet_root must be provided for BigEarthNet evaluation.")
+
+    channel_budget = expected_channels or config.model_in_channels
+    bands = _resolve_bigearthnet_bands(channel_budget)
+    band_mean, band_std = _bigearthnet_stats_for_bands(bands)
+    band_indices = [BIGEARTHNET_BANDS.index(b) for b in bands]
+    select_bands = len(band_indices) != len(BIGEARTHNET_BANDS)
+
+    target_size = int(config.bigearthnet_image_size)
+    eval_resize = max(target_size, int(round(target_size * 256 / 224)))
+
+    class _SelectBandsTransform:
+        def __init__(self, indices: Sequence[int]):
+            self.indices = list(indices)
+
+        def __call__(self, img: torch.Tensor) -> torch.Tensor:
+            if not isinstance(img, torch.Tensor):
+                return img
+            if img.ndim >= 4:
+                channel_dim = 1  # (B, C, H, W) or (T, C, H, W)
+            elif img.ndim == 3:
+                channel_dim = 0  # (C, H, W)
+            else:
+                return img
+            index_tensor = torch.as_tensor(self.indices, device=img.device)
+            return torch.index_select(img, channel_dim, index_tensor)
+
+    selector = _SelectBandsTransform(band_indices) if select_bands else None
+
+    train_steps: List[object] = []
+    eval_steps: List[object] = []
+    if selector is not None:
+        train_steps.append(selector)
+        eval_steps.append(selector)
+    normalization_method = config.normalization_method.lower()
+    if normalization_method == NORMALIZATION_METHOD_BANDWISE:
+        band_norm_layer = transforms.Normalize(mean=band_mean, std=band_std)
+    elif normalization_method == NORMALIZATION_METHOD_SSL4EO:
+        band_norm_layer = SSL4EONormalize()
+    else:
+        band_norm_layer = Divideby10000Normalize()
+    print(f"band norm method: {band_norm_layer}")
+    train_steps.extend(
+        [
+            transforms.RandomResizedCrop(target_size),
+            transforms.RandomHorizontalFlip(),
+            band_norm_layer,
+        ]
+    )
+    eval_steps.extend(
+        [
+            transforms.CenterCrop(target_size),
+            band_norm_layer,
+        ]
+    )
+
+    data_transforms = {
+        "train": transforms.Compose(train_steps),
+        "eval": transforms.Compose(eval_steps),
+    }
+
+    train_transform = CustomTransform(data_transforms["train"])
+    eval_transform = CustomTransform(data_transforms["eval"])
+
+    print("Building BigEarthNet datasets...")
+
+    dataset_root = _resolve_bigearthnet_root(Path(config.bigearthnet_root))
+
+    datasets: Dict[str, _SingleLabelBigEarthNet] = {}
+    for split in ("train", "val", "test"):
+        base_dataset = BigEarthNet(
+            root=str(dataset_root),
+            split=split,
+            bands="s2",
+            transforms=train_transform if split == "train" else eval_transform,
+            download=False,
+            num_classes=19
+        )
+        # _filter_missing_bigearthnet_samples(base_dataset)
+        if len(base_dataset) == 0:
+            data_dir = Path(dataset_root) / base_dataset.metadata["s2"]["directory"]
+            raise FileNotFoundError(
+                f"BigEarthNet split '{split}' has no available samples under {dataset_root}. "
+                f"Ensure the dataset is fully extracted (expected imagery in {data_dir}) "
+                f"or update --bigearthnet-root."
+            )
+        datasets[split] = _SingleLabelBigEarthNet(base_dataset)
+
+    loaders = {
+        split: DataLoader(dataset, batch_size=64, shuffle=False, num_workers=6, pin_memory=True)
+        for split, dataset in datasets.items()
+    }
+    for split, dataset in datasets.items():
+        print(f"BigEarthNet {split} dataset size: {len(dataset)} samples")
+        assert len(dataset) > 0, f"BigEarthNet {split} dataset is empty!"
+
+    return loaders, bands
 
 
 def _build_neuco_loader(
@@ -483,20 +966,24 @@ def _build_neuco_loader(
 
     else:
         transform_steps.append(InputResizer(224))
-        weights = (config.model_weights or "").lower()
-        if weights == "dino":
-            print("Using Divideby10000Normalize for DINO model")
-            transform_steps.append(Divideby10000Normalize())
-        else:
-            print("Using SSL4EO Normalization for SSL4EO trained models")
+        normalization_method = config.normalization_method.lower()
+        if normalization_method == NORMALIZATION_METHOD_BANDWISE:
+            print("Using NeuCo bandwise normalization for NeuCo inputs")
+            transform_steps.append(NeuCoNormalize())
+        elif normalization_method == NORMALIZATION_METHOD_SSL4EO:
+            print("Using SSL4EO normalization for NeuCo inputs")
             transform_steps.append(SSL4EONormalize())
+        else:
+            print("Using divide-by-10000 normalization for NeuCo inputs")
+            transform_steps.append(Divideby10000Normalize())
+
     # transform_steps.append(TemporalMean())  # skip temporal averaging; keep per-season inputs
     # if config.neuco_resize is not None:
     #     transform_steps.append(InputResizer(config.neuco_resize))
     transform = transforms.Compose(transform_steps)
 
 
-    print(f"Building NeuCo dataset with modalities: {modalities}")
+    # print(f"Building NeuCo dataset with modalities: {modalities}")
     rgb = True if config.model_in_channels == 3 else False
     dataset = E2SChallengeDataset(
         data_path=str(config.neuco_root),
@@ -509,7 +996,7 @@ def _build_neuco_loader(
     )
 
     # check size of datset
-    print(f"NeuCo dataset size: {len(dataset)} samples")
+    # print(f"NeuCo dataset size: {len(dataset)} samples")
     assert len(dataset) > 0, "NeuCo dataset is empty!"
     # quit()
 
@@ -538,7 +1025,15 @@ def _build_ssl4eo_dataset(config: ModelEvalConfig) -> torch.utils.data.Dataset:
     s2_transform = select_ssl4eo_transform(config.model_weights)
     if s2_transform is None:
         print(f"Using default SSL4EO transform for tier {config.ssl4eo_s2_tier}")
-        s2_transform = data.get_transform(config.ssl4eo_s2_tier, is_train=False)
+        norm_layer = (
+            SSL4EONormalize()
+            if config.normalization_method.lower() == NORMALIZATION_METHOD_BANDWISE
+            else Divideby10000Normalize()
+        )
+        s2_transform = transforms.Compose([
+                transforms.CenterCrop(224),
+                norm_layer,
+            ])
 
     dataset = SSL4EODataset(
         root=str(config.ssl4eo_root.expanduser()),
@@ -569,6 +1064,18 @@ def _extract_ssl4eo_embeddings(
 ) -> Tuple[ModalityEmbeddings, ModalityEmbeddings, List[str]]:
     dataset = _build_ssl4eo_dataset(config)
 
+    # Ensure S2 inputs match model channel expectations (e.g., drop B1/B9/B10 for 10-ch MS-CLIP).
+    if config.model_in_channels == 10 and isinstance(getattr(dataset, "transforms", None), dict):
+        orig_s2 = dataset.transforms.get("s2")
+
+        def _align_transform(tensor: torch.Tensor) -> torch.Tensor:
+            # Apply original transform first (normalization expects original channel count),
+            # then drop bands to the 10-channel MS-CLIP layout.
+            transformed = orig_s2(tensor) if callable(orig_s2) else tensor
+            return _align_s2_channels(transformed, 10)
+
+        dataset.transforms["s2"] = _align_transform
+
     autocast = (
         (lambda: torch.cuda.amp.autocast())
         if device.type == "cuda"
@@ -598,9 +1105,21 @@ def _run_linear_probe(
     *,
     output_dir: Path,
     label: str,
+    norm_method: str,
+    slice_dim: Optional[int] = None,
+    feature_override: Optional[str] = None,
 ) -> None:
-    percents = (0.01, 0.05, 0.1, 0.25, 0.5, 1.0)
+    percents = (0.01, 0.1, 1.0)
     rng = np.random.default_rng(config.random_seed)
+
+    def _maybe_slice(features: np.ndarray) -> np.ndarray:
+        if slice_dim is None:
+            return features
+        if features.shape[1] < slice_dim:
+            raise ValueError(
+                f"Requested matryoshka dim {slice_dim} exceeds feature dim {features.shape[1]}."
+            )
+        return features[:, :slice_dim]
 
     def _evaluate_logreg(feature_key: str, batch_norm: bool) -> Dict[float, Dict[str, float]]:
         results: Dict[float, Dict[str, float]] = {}
@@ -611,9 +1130,9 @@ def _run_linear_probe(
 
         # raise NotImplementedError("Debugging embeddings extraction")
 
-        train_feats = getattr(train, feature_key)
-        val_feats = getattr(val, feature_key)
-        test_feats = getattr(test, feature_key)
+        train_feats = _maybe_slice(getattr(train, feature_key))
+        val_feats = _maybe_slice(getattr(val, feature_key))
+        test_feats = _maybe_slice(getattr(test, feature_key))
 
         if batch_norm:
             mean = train_feats.mean(axis=0, keepdims=True)
@@ -621,6 +1140,12 @@ def _run_linear_probe(
             train_feats = (train_feats - mean) / std
             val_feats = (val_feats - mean) / std
             test_feats = (test_feats - mean) / std
+
+        has_multi = (
+            train.multi_labels is not None
+            and val.multi_labels is not None
+            and test.multi_labels is not None
+        )
 
         for pct in percents:
             n_samples = max(1, int(pct * len(train_feats)))
@@ -644,6 +1169,20 @@ def _run_linear_probe(
                 "test_f1": float(test_f1),
             }
 
+            if has_multi:
+                ovr = OneVsRestClassifier(
+                    LogisticRegression(max_iter=4000, solver="lbfgs")
+                )
+                ovr.fit(train_feats[indices], train.multi_labels[indices])
+                val_scores = ovr.predict_proba(val_feats)
+                test_scores = ovr.predict_proba(test_feats)
+                results[pct]["val_map_micro"] = float(
+                    average_precision_score(val.multi_labels, val_scores, average="micro")
+                )
+                results[pct]["test_map_micro"] = float(
+                    average_precision_score(test.multi_labels, test_scores, average="micro")
+                )
+
         return results
 
     def _evaluate_knn(feature_key: str, batch_norm: bool, n_neighbors: int = 20) -> Dict[float, Dict[str, float]]:
@@ -653,9 +1192,9 @@ def _run_linear_probe(
         val = embeddings["val"]
         test = embeddings["test"]
 
-        train_feats = getattr(train, feature_key)
-        val_feats = getattr(val, feature_key)
-        test_feats = getattr(test, feature_key)
+        train_feats = _maybe_slice(getattr(train, feature_key))
+        val_feats = _maybe_slice(getattr(val, feature_key))
+        test_feats = _maybe_slice(getattr(test, feature_key))
 
         if batch_norm:
             mean = train_feats.mean(axis=0, keepdims=True)
@@ -689,16 +1228,24 @@ def _run_linear_probe(
 
         return results
 
-    
-    
     def _available_feature(name: str) -> bool:
         feature = getattr(embeddings["train"], name)
         return feature is not None and feature.size > 0
 
     probe_specs = []
-    marker_map = {"backbone": "o", "posthead": "^", "projected": "s"}
+    marker_map = {"backbone": "o", "projected": "s"}
 
-    if _available_feature("backbone"):
+    if feature_override is not None:
+        if not _available_feature(feature_override):
+            logging.warning("Requested feature '%s' not available for linear probe; skipping.", feature_override)
+            return
+        probe_specs.extend(
+            [
+                (feature_override, feature_override, False),
+                (feature_override, f"{feature_override}_batchnorm", True),
+            ]
+        )
+    elif _available_feature("backbone"):
         probe_specs.extend(
             [
                 ("backbone", "backbone", False),
@@ -706,17 +1253,17 @@ def _run_linear_probe(
             ]
         )
 
-    for name in ("posthead", "projected"):
-        if _available_feature(name):
-            probe_specs.append((name, name, False))
-            probe_specs.append((name, f"{name}_batchnorm", True))
+    #     if _available_feature(name):
+    #         probe_specs.append((name, name, False))
+    #         probe_specs.append((name, f"{name}_batchnorm", True))
 
     if not probe_specs:
         logging.warning("No embeddings available for linear probe; skipping")
         return
 
 
-    plots_dir = output_dir / "linear_probe"
+    method_tag = norm_method.lower()
+    plots_dir = output_dir / f"linear_probe_{method_tag}"
     plots_dir.mkdir(parents=True, exist_ok=True)
     for feature_key, suffix, use_batch_norm in probe_specs:
         lr_metrics = _evaluate_logreg(feature_key, batch_norm=use_batch_norm)
@@ -841,9 +1388,7 @@ def _plot_eurosat_tsne(
         logging.warning("No labels provided for EuroSAT embeddings; skipping t-SNE plot")
         return
 
-    # Define feature types to plot
     feature_types = [
-        ("posthead", bundle.posthead, "Post-head"),
         ("backbone", bundle.backbone, "Backbone"), 
         ("projected", bundle.projected, "Projected")
     ]
@@ -907,7 +1452,79 @@ def _plot_eurosat_tsne(
         fig.savefig(output_dir / f"{label}_tsne_{feature_name}.png", dpi=200)
         plt.close(fig)
         
-        logging.info(f"Saved t-SNE plot for {display_name} features: {output_dir / f'{label}_tsne_{feature_name}.png'}")
+        # logging.info(f"Saved t-SNE plot for {display_name} features: {output_dir / f'{label}_tsne_{feature_name}.png'}")
+
+
+def _plot_eurosat_pca(
+    bundle: EmbeddingBundle,
+    *,
+    output_dir: Path,
+    label: str,
+    max_samples: int,
+    seed: int,
+    model_title: Optional[str],
+    modality_label: str,
+) -> None:
+    feature_types = [
+        ("backbone", bundle.backbone, "Backbone"),
+        ("projected", bundle.projected, "Projected"),
+    ]
+    available_features = [
+        (name, features, display_name)
+        for name, features, display_name in feature_types
+        if features is not None and features.size > 0
+    ]
+    if not available_features:
+        logging.warning("No embeddings available for EuroSAT PCA plots")
+        return
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(seed)
+    modality_label = modality_label.upper()
+    palette = {"S2": "#1f77b4", "S1": "#ff7f0e"}
+
+    for feature_name, features, display_name in available_features:
+        total_samples = len(features)
+        if total_samples > max_samples:
+            indices = rng.choice(total_samples, size=max_samples, replace=False)
+            features_sampled = features[indices]
+        else:
+            features_sampled = features
+
+        pca = PCA(n_components=2, random_state=seed)
+        embeddings_2d = pca.fit_transform(features_sampled)
+
+        fig, ax = plt.subplots(figsize=(8, 6))
+        label_array = np.repeat(modality_label, len(embeddings_2d))
+        unique_labels = sorted(np.unique(label_array))
+
+        for idx, modality in enumerate(unique_labels):
+            mask = label_array == modality
+            ax.scatter(
+                embeddings_2d[mask, 0],
+                embeddings_2d[mask, 1],
+                s=12,
+                color=palette.get(modality, plt.get_cmap("tab10")(idx)),
+                label=modality,
+                alpha=0.8,
+            )
+
+        ax.set_title(f"PCA ({feature_name}, raw)")
+        ax.set_xlabel("PCA component 1")
+        ax.set_ylabel("PCA component 2")
+        if len(unique_labels) > 1:
+            ax.legend(title="Modality", fontsize="small", markerscale=2)
+        ax.grid(alpha=0.2)
+
+        fig.tight_layout()
+        fig.savefig(output_dir / f"{label}_pca_{feature_name}.png", dpi=200)
+        plt.close(fig)
+
+        # logging.info(
+        #     "Saved PCA plot for %s features: %s",
+        #     display_name,
+        #     output_dir / f"{label}_pca_{feature_name}.png",
+        # )
 
 
 def _export_neuco(
@@ -927,10 +1544,8 @@ def _export_neuco(
     output_dir.mkdir(parents=True, exist_ok=True)
     if bundle.backbone is not None:
         _write(bundle.backbone, "backbone")
-    if bundle.posthead is not None:
-        _write(bundle.posthead, "posthead")
-    if bundle.projected is not None:
-        _write(bundle.projected, "projected")
+    # if bundle.projected is not None:
+    #     _write(bundle.projected, "projected")
 
 
 def _run_embedding_diagnostics(
@@ -957,7 +1572,6 @@ def _run_embedding_diagnostics(
             return None
         return {
             "backbone": _detach_or_none(getattr(bundle, "backbone", None)),
-            "posthead": _detach_or_none(getattr(bundle, "raw", None)),
             "projected": _detach_or_none(getattr(bundle, "projected", None)),
             "layers": bundle.layer_activations or {},
         }
@@ -1141,10 +1755,8 @@ def _run_embedding_diagnostics(
         )
 
 
-    s1_posthead_singular = _maybe_singular("s1", "posthead")
     s1_projected_singular = _maybe_singular("s1", "projected")
     s1_backbone_singular = _maybe_singular("s1", "backbone")
-    s2_posthead_singular = _maybe_singular("s2", "posthead")
     s2_projected_singular = _maybe_singular("s2", "projected")
     s2_backbone_singular = _maybe_singular("s2", "backbone")
 
@@ -1244,25 +1856,14 @@ def _run_embedding_diagnostics(
 
 
     spectra: List[Tuple[str, str, np.ndarray]] = []
-    if s1_posthead_singular is not None:
-        spectra.append(("s1", "posthead", s1_posthead_singular))
     if s1_projected_singular is not None:
         spectra.append(("s1", "projected", s1_projected_singular))
     if s1_backbone_singular is not None:
         spectra.append(("s1", "backbone", s1_backbone_singular))
-    if s2_posthead_singular is not None:
-        spectra.append(("s2", "posthead", s2_posthead_singular))
     if s2_projected_singular is not None:
         spectra.append(("s2", "projected", s2_projected_singular))
     if s2_backbone_singular is not None:
         spectra.append(("s2", "backbone", s2_backbone_singular))
-
-    if (
-        s2_posthead_singular is not None
-        and s2_projected_singular is not None
-        and s2_posthead_singular.shape != s2_projected_singular.shape
-    ):
-        raise ValueError("S2 posthead and projected singular values have different dimensions")
 
     # # check type of payload
     # for entry in cka_payload.items():
@@ -1313,8 +1914,8 @@ def _run_embedding_diagnostics(
         ids=diagnostic_ids,
         s1=s1_bundle,
         s2=s2_bundle,
-        s1_singular_values=_as_array(s1_posthead_singular),
-        s2_singular_values=_as_array(s2_posthead_singular),
+        s1_singular_values=_as_array(s1_projected_singular),
+        s2_singular_values=_as_array(s2_projected_singular),
         s1_layers=s1_layers,
         s2_layers=s2_layers,
         s1_within_cka=s1_within,
@@ -1344,12 +1945,9 @@ def _run_embedding_diagnostics(
     can_plot_full = (
         s1_bundle is not None
         and modality_tensors["s1"] is not None
-        # and modality_tensors["s1"].get("posthead") is not None
-        # and modality_tensors["s2"].get("posthead") is not None
     )
     can_plot_s2_only = (
         s1_bundle is None
-        # and modality_tensors["s2"].get("posthead") is not None
     )
 
     normalized_weights = (config.model_weights or "").lower()
@@ -1384,7 +1982,7 @@ def _run_embedding_diagnostics(
             plot_epoch_diagnostics(
                 epoch_diagnostics,
                 output_dir,
-                label="posthead_raw",
+                label="embeddings_raw",
                 plot_even_odd=True,
             )
         else:
@@ -1400,7 +1998,7 @@ def _run_embedding_diagnostics(
             plot_even_odd=plot_even_odd,
         )
     else:
-        logging.info("Skipping epoch diagnostics plots due to missing posthead/projected features")
+        logging.info("Skipping epoch diagnostics plots due to missing embedding features")
 
     if not spectra:
         logging.warning("No features available for singular value diagnostics")
@@ -1452,16 +2050,28 @@ def _run_embedding_diagnostics(
         indices = rng.choice(len(features), size=maximum, replace=False)
         return features[indices], labels[indices]
 
-    for feature_name in ("posthead", "projected", "backbone"):
+    
+
+    for feature_name in ("projected", "backbone"):
+        # ciip is lorentz
+        curv = None
+        if 'lorentz' in config.model_type and feature_name == "projected":
+            use = 'poincare'
+            curv = config.curvature
+
+        else:
+            use = 'zscore'
+
+
         combined, modality_labels = _stack_features(feature_name)
         if combined.size == 0:
             continue
-        for mode in ("none", "zscore"):
+        for mode in ("raw", use):
             subset, subset_labels = _sample(combined, modality_labels, config.tsne_samples)
-            processed = preprocess_projection_data(subset, mode=mode, random_state=config.random_seed)
+            processed = preprocess_projection_data(subset, mode=mode, random_state=config.random_seed, curvature=curv)
             coords = compute_projection(processed, method="tsne", random_state=config.random_seed)
             if coords is not None:
-                suffix = "zscore" if mode == "zscore" else "raw"
+                suffix = mode
                 plot_projection(
                     coords,
                     subset_labels,
@@ -1529,6 +2139,7 @@ def _run_hyperbolic_visualisations(
     plot_angular_pca(s1_dirs, s2_dirs, s1_distances, s2_distances, output_dir / "angular_pca.png")
     plot_cone_polar(positive_angles, aperture_s1, aperture_s2, output_dir / "cone_polar.png", sample_size=256, seed=seed)
 
+    
 
 def run_full_evaluation(config: ModelEvalConfig) -> None:
     logging.basicConfig(level=logging.INFO)
@@ -1543,7 +2154,10 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
         in_chans=config.model_in_channels,
         croma_weights=config.croma_weights,
         croma_image_resolution=config.croma_image_resolution,
+        ciip_framework=config.ciip_framework,
     )
+    print(f'Model loaded')
+    # print(adapter)
     device = torch.device(torch.device("cuda") if torch.cuda.is_available() else "cpu")
     if not torch.cuda.is_available():
         raise ValueError
@@ -1552,6 +2166,10 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
     adapter.eval()
     base_model = getattr(adapter, "base_model", adapter)
     is_lorentz = getattr(adapter, "is_lorentz", False)
+    # save curvature to config if lorentz
+    if is_lorentz and hasattr(base_model, "curvature"):
+        config.curvature = float(base_model.curvature)
+        print(f"Lorentz curvature: {config.curvature}")
 
 
     output_root = Path(config.output_dir)
@@ -1564,10 +2182,28 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
     model_channels = _infer_model_in_channels(
         adapter, config.model_in_channels, modality=target_modality
     )
+    thirteen_band_models = {
+        "dofa_base_s2_13ch",
+        "vitsmall16_s2_all_moco",
+        "resnet18_s2_all_moco",
+        "moco",
+        "dino",
+    }
+    if (config.model_weights and config.model_weights in thirteen_band_models) or (
+        config.model_type and config.model_type in thirteen_band_models
+    ):
+        model_channels = max(model_channels, 13)
 
     output_dir = config.output_dir
     os.makedirs(output_dir, exist_ok=True)
     output_dir = Path(output_dir)
+
+    normalization_method = config.normalization_method.lower()
+    if normalization_method not in NORMALIZATION_METHODS:
+        raise ValueError(
+            "normalization_method must be one of "
+            f"{', '.join(NORMALIZATION_METHODS)}; got {config.normalization_method!r}"
+        )
 
 
     if args.disable_eurosat == False:
@@ -1584,10 +2220,16 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
         
 
         # check if dir exists
-        eurosat_output_dir = output_dir / "linear_probe"
+        eurosat_output_dir = output_dir / f"linear_probe_{normalization_method}"
         if True:
             eurosat_loaders = _build_eurosat_loaders(
                 config, bands=eurosat_bands, modality=target_modality
+            )
+            _print_band_stats(
+                "EuroSAT eval",
+                eurosat_loaders.get("val", next(iter(eurosat_loaders.values()))),
+                bands=eurosat_bands,
+                max_batches=config.stats_max_batches,
             )
             eurosat_embeddings: Dict[str, EmbeddingBundle] = {}
             with _use_adapter_modality(adapter, target_modality):
@@ -1599,7 +2241,25 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
                         expected_in_channels=model_channels,
                         modality=target_modality,
                     )
-            _run_linear_probe(config, eurosat_embeddings, output_dir=output_dir, label="eurosat")
+            _run_linear_probe(
+                config,
+                eurosat_embeddings,
+                output_dir=output_dir,
+                label="eurosat",
+                norm_method=normalization_method,
+            )
+            if config.matryoshka_dims:
+                for dim in config.matryoshka_dims:
+                    mat_output_dir = output_dir / f"matryoshka_dim_{dim}"
+                    _run_linear_probe(
+                        config,
+                        eurosat_embeddings,
+                        output_dir=mat_output_dir,
+                        label="eurosat",
+                        norm_method=normalization_method,
+                        slice_dim=dim,
+                        feature_override="backbone",
+                    )
             _plot_eurosat_tsne(
                 eurosat_embeddings["test"],
                 output_dir=eurosat_output_dir,
@@ -1608,13 +2268,69 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
                 seed=config.random_seed,
                 model_title=config.model_path,
             )
+            # _plot_eurosat_pca(
+            #     eurosat_embeddings["test"],
+            #     output_dir=eurosat_output_dir,
+            #     label="eurosat",
+            #     max_samples=config.pca_samples,
+            #     seed=config.random_seed,
+            #     model_title=config.model_path,
+            #     modality_label=target_modality,
+            # )
+            # print("EuroSAT PCA plot saved.")
 
         # clean up dataset, not needed anymore
+        del eurosat_loaders
+        del eurosat_embeddings
 
+
+    if not args.disable_bigearthnet:
+        print("Running BigEarthNet linear probe...")
+        bigearthnet_loaders, bigearthnet_bands = _build_bigearthnet_loaders(
+            config, expected_channels=model_channels
+        )
+        _print_band_stats(
+            "BigEarthNet eval",
+            bigearthnet_loaders.get("val", next(iter(bigearthnet_loaders.values()))),
+            bands=bigearthnet_bands,
+            max_batches=config.stats_max_batches,
+        )
+        print("BigEarthNet loaders built.")
+        bigearthnet_embeddings: Dict[str, EmbeddingBundle] = {}
+        with _use_adapter_modality(adapter, "s2"):
+            for split, loader in bigearthnet_loaders.items():
+                bigearthnet_embeddings[split] = _extract_embeddings(
+                    adapter,
+                    loader,
+                    device=device,
+                    expected_in_channels=model_channels,
+                    modality="s2",
+                )
+        print("BigEarthNet embeddings extracted.")
+        if config.matryoshka_dims:
+            for dim in config.matryoshka_dims:
+                mat_output_dir = output_dir / f"matryoshka_dim_{dim}"
+                _run_linear_probe(
+                    config,
+                    bigearthnet_embeddings,
+                    output_dir=mat_output_dir,
+                    label="bigearthnet",
+                    norm_method=normalization_method,
+                    slice_dim=dim,
+                    feature_override="backbone",
+                )
+        else:
+            _run_linear_probe(
+                config,
+                bigearthnet_embeddings,
+                output_dir=output_dir,
+                label="bigearthnet",
+                norm_method=normalization_method,
+            )
 
 
     if args.disable_neuco == False:
-        neuco_output_dir = output_dir / "neuco"
+        neuco_output_dir = output_dir / f"neuco_{normalization_method}"
         base_modalities: List[str] = list(config.neuco_modalities)
         s2_candidates = [m for m in base_modalities if m in ("s2l2a", "s2l1c")]
         has_dual_neuco = (
@@ -1625,17 +2341,23 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
         )
 
         def _run_single_neuco(modality: str, active_modality: str) -> None:
-            csv_out_backbone = neuco_output_dir / "neuco_export" / f"neuco_{modality}_backbone.csv"
-            csv_out_posthead = neuco_output_dir / "neuco_export" / f"neuco_{modality}_posthead.csv"
-            csv_out_projected = neuco_output_dir / "neuco_export" / f"neuco_{modality}_projected.csv"
+            suffix = "_s1" if active_modality.lower() == "s1" else ""
+            csv_out_backbone = neuco_output_dir / "neuco_export" / f"neuco_{modality}{suffix}_backbone.csv"
+            # csv_out_projected = neuco_output_dir / "neuco_export" / f"neuco_{modality}_projected.csv"
 
-            if csv_out_backbone.exists() and csv_out_posthead.exists() and csv_out_projected.exists():
-                print(f"NeuCo embeddings already exist for modality {modality}, skipping extraction.")
-                neuco_bundle = None
+            if False: #csv_out_backbone.exists():
+                pass
+                # print(f"NeuCo embeddings already exist for modality {modality}, skipping extraction.")
+                # neuco_bundle = None
             else:
                 print(f"Extracting NeuCo embeddings for modality {modality} into {csv_out_backbone.parent}")
                 neuco_output_dir.mkdir(parents=True, exist_ok=True)
                 neuco_loader = _build_neuco_loader(config, modalities=[modality])
+                _print_band_stats(
+                    f"NeuCo eval ({modality})",
+                    neuco_loader,
+                    max_batches=config.stats_max_batches,
+                )
 
                 expected_channels = (
                     _infer_model_in_channels(adapter, config.model_in_channels, modality=active_modality)
@@ -1648,46 +2370,94 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
                         require_ids=True,
                         expected_in_channels=expected_channels,
                         modality=active_modality,
+                        pca_output_dir=neuco_output_dir,
                     )
 
                 _export_neuco(neuco_bundle, neuco_output_dir / "neuco_export", label=modality)
                 print("Saved NeuCo embeddings to ", neuco_output_dir / "neuco_export")
 
-            if config.model_type == "croma":
+            print(f'model type: {config.model_type}')
+            print(f'model weights: {config.model_weights}')
+            if config.model_type == "croma" or ('dofa' in config.model_weights.lower() if config.model_weights else False):
                 embedding_dim_backbone = "768"
             elif config.model_type == "torchgeo_resnet50":
                 embedding_dim_backbone = "2048"
+            elif 'resnet18' in config.model_weights.lower() if config.model_weights else False:
+                embedding_dim_backbone = "512"
+            elif 'llama' in config.model_weights.lower() if config.model_weights else False:
+                embedding_dim_backbone = "512"
+            elif 'resnet50' in config.model_weights.lower() if config.model_weights else False:
+                embedding_dim_backbone = "2048"
+            elif 'vitsmall' in config.model_weights.lower() if config.model_weights else False:
+                embedding_dim_backbone = "384"
+            elif 'scalemae' in config.model_weights.lower() if config.model_weights else False:
+                embedding_dim_backbone = "1024"
             else:
                 backbone_tensor = getattr(neuco_bundle, "backbone", None) if neuco_bundle is not None else None
+
                 embedding_dim_backbone = (
                     str(backbone_tensor.shape[1]) if backbone_tensor is not None else "2048"
                 )
 
             print(f"NeuCo embedding dimension for {modality}: {embedding_dim_backbone}")
 
-            cmd = [
-                "python", "/local/ms-data/NeuCo-Bench/benchmark/main.py",
-                "--annotation_path", "/local/ms-data/SSL4EO-S12-downstream/labels",
-                "--output_dir", neuco_output_dir,
-                "--config", "/local/ms-data/NeuCo-Bench/benchmark/config.yaml",
-                "--method_name", "backbone",
-                "--phase", "testing",
-                "--submission_file", csv_out_backbone,
-                "--embedding_dim", embedding_dim_backbone
-            ]
-            env = os.environ.copy()
-            env["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
-            subprocess.run(cmd, check=True, env=env)
+            if config.matryoshka_dims:
+                for dim in config.matryoshka_dims:
+                    if neuco_bundle is None or neuco_bundle.backbone is None:
+                        raise RuntimeError("NeuCo backbone embeddings are required for Matryoshka evaluation.")
+                    if dim > neuco_bundle.backbone.shape[1]:
+                        raise ValueError(
+                            f"Matryoshka dim {dim} exceeds NeuCo backbone dimension {neuco_bundle.backbone.shape[1]}."
+                        )
+                    mat_output_dir = neuco_output_dir / f"matryoshka_dim_{dim}"
+                    mat_export_dir = mat_output_dir / "neuco_export"
+                    mat_export_dir.mkdir(parents=True, exist_ok=True)
+                    mat_bundle = EmbeddingBundle(
+                        backbone=neuco_bundle.backbone[:, :dim],
+                        projected=neuco_bundle.projected,
+                        labels=neuco_bundle.labels,
+                        multi_labels=neuco_bundle.multi_labels,
+                        ids=neuco_bundle.ids,
+                    )
+                    mat_csv = mat_export_dir / f"neuco_{modality}{suffix}_backbone.csv"
+                    _export_neuco(mat_bundle, mat_export_dir, label=modality)
+                    cmd = [
+                        "python", "/local/ms-data/NeuCo-Bench/benchmark/main.py",
+                        "--annotation_path", "/local/ms-data/SSL4EO-S12-downstream/labels",
+                        "--output_dir", mat_output_dir,
+                        "--config", "/local/ms-data/NeuCo-Bench/benchmark/config.yaml",
+                        "--method_name", "backbone",
+                        "--phase", "testing",
+                        "--submission_file", mat_csv,
+                        "--embedding_dim", str(dim)
+                    ]
+                    env = os.environ.copy()
+                    env["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+                    subprocess.run(cmd, check=True, env=env)
+            else:
+                cmd = [
+                    "python", "/local/ms-data/NeuCo-Bench/benchmark/main.py",
+                    "--annotation_path", "/local/ms-data/SSL4EO-S12-downstream/labels",
+                    "--output_dir", neuco_output_dir,
+                    "--config", "/local/ms-data/NeuCo-Bench/benchmark/config.yaml",
+                    "--method_name", "backbone",
+                    "--phase", "testing",
+                    "--submission_file", csv_out_backbone,
+                    "--embedding_dim", embedding_dim_backbone
+                ]
+                env = os.environ.copy()
+                env["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+                subprocess.run(cmd, check=True, env=env)
 
         if has_dual_neuco:
             print("Dual NeuCo modalities detected; running S2 and S1 evaluations separately.")
             s2_modality = s2_candidates[0]
             _run_single_neuco(s2_modality, "s2")
-            _run_single_neuco("s1", "s1")
+            # _run_single_neuco("s1", "s1")
         else:
             neuco_modalities: List[str] = base_modalities
-            print('NeuCo modalities from config: ', neuco_modalities)
-            print('Target modality: ', target_modality)
+            # print('NeuCo modalities from config: ', neuco_modalities)
+            # print('Target modality: ', target_modality)
             if target_modality == "s1":
                 neuco_modalities = ["s1"]
             elif not neuco_modalities:
@@ -1823,6 +2593,7 @@ __all__ = ["ModelEvalConfig", "run_full_evaluation"]
 
 if __name__ == "__main__":
     import argparse
+    import tempfile, time, os
 
     parser = argparse.ArgumentParser(description="Run the unified CIIP evaluation pipeline.")
     parser.add_argument(
@@ -1845,6 +2616,7 @@ if __name__ == "__main__":
             "resnet50_s2_rgb_moco",
             "resnet152_imagenet_rgb",
             "vitsmall16_s2_all_moco",
+            "llama3_ms_clip_base",
         ],
         help="Pretrained weight selection for the requested model type.",
     )
@@ -1852,6 +2624,11 @@ if __name__ == "__main__":
     parser.add_argument("--croma-image-resolution", type=int, default=120, help="Input resolution expected by the CROMA model.")
     parser.add_argument("--model-in-channels", type=int, help="Number of input channels for TorchGeo ResNet models.")
     parser.add_argument("--model-path", type=str, help="Experiment path identifier for the model.")
+    parser.add_argument(
+        "--ciip-framework",
+        choices=["modified_resnet", "transformer", "resnet18", "resnet50"],
+        help="Backbone framework for CIIP checkpoints (defaults to auto-detect).",
+    )
     
     parser.add_argument("--tsne-samples", type=int, default=1500, help="Samples used for t-SNE visualisations.")
     parser.add_argument("--pca-samples", type=int, default=5000, help="Samples used for PCA visualisations.")
@@ -1859,19 +2636,48 @@ if __name__ == "__main__":
     parser.add_argument("--ssl4eo-subset-seed", type=int, default=0, help="Subset seed for SSL4EO sampling.")
     parser.add_argument("--neuco-modalities", nargs="*", default=["s2l2a"], help="NeuCo modalities to export.")
     parser.add_argument("--ssl4eo-s2-tier", choices=['s2l1c', 's2l2a'], default='s2l2a', help="Sentinel-2 data tier to use for SSL4EO embeddings.")
-    parser.add_argument("--neuco-seasons", type=int, default=1, help="Number of seasons for NeuCo extraction.") # i believe these are averaged
+    parser.add_argument("--neuco-seasons", type=int, default=4, help="Number of seasons for NeuCo extraction.") # i believe these are averaged
     parser.add_argument(
         "--evaluation-modality",
         choices=["s1", "s2"],
         default="s2",
         help="Sentinel modality to use for EuroSAT and NeuCo evaluations.",
     )
+    parser.add_argument(
+        "--normalization-method",
+        choices=NORMALIZATION_METHODS,
+        default=DEFAULT_NORMALIZATION_METHOD,
+        help="Normalization applied to Sentinel-2 / optical inputs.",
+    )
     # parser.add_argument("--neuco-resize", type=int, nargs=2, help="Resize dimensions for NeuCo images.")
 
     parser.add_argument("--disable-eurosat", action="store_true", help="Skip EuroSAT linear probe evaluation.")
+    parser.add_argument("--disable-bigearthnet", action="store_true", help="Skip BigEarthNet linear probe evaluation.")
+    parser.add_argument(
+        "--matryoshka-dims",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Evaluate matryoshka slices at these embedding dimensions.",
+    )
+    parser.add_argument(
+        "--matryoshka-feature",
+        type=str,
+        choices=("backbone",),
+        default="backbone",
+        help="Embedding space to slice for matryoshka evaluation.",
+    )
     parser.add_argument("--disable-neuco", action="store_true", help="Skip NeuCo benchmark evaluation.")
     parser.add_argument("--disable-ssl4eo", action="store_true", help="Skip SSL4EO diagnostics even if a root is provided.")
     parser.add_argument("--ciip-epoch", type=int, default=10, help="Epoch number for CIIP checkpoint to evaluate.")
+    parser.add_argument("--bigearthnet-root", type=Path, default=Path("/local/ms-data/BigEarthNet/"), help="Root directory for BigEarthNet data.")
+    parser.add_argument("--bigearthnet-image-size", type=int, default=224, help="Input resolution for BigEarthNet evaluation.")
+    parser.add_argument(
+        "--stats-max-batches",
+        type=int,
+        default=0,
+        help="Limit batches when computing bandwise stats (0 = full dataset).",
+    )
     args = parser.parse_args()
 
 
@@ -1896,6 +2702,9 @@ if __name__ == "__main__":
             print('Setting modalities to s2l1c')
             # args.neuco_modalities = ['s2l1c']
             args.ssl4eo_s2_tier = 's2l1c'
+        if args.model_in_channels == 10 and (args.model_weights == "llama3_ms_clip_base"):
+            print('Setting modalities to s2l2a for MS-CLIP (10ch)')
+            args.ssl4eo_s2_tier = 's2l2a'
         
 
         
@@ -1931,7 +2740,10 @@ if __name__ == "__main__":
     args.eurosat_root=Path("/local/ms-data/EuroSAT/")
     args.neuco_root=Path("/local/ms-data/SSL4EO-S12-downstream/data")
 
-    if args.model_type == "scalemae_large_rgb" or 'rgb' in (args.model_weights or ''):
+    if (
+        args.model_type == "scalemae_large_rgb"
+        or "rgb" in (args.model_weights or "")
+    ):
         args.ssl4eo_s2_tier = 'rgb'
 
 
@@ -1943,8 +2755,8 @@ if __name__ == "__main__":
     elif args.model_type == 'backbone_only':
         output_dir = f"/home/juro4948/ciip/diagnostics/unified_eval/{args.model_weights or 'backbone_only'}/"
     elif args.model_type == 'ciip_checkpoint':
-        output_dir = f"/home/juro4948/ciip/diagnostics/unified_eval/{args.model_type}/epoch_{args.ciip_epoch}/"
-        output_dir = output_dir + args.model_path.strip('/') + '/'
+        output_dir = f"/home/juro4948/ciip/diagnostics/unified_eval/{args.model_type}/"
+        output_dir = output_dir + args.model_path.strip('/') + f"/epoch_{args.ciip_epoch}/"
     else:
         raise ValueError("Invalid model type")
     args.output_dir = Path(output_dir)
@@ -1968,10 +2780,13 @@ if __name__ == "__main__":
         checkpoint=args.checkpoint,
         model_type=args.model_type,
         model_weights=args.model_weights,
+        ciip_framework=args.ciip_framework,
         model_in_channels=args.model_in_channels,
         croma_weights=args.croma_weights,
         croma_image_resolution=args.croma_image_resolution,
         enable_ssl4eo=not args.disable_ssl4eo,
+        matryoshka_dims=tuple(args.matryoshka_dims) if args.matryoshka_dims else None,
+        matryoshka_feature=str(args.matryoshka_feature),
         ssl4eo_root=args.ssl4eo_root,
         tsne_samples=args.tsne_samples,
         pca_samples=args.pca_samples,
@@ -1981,5 +2796,9 @@ if __name__ == "__main__":
         neuco_seasons=args.neuco_seasons,
         evaluation_modality=args.evaluation_modality,
         ssl4eo_s2_tier=args.ssl4eo_s2_tier,
+        bigearthnet_root=args.bigearthnet_root,
+        bigearthnet_image_size=args.bigearthnet_image_size,
+        normalization_method=args.normalization_method,
+        stats_max_batches=int(args.stats_max_batches),
     )
     run_full_evaluation(cfg)

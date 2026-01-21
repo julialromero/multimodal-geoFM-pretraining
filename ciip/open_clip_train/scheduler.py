@@ -3,7 +3,8 @@ import numpy as np
 
 def assign_learning_rate(optimizer, new_lr):
     for param_group in optimizer.param_groups:
-        param_group["lr"] = new_lr
+        scale = param_group.get("lr_scale", 1.0)
+        param_group["lr"] = new_lr * scale
 
 
 def _warmup_lr(base_lr, warmup_length, step):

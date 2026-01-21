@@ -80,7 +80,7 @@ def get_latest_checkpoint(path: str, remote : bool):
         return checkpoints[-1]
     return None
 
-@hydra.main(config_path="configs", config_name=CONF)
+@hydra.main(config_path="configs", config_name=CONF, version_base=None)
 # def main(args):
 def main(args: DictConfig, start_epoch=0):
     

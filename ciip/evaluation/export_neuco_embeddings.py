@@ -65,6 +65,13 @@ MODALITY_STATS: Dict[str, Tuple[np.ndarray, np.ndarray]] = {
     "s2l2a_rgb": (S2L2A_RGB_MEAN, S2L2A_RGB_STD)
 }
 
+NEUCO_MODALITY_STATS: Dict[str, Tuple[np.ndarray, np.ndarray]] = {
+    "s2l1c": (S2L1C_MEAN, S2L1C_STD),
+    "s2l2a": (S2L2A_MEAN, S2L2A_STD),
+    "s1": (S1GRD_MEAN, S1GRD_STD),
+    "s2l2a_rgb": (S2L2A_RGB_MEAN, S2L2A_RGB_STD),
+}
+
 # # ------------------------
 
 
@@ -601,6 +608,34 @@ class SSL4EONormalize:
 
         img = img.float()
         return (img - self.mean.to(img.device)) / self.std.to(img.device)
+
+
+class NeuCoNormalize:
+    """
+    Normalizes image tensor for NeuCo challenge data: (img - mean) / std per channel.
+    """
+
+    def __init__(self):
+        super().__init__()
+
+    def __call__(self, img: torch.Tensor) -> torch.Tensor:
+        C = img.shape[-3]
+        if C == 13:
+            modality = "s2l1c"
+        elif C == 12:
+            modality = "s2l2a"
+        elif C == 3:
+            modality = "s2l2a_rgb"
+        elif C == 2:
+            modality = "s1"
+        else:
+            raise ValueError(f"Cannot infer modality from number of channels: {C}")
+
+        mean, std = NEUCO_MODALITY_STATS[modality]
+        mean_t = torch.tensor(mean).view(-1, 1, 1)
+        std_t = torch.tensor(std).view(-1, 1, 1)
+        img = img.float()
+        return (img - mean_t.to(img.device)) / std_t.to(img.device)
     
 class CromaNormalize(nn.Module):
     def __init__(self, use_8_bit: bool = False):

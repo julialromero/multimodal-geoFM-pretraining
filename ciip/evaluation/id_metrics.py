@@ -87,6 +87,12 @@ SSL4EO_MODEL_TRANSFORMS: Dict[str, Callable[[torch.Tensor], torch.Tensor]] = {
             S2ScaleTransform(scale=10000.0),
         ]
     ),
+    # "llama3_ms_clip_base": T.Compose(
+    #     [
+    #         T.CenterCrop((224, 224)),
+    #         T.Normalize(mean=S2L2A_MEAN, std=S2L2A_STD),
+    #     ]
+    # ),
 }
 
 
@@ -162,4 +168,3 @@ def save_id_metrics(metrics: Dict[str, Dict[str, float]], output_path: Path) -> 
             handle.write("\n")
 
     logging.info("Intrinsic dimension metrics saved to %s", output_path)
-

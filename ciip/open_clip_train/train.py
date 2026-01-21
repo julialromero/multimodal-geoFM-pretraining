@@ -204,6 +204,9 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
     device = torch.device(args.datamodule.device)
     autocast = get_autocast(args.model.precision)
     input_dtype = get_input_dtype(args.model.precision)
+    model_cfg = getattr(args, "model", None)
+    encoder_pair = getattr(model_cfg, "encoder_pair", "s1s2")
+    use_text = encoder_pair == "s2_text"
 
     model.train()
     
@@ -223,7 +226,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
 
 
     with torch.no_grad():
-        if epoch == 0 and args.train.apply_orthogonal_mapping:
+        if epoch == 0 and args.train.apply_orthogonal_mapping and not use_text:
             #log
             logging.info("Computing optimal orthogonal mapping W for s1 to s2...")
             base_dataset = dataloader.dataset
@@ -330,9 +333,15 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
         if not args.model.skip_scheduler:
             scheduler(step)
 
-        s1, s2 = batch['s1'], batch['s2']
-        s1 = s1.to(device=device, dtype=input_dtype, non_blocking=True)
-        s2 = s2.to(device=device, dtype=input_dtype, non_blocking=True)
+        if use_text:
+            s1 = batch["s2"].to(device=device, dtype=input_dtype, non_blocking=True)
+            s2 = batch["text"].to(device=device, non_blocking=True)
+        else:
+            s1, s2 = batch['s1'], batch['s2']
+            s1 = s1.to(device=device, dtype=input_dtype, non_blocking=True)
+            s2 = s2.to(device=device, dtype=input_dtype, non_blocking=True)
+
+        
 
         data_time_m.update(time.time() - end)
         optimizer.zero_grad()
@@ -467,7 +476,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
 
         # Note: we clamp to 4.6052 = ln(100), as in the original paper.
         with torch.no_grad():
-            unwrap_model(model).logit_scale.clamp_(0, math.log(40))
+            unwrap_model(model).logit_scale.clamp_(0, math.log(100))
 
         batch_time_m.update(time.time() - end)
         end = time.time()

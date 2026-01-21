@@ -3,14 +3,17 @@
 import glob
 import logging
 import os
+from functools import partial
 from dataclasses import dataclass
 from multiprocessing import Value
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import hydra
 import numpy as np
+import pandas as pd
 import rasterio
 import torch
+from open_clip import tokenize as clip_tokenize
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torchvision.transforms import Resize
@@ -127,11 +130,22 @@ class SSL4EODataset(Dataset):
         num_timestamps: int = 4,
         s2_tier: str = "S2L2A",
         is_train: bool = True,
+        temporal_agg: str | None = None,
+        return_all_timestamps: bool = False,
     ):
         self.root = Path(root)
         self.is_train = is_train
         self.seasons = seasons
         self.transforms = transforms
+        self.temporal_agg = temporal_agg
+        # New behavior: optionally return all timestamps so downstream can run the
+        # model per-season and average embeddings. Keep backward compatibility by
+        # honoring temporal_agg="mean" as a request to return all timestamps
+        # without averaging the raw images.
+        if self.temporal_agg is not None:
+            assert self.temporal_agg in {"mean"}, f"Unsupported temporal_agg: {self.temporal_agg}"
+            return_all_timestamps = True if self.temporal_agg == "mean" else return_all_timestamps
+        self.return_all_timestamps = return_all_timestamps
         if transforms is not None:
             self.s1_transforms = transforms["s1"]
             self.s2_transforms = transforms["s2"]
@@ -216,6 +230,10 @@ class SSL4EODataset(Dataset):
         s1_tensor = s1
         s2_tensor = s2
 
+        # print descr stats of s2 before transforms
+        # print(f'S2 before transforms: mean={s2_tensor.mean().item():.4f}, std={s2_tensor.std().item():.4f}, min={s2_tensor.min().item():.4f}, max={s2_tensor.max().item():.4f}')
+    
+
         if self.is_train:
             # Use first sample to get crop params, then apply to all P
             i, j, h, w = T.RandomCrop.get_params(s1_tensor[0], output_size=(224, 224))
@@ -243,19 +261,25 @@ class SSL4EODataset(Dataset):
             [self.s1_transforms(s1_tensor[p]) for p in range(P)],
             dim=0,
         )
+        # print shapes
+        # print(f'S2 shape before s2 transforms: {s2_tensor.shape}')
+        # print transforms
+        # print(f'S2 transforms: {self.s2_transforms}')
         s2_out = torch.stack(
             [self.s2_transforms(s2_tensor[p]) for p in range(P)],
             dim=0,
         )
 
+        # print out descriptive statistics of s2
+        # print(f'S2 after transforms: mean={s2_out.mean().item():.4f}, std={s2_out.std().item():.4f}, min={s2_out.min().item():.4f}, max={s2_out.max().item():.4f}')
+
         return s1_out, s2_out
 
     # -----------------------------------------------------
     def __getitem__(self, file_idx: int) -> Dict[str, Any]:
-        """Index by file: return all 64 samples for one random season."""
+        """Index by file: return all 64 samples for one random season or all seasons."""
         # Random time index (shared across modalities for this file)
         time_idx = np.random.randint(0, self.num_timestamps)
-        # print(f'num timestamps: {self.num_timestamps}, selected time_idx: {time_idx}')
         season_name = self.seasons[time_idx]
 
         ds_s1, ds_s2 = self._open_zarr_pair(file_idx)
@@ -272,34 +296,49 @@ class SSL4EODataset(Dataset):
         assert C_s1 == 2, f"Unexpected S1 channel count: {C_s1}"
         assert C_s2 == 12 or C_s2 == 13 or C_s2 == 3, f"Unexpected S2 channel count: {C_s2}"
 
-        s1_np = arr_s1[:, time_idx]  # (P, C1, H, W)
-        s2_np = arr_s2[:, time_idx]  # (P, C2, H, W)
+        if self.return_all_timestamps:
+            # Return all seasons so the caller can feed them individually and
+            # average embeddings. No averaging happens here.
+            s1_list = []
+            s2_list = []
+            for t in range(T):
+                s1_np = arr_s1[:, t]  # (P, C1, H, W)
+                s2_np = arr_s2[:, t]  # (P, C2, H, W)
 
-        s1 = torch.from_numpy(s1_np.astype("float32"))
-        s2 = torch.from_numpy(s2_np.astype("float32"))
+                s1_t = torch.from_numpy(s1_np.astype("float32"))
+                s2_t = torch.from_numpy(s2_np.astype("float32"))
 
-        # print shape
-        # print(f'S1 shape before transforms: {s1.shape}')
-        # print(f'S2 shape before transforms: {s2.shape}')
+                if self.is_rgb:
+                    if s2_t.ndim == 3 and s2_t.shape[0] >= 4:
+                        s2_t = s2_t[[3, 2, 1], ...]
+                    elif s2_t.ndim == 4 and s2_t.shape[1] >= 4:
+                        s2_t = s2_t[:, [3, 2, 1], ...]
 
-        # select rgb bands
-        if self.is_rgb:
-            # print("Before RGB selection:", x.shape)
-            if s2.ndim == 3:
-                # [C, H, W]
-                if s2.shape[0] >= 4:
+                s1_t, s2_t = self._apply_transforms(s1_t, s2_t)
+                s1_list.append(s1_t)
+                s2_list.append(s2_t)
+
+            # (P, T, C, H, W)
+            s1 = torch.stack(s1_list, dim=1)
+            s2 = torch.stack(s2_list, dim=1)
+        else:
+            s1_np = arr_s1[:, time_idx]  # (P, C1, H, W)
+            s2_np = arr_s2[:, time_idx]  # (P, C2, H, W)
+
+            s1 = torch.from_numpy(s1_np.astype("float32"))
+            s2 = torch.from_numpy(s2_np.astype("float32"))
+
+            if self.is_rgb:
+                if s2.ndim == 3 and s2.shape[0] >= 4:
                     s2 = s2[[3, 2, 1], ...]
-            elif s2.ndim == 4:
-                # [P, C, H, W]
-                if s2.shape[1] >= 4:
+                elif s2.ndim == 4 and s2.shape[1] >= 4:
                     s2 = s2[:, [3, 2, 1], ...]
-            # print("After RGB selection:", s2.shape)
 
-        s1, s2 = self._apply_transforms(s1, s2)
+            s1, s2 = self._apply_transforms(s1, s2)
 
         return {
-            "s1": s1,  # (P, 2, 224, 224)
-            "s2": s2,  # (P, 12, 224, 224)
+            "s1": s1,  # (P, 2, 224, 224) or (P, T, 2, 224, 224)
+            "s2": s2,  # (P, 12, 224, 224) or (P, T, 12/3, 224, 224)
             # optional metadata if you want:
             # "file_idx": file_idx,
             # "time_idx": time_idx,
@@ -307,11 +346,287 @@ class SSL4EODataset(Dataset):
         }
 
 
-    
+class SSL4EOTextDataset(Dataset):
+    def __init__(
+        self,
+        root: str | Path,
+        seasons: list[int] = [0, 1, 2, 3],
+        transforms: Optional[Any] = None,
+        num_samples_per_file: int = 64,
+        num_timestamps: int = 4,
+        s2_tier: str = "S2L2A",
+        caption_column: str = "caption",
+        tokenizer: Optional[Callable[[list[str]], torch.Tensor]] = None,
+        is_train: bool = True,
+    ):
+        self.root = Path(root)
+        self.is_train = is_train
+        self.seasons = seasons
+        self.transforms = transforms
+        self.caption_column = caption_column
+        self.tokenize = tokenizer or partial(clip_tokenize, context_length=77)
+        if transforms is not None:
+            self.s2_transforms = transforms.get("s2")
+        else:
+            self.s2_transforms = None
+
+        self.num_samples_per_file = num_samples_per_file
+        self.num_timestamps = num_timestamps
+
+        assert len(self.seasons) == self.num_timestamps, (
+            f"len(seasons)={len(self.seasons)} must equal num_timestamps={self.num_timestamps}"
+        )
+
+        self.is_rgb = False
+        self.captions_dir = self.root / "captions"
+        if s2_tier in ["s2l2a", "S2L2A", "s2a"]:
+            self.s2_dir = self.root / "S2L2A"
+        elif s2_tier in ["s2l1c", "S2L1C", "s2c"]:
+            self.s2_dir = self.root / "S2L1C"
+        elif s2_tier in ["rgb", "RGB"]:
+            self.s2_dir = self.root / "S2L2A"
+            self.is_rgb = True
+        else:
+            raise ValueError(f"Unsupported s2_tier: {s2_tier}")
+
+        assert self.s2_dir.exists(), f"Missing directory: {self.s2_dir}"
+        assert self.captions_dir.exists(), f"Missing directory: {self.captions_dir}"
+
+        self.file_basenames: list[str] = []
+        for path in sorted(self.s2_dir.glob("*.zarr.zip")):
+            base = path.name.split(".zarr.zip")[0]
+            if (self.captions_dir / f"{base}.csv").exists():
+                self.file_basenames.append(base)
+        self.num_files = len(self.file_basenames)
+        assert self.num_files > 0, f"No paired zarr/caption files found in {self.s2_dir}"
+
+        self._len = self.num_files
+
+    def __len__(self) -> int:
+        return self._len
+
+    def _open_zarr_and_captions(self, base_name: str):
+        s2_path = self.s2_dir / f"{base_name}.zarr.zip"
+        caption_path = self.captions_dir / f"{base_name}.csv"
+        assert s2_path.exists(), f"Missing file: {s2_path}"
+        assert caption_path.exists(), f"Missing file: {caption_path}"
+        ds_s2 = xr.open_zarr(s2_path)
+        captions_df = pd.read_csv(caption_path, index_col=0)
+        if self.caption_column not in captions_df.columns and len(captions_df.columns) > 0:
+            captions_df = captions_df.rename(columns={captions_df.columns[0]: self.caption_column})
+        return ds_s2, captions_df
+
+    def _apply_s2_only_transforms(self, s2: torch.Tensor) -> torch.Tensor:
+        if self.transforms is None or self.s2_transforms is None:
+            return s2
+
+        P, C, H, W = s2.shape
+        assert C in (3, 12, 13), f"Unexpected S2 channel count: {C}"
+
+        s2_tensor = s2
+        if self.is_train:
+            i, j, h, w = T.RandomCrop.get_params(s2_tensor[0], output_size=(224, 224))
+            s2_tensor = torch.stack([F.crop(s2_tensor[p], i, j, h, w) for p in range(P)], dim=0)
+            if random.random() < 0.5:
+                s2_tensor = torch.flip(s2_tensor, dims=[3])
+            if random.random() < 0.5:
+                s2_tensor = torch.flip(s2_tensor, dims=[2])
+
+        s2_out = torch.stack([self.s2_transforms(s2_tensor[p]) for p in range(P)], dim=0)
+        return s2_out
+
+    def __getitem__(self, file_idx: int) -> Dict[str, Any]:
+        time_idx = np.random.randint(0, self.num_timestamps)
+        base_name = self.file_basenames[file_idx]
+
+        ds_s2, captions_df = self._open_zarr_and_captions(base_name)
+
+        arr_s2 = ds_s2["bands"].values
+        P, T, C_s2, H, W = arr_s2.shape
+        assert P == self.num_samples_per_file, f"Expected {self.num_samples_per_file} samples/file, got {P}"
+        assert T == self.num_timestamps, f"Unexpected number of timestamps: {T}"
+
+        captions_raw = captions_df[self.caption_column].to_numpy()
+        try:
+            captions = captions_raw.reshape(self.num_samples_per_file, self.num_timestamps)
+        except ValueError:
+            captions = captions_raw.reshape(self.num_samples_per_file, -1)
+        captions_for_time = captions[:, time_idx].tolist()
+
+        s2_np = arr_s2[:, time_idx]
+        s2 = torch.from_numpy(s2_np.astype("float32"))
+
+        if self.is_rgb:
+            if s2.ndim == 4 and s2.shape[1] >= 4:
+                s2 = s2[:, [3, 2, 1], ...]
+
+        s2 = self._apply_s2_only_transforms(s2)
+        text_tokens = self.tokenize(captions_for_time)
+        if isinstance(text_tokens, list):
+            text_tokens = torch.stack(text_tokens)
+
+        return {
+            "s2": s2,
+            "text": text_tokens,
+        }
+
+
+class SSL4EOAlignedTrioDataset(Dataset):
+    def __init__(
+        self,
+        root: str | Path,
+        seasons: list[int] = [0, 1, 2, 3],
+        transforms: Optional[Any] = None,
+        num_samples_per_file: int = 64,
+        num_timestamps: int = 4,
+        s2_tier: str = "S2L2A",
+        caption_column: str = "caption",
+        tokenizer: Optional[Callable[[list[str]], torch.Tensor]] = None,
+        is_train: bool = True,
+    ):
+        self.root = Path(root)
+        self.is_train = is_train
+        self.seasons = seasons
+        self.transforms = transforms
+        self.caption_column = caption_column
+        self.tokenize = tokenizer or partial(clip_tokenize, context_length=77)
+        if transforms is not None:
+            self.s1_transforms = transforms.get("s1")
+            self.s2_transforms = transforms.get("s2")
+        else:
+            self.s1_transforms = None
+            self.s2_transforms = None
+
+        self.num_samples_per_file = num_samples_per_file
+        self.num_timestamps = num_timestamps
+
+        assert len(self.seasons) == self.num_timestamps, (
+            f"len(seasons)={len(self.seasons)} must equal num_timestamps={self.num_timestamps}"
+        )
+
+        self.is_rgb = False
+        self.s1_dir = self.root / "S1GRD"
+        self.captions_dir = self.root / "captions"
+        if s2_tier in ["s2l2a", "S2L2A", "s2a"]:
+            self.s2_dir = self.root / "S2L2A"
+        elif s2_tier in ["s2l1c", "S2L1C", "s2c"]:
+            self.s2_dir = self.root / "S2L1C"
+        elif s2_tier in ["rgb", "RGB"]:
+            self.s2_dir = self.root / "S2L2A"
+            self.is_rgb = True
+        else:
+            raise ValueError(f"Unsupported s2_tier: {s2_tier}")
+
+        assert self.s1_dir.exists(), f"Missing directory: {self.s1_dir}"
+        assert self.s2_dir.exists(), f"Missing directory: {self.s2_dir}"
+        assert self.captions_dir.exists(), f"Missing directory: {self.captions_dir}"
+
+        self.file_basenames: list[str] = []
+        for path in sorted(self.s2_dir.glob("*.zarr.zip")):
+            base = path.name.split(".zarr.zip")[0]
+            if (self.captions_dir / f"{base}.csv").exists() and (self.s1_dir / f"{base}.zarr.zip").exists():
+                self.file_basenames.append(base)
+        self.num_files = len(self.file_basenames)
+        assert self.num_files > 0, f"No paired zarr/caption files found in {self.s2_dir}"
+
+        self._len = self.num_files
+
+    def __len__(self) -> int:
+        return self._len
+
+    def _open_triplet(self, base_name: str):
+        s1_path = self.s1_dir / f"{base_name}.zarr.zip"
+        s2_path = self.s2_dir / f"{base_name}.zarr.zip"
+        caption_path = self.captions_dir / f"{base_name}.csv"
+        assert s1_path.exists(), f"Missing file: {s1_path}"
+        assert s2_path.exists(), f"Missing file: {s2_path}"
+        assert caption_path.exists(), f"Missing file: {caption_path}"
+        ds_s1 = xr.open_zarr(s1_path)
+        ds_s2 = xr.open_zarr(s2_path)
+        captions_df = pd.read_csv(caption_path, index_col=0)
+        if self.caption_column not in captions_df.columns and len(captions_df.columns) > 0:
+            captions_df = captions_df.rename(columns={captions_df.columns[0]: self.caption_column})
+        return ds_s1, ds_s2, captions_df
+
+    def _apply_transforms(
+        self,
+        s1: torch.Tensor,
+        s2: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.transforms is None or self.s1_transforms is None or self.s2_transforms is None:
+            return s1, s2
+
+        P, C1, H, W = s1.shape
+        _, C2, H2, W2 = s2.shape
+        assert C1 == 2, f"Unexpected S1 channel count: {C1}"
+        assert C2 in (3, 12, 13), f"Unexpected S2 channel count: {C2}"
+        assert (H, W) == (H2, W2)
+
+        s1_tensor = s1
+        s2_tensor = s2
+        if self.is_train:
+            i, j, h, w = T.RandomCrop.get_params(s1_tensor[0], output_size=(224, 224))
+            s1_tensor = torch.stack([F.crop(s1_tensor[p], i, j, h, w) for p in range(P)], dim=0)
+            s2_tensor = torch.stack([F.crop(s2_tensor[p], i, j, h, w) for p in range(P)], dim=0)
+            if random.random() < 0.5:
+                s1_tensor = torch.flip(s1_tensor, dims=[3])
+                s2_tensor = torch.flip(s2_tensor, dims=[3])
+            if random.random() < 0.5:
+                s1_tensor = torch.flip(s1_tensor, dims=[2])
+                s2_tensor = torch.flip(s2_tensor, dims=[2])
+
+        s1_out = torch.stack([self.s1_transforms(s1_tensor[p]) for p in range(P)], dim=0)
+        s2_out = torch.stack([self.s2_transforms(s2_tensor[p]) for p in range(P)], dim=0)
+        return s1_out, s2_out
+
+    def __getitem__(self, file_idx: int) -> Dict[str, Any]:
+        time_idx = np.random.randint(0, self.num_timestamps)
+        base_name = self.file_basenames[file_idx]
+
+        ds_s1, ds_s2, captions_df = self._open_triplet(base_name)
+
+        arr_s1 = ds_s1["bands"].values
+        arr_s2 = ds_s2["bands"].values
+        P, T, C_s1, H, W = arr_s1.shape
+        P2, T2, C_s2, H2, W2 = arr_s2.shape
+        assert P == self.num_samples_per_file, f"Expected {self.num_samples_per_file} samples/file, got {P}"
+        assert P2 == P and T2 == T and (H2, W2) == (H, W)
+        assert C_s1 == 2, f"Unexpected S1 channel count: {C_s1}"
+        assert C_s2 in (3, 12, 13), f"Unexpected S2 channel count: {C_s2}"
+
+        captions_raw = captions_df[self.caption_column].to_numpy()
+        try:
+            captions = captions_raw.reshape(self.num_samples_per_file, self.num_timestamps)
+        except ValueError:
+            captions = captions_raw.reshape(self.num_samples_per_file, -1)
+        captions_for_time = captions[:, time_idx].tolist()
+
+        s1_np = arr_s1[:, time_idx]
+        s2_np = arr_s2[:, time_idx]
+
+        s1 = torch.from_numpy(s1_np.astype("float32"))
+        s2 = torch.from_numpy(s2_np.astype("float32"))
+
+        if self.is_rgb and s2.ndim == 4 and s2.shape[1] >= 4:
+            s2 = s2[:, [3, 2, 1], ...]
+
+        s1, s2 = self._apply_transforms(s1, s2)
+
+        text_tokens = self.tokenize(captions_for_time)
+        if isinstance(text_tokens, list):
+            text_tokens = torch.stack(text_tokens)
+
+        return {
+            "s1": s1,
+            "s2": s2,
+            "text": text_tokens,
+        }
+
+
 from torch.utils.data._utils.collate import default_collate
 
 def collate_fn(batch):
-    # batch is a list of dicts, each with s1:(64,2,H,W), s2:(64,12,H,W)
+    # batch is a list of dicts, e.g., {"s1": (64,2,H,W), "s2": (64,12,H,W)} or {"s2": (64,12,H,W), "text": (64, L)}
     if isinstance(batch, list) and isinstance(batch[0], dict):
         return {
             k: torch.concat([b[k] for b in batch], dim=0)
@@ -600,7 +915,7 @@ def plot_pixel_value_distributions(dataset, band_names=['0', '1'], modality='s1'
     plt.close()
     
 
-def get_ssl4eo_dataset(args, is_train, transforms):
+def get_ssl4eo_dataset(args, is_train, transforms, tokenizer=None):
     root = args.dataset.root
     # root = args.dataset.train_data if is_train else args.val_data
     assert root
@@ -624,14 +939,34 @@ def get_ssl4eo_dataset(args, is_train, transforms):
     # # plot_pixel_value_distributions(data_sample, band_names=['0','1'], modality='s1', title='s1 without transforms')
     # plot_pixel_value_distributions(data_sample, band_names=default_bands, modality='s2', title='s2 without transforms')
 
-    
-    dataset = SSL4EODataset(
-        root,
-        seasons=[0,1,2,3],
-        transforms=transforms,  
-        s2_tier = "S2L2A",
-        is_train=True
-    )
+    model_cfg = getattr(args, "model", None)
+    encoder_pair = getattr(model_cfg, "encoder_pair", "s1s2")
+    if encoder_pair == "s2_text":
+        dataset = SSL4EOTextDataset(
+            root,
+            seasons=[0, 1, 2, 3],
+            transforms=transforms,
+            s2_tier=args.dataset.s2_tier,
+            tokenizer=tokenizer,
+            is_train=is_train,
+        )
+    elif encoder_pair == "s1s2_text":
+        dataset = SSL4EOAlignedTrioDataset(
+            root,
+            seasons=[0, 1, 2, 3],
+            transforms=transforms,
+            s2_tier=args.dataset.s2_tier,
+            tokenizer=tokenizer,
+            is_train=is_train,
+        )
+    else:
+        dataset = SSL4EODataset(
+            root,
+            seasons=[0,1,2,3],
+            transforms=transforms,  
+            s2_tier = args.dataset.s2_tier,
+            is_train=is_train
+        )
 
     # # sample 2000 samples to plot pixel distribution
     # data_sample = Subset(dataset, np.random.choice(range(len(dataset)), size=10, replace=False))
@@ -643,6 +978,16 @@ def get_ssl4eo_dataset(args, is_train, transforms):
     return dataset_to_datainfo(args, dataset, is_train)
 
 
+
+class Divideby10000Normalize:
+    """
+    Normalizes image tensor for DINO: scales to [0,1] range by dividing by 10000.
+    """
+
+    def __call__(self, img: torch.Tensor) -> torch.Tensor:
+        img = img.float() / 10000.0
+        return torch.clamp(img, 0.0, 1.0)
+    
 def dataset_to_datainfo(args, dataset, is_train):
     num_samples = len(dataset)
     sampler = DistributedSampler(dataset) if args.datamodule.distributed and is_train else None
@@ -736,19 +1081,31 @@ class BandwiseJitter(torch.nn.Module):
         else:
             return x + eps
         
+class Clamp_S1:
+    """
+    Normalizes image tensor for DINO: scales to [0,1] range by dividing by 10000.
+    """
+
+    def __call__(self, img: torch.Tensor) -> torch.Tensor:
+        img = torch.clamp(img, -25.0, 0.0)
+        return img + 25.0 / 25.0
+    
+
 
 def get_transform(modality, is_train):
     if modality == "s1":
         if is_train:
             return transforms.Compose([
-                transforms.Normalize(mean=S1GRD_MEAN, std=S1GRD_STD),
+                # transforms.Normalize(mean=S1GRD_MEAN, std=S1GRD_STD),
+                Clamp_S1()
             ])
         else:
+            raise NotImplementedError("S1 validation transforms - check norm method.")
             return transforms.Compose([
                 transforms.CenterCrop(224),
-                transforms.Normalize(mean=S1GRD_MEAN, std=S1GRD_STD),
+                # transforms.Normalize(mean=S1GRD_MEAN, std=S1GRD_STD),
             ])
-    elif modality == "s2a" or modality == "s2l2a":
+    elif modality.lower() == "s2a" or modality.lower() == "s2l2a":
         if is_train:
             return transforms.Compose([
                 transforms.RandomApply(
@@ -756,14 +1113,19 @@ def get_transform(modality, is_train):
                     p=0.3,
                 ),
                 BandwiseJitter(sigma=0.02, kind="multiplicative", p=0.8),
-                transforms.Normalize(mean=S2L2A_MEAN, std=S2L2A_STD),
+                # transforms.Normalize(mean=S2L2A_MEAN, std=S2L2A_STD),
+                Divideby10000Normalize(),
+                # clamp 0-1
+
             ])
         else:
-            return transforms.Compose([
+            raise NotImplementedError("S2 validation transforms - check norm method.")
+        return transforms.Compose([
                 transforms.CenterCrop(224),
                 transforms.Normalize(mean=S2L2A_MEAN, std=S2L2A_STD),
             ])
-    elif modality == "s2c" or modality == "s2l1c":
+    elif modality.lower() == "s2c" or modality.lower() == "s2l1c":
+        raise NotImplementedError("S2 validation transforms - check norm method.")
         print("Using S2 13 band L1C normalization.")
         if is_train:
             return transforms.Compose([
@@ -773,6 +1135,8 @@ def get_transform(modality, is_train):
                 ),
                 BandwiseJitter(sigma=0.02, kind="multiplicative", p=0.8),
                 transforms.Normalize(mean=S2L1C_MEAN, std=S2L1C_STD),
+                
+
             ])
         else:
             return transforms.Compose([
@@ -793,6 +1157,12 @@ def get_transform(modality, is_train):
 # def get_data(args, preprocess_fns, epoch=0, tokenizer=None):
 def get_data(args, preprocess_fns=None):
     data = {}
+    model_cfg = getattr(args, "model", None)
+    encoder_pair = getattr(model_cfg, "encoder_pair", "s1s2")
+    tokenizer = None
+    if encoder_pair in ("s2_text", "s1s2_text"):
+        context_length = getattr(getattr(model_cfg, "text", None), "context_length", 77)
+        tokenizer = partial(clip_tokenize, context_length=context_length)
 
     if args.dataset.dataset_type == "ssl4eo":
         ### make splits
@@ -812,14 +1182,19 @@ def get_data(args, preprocess_fns=None):
 
 
         else:
-            s1_preprocess = get_transform("s1", is_train=True)
-            s2_preprocess = get_transform(args.dataset.s2_tier, is_train=True)
-
-
-            assert s1_preprocess is not None and s2_preprocess is not None
+            transforms_map = {}
+            if encoder_pair == "s2_text":
+                s2_preprocess = get_transform(args.dataset.s2_tier, is_train=True)
+                assert s2_preprocess is not None
+                transforms_map = {"s2": s2_preprocess}
+            else:
+                s1_preprocess = get_transform("s1", is_train=True)
+                s2_preprocess = get_transform(args.dataset.s2_tier, is_train=True)
+                assert s1_preprocess is not None and s2_preprocess is not None
+                transforms_map = {"s1": s1_preprocess, "s2": s2_preprocess}
                 
             data['train'] = get_dataset_fn(args.dataset.train_data, args.dataset.dataset_type)(
-                args, is_train=True, transforms={"s1": s1_preprocess, "s2": s2_preprocess})
+                args, is_train=True, transforms=transforms_map, tokenizer=tokenizer)
 
         return data
     

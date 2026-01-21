@@ -8,7 +8,7 @@ from torch import nn
 import math
 
 from torchgeo.models import resnet18, ResNet18_Weights, ResNet50_Weights, resnet50
-from .model import ModifiedResNet  # , ResNet50 #, S1Transformer, S2Transformer
+from .model import ModifiedResNet, VisionTransformer  # , ResNet50 #, S1Transformer, S2Transformer
 # VisionTransformer
 import logging
 # import lorentz as L
@@ -83,6 +83,9 @@ class CIIP(nn.Module):
                  pretrain: bool = False,
                  s1_weights: str = "MOCO",
                  s2_weights: str = "MOCO",
+                 patch_masking: bool = False,
+                 patch_mask_ratio: float = 0.0,
+                 patch_mask_overlap: float = 0.0,
                  init_logit_scale: float = np.log(1 / 0.07),
                  init_logit_bias: Optional[float] = None,
                  ):
@@ -110,13 +113,17 @@ class CIIP(nn.Module):
             )
         elif framework == "transformer":
             s1_heads = s1_width // 64
-            self.encoder_s1 = S1Transformer(
+            self.encoder_s1 = VisionTransformer(
                 input_resolution=s1_resolution,
                 patch_size=s1_patch_size,
                 width=s1_width,
                 layers=s1_layers,
                 heads=s1_heads,
-                output_dim=embed_dim
+                output_dim=embed_dim,
+                in_channels=s1_bands,
+                patch_masking=patch_masking,
+                patch_mask_ratio=patch_mask_ratio,
+                patch_mask_overlap=patch_mask_overlap,
             )
         elif framework == "resnet18":
             self.encoder_s1 = resnet18(
@@ -131,7 +138,7 @@ class CIIP(nn.Module):
                     in_chans=s1_bands,
                     num_classes=self.embed_dim
                 )
-                logging.info("Using ResNet50 for S1 without pretrained weights.")
+                # logging.info("Using ResNet50 for S1 without pretrained weights.")
             else:
                 if s1_weights == "MOCO":
                     self.encoder_s1 = resnet50(
@@ -170,13 +177,17 @@ class CIIP(nn.Module):
             )
         elif framework == "transformer":
             s2_heads = s2_width // 64
-            self.encoder_s2 = S2Transformer(
+            self.encoder_s2 = VisionTransformer(
                 input_resolution=s2_resolution,
                 patch_size=s2_patch_size,
                 width=s2_width,
                 layers=s2_layers,
                 heads=s2_heads,
-                output_dim=embed_dim
+                output_dim=embed_dim,
+                in_channels=s2_bands,
+                patch_masking=patch_masking,
+                patch_mask_ratio=patch_mask_ratio,
+                patch_mask_overlap=patch_mask_overlap,
             )
         elif framework == "resnet18":
             self.encoder_s2 = resnet18(
@@ -191,7 +202,7 @@ class CIIP(nn.Module):
                     in_chans=s2_bands,
                     num_classes=self.embed_dim
                 )
-                logging.info("Using ResNet50 for S2 without pretrained weights.")
+                # logging.info("Using ResNet50 for S2 without pretrained weights.")
             else:
                 if s2_weights == "MOCO":
                     self.encoder_s2 = resnet50(
@@ -341,21 +352,27 @@ class CIIP(nn.Module):
         return self.encoder_s2.conv1.weight.dtype
 
   
-    def encode_s1(self, s1, normalize, post_head: bool = True):
+    def encode_s1(self, s1, normalize, post_head: bool = True, keep_mask: torch.Tensor = None):
         if not post_head and normalize:
             raise ValueError("Cannot normalize before projection head. Set post_head=True when normalize=True.")
         # print("encoding s1 with shape: {}".format(s1.shape))
-        features = self.encoder_s1(s1.type(self.dtype_s1))
+        if keep_mask is not None and isinstance(self.encoder_s1, VisionTransformer):
+            features = self.encoder_s1(s1.type(self.dtype_s1), keep_mask=keep_mask)
+        else:
+            features = self.encoder_s1(s1.type(self.dtype_s1))
         if post_head:
             proj_layer = getattr(self.encoder_s1, "proj", None)
             if isinstance(proj_layer, nn.Module):
                 features = proj_layer(features)
         return F.normalize(features, dim=-1) if normalize else features
 
-    def encode_s2(self, s2, normalize, post_head: bool = True):
+    def encode_s2(self, s2, normalize, post_head: bool = True, keep_mask: torch.Tensor = None):
         if not post_head and normalize:
             raise ValueError("Cannot normalize before projection head. Set post_head=True when normalize=True.")
-        features = self.encoder_s2(s2.type(self.dtype_s2))
+        if keep_mask is not None and isinstance(self.encoder_s2, VisionTransformer):
+            features = self.encoder_s2(s2.type(self.dtype_s2), keep_mask=keep_mask)
+        else:
+            features = self.encoder_s2(s2.type(self.dtype_s2))
         if post_head:
             proj_layer = getattr(self.encoder_s2, "proj", None)
             if isinstance(proj_layer, nn.Module):
@@ -385,8 +402,33 @@ class CIIP(nn.Module):
         # s1_features = F.normalize(s1_features_vc, dim=-1)
         # s2_features = F.normalize(s2_features_vc, dim=-1)
 
-        s1_features = self.encode_s1(s1, normalize=True) # normalize after projection
-        s2_features = self.encode_s2(s2, normalize=True)
+        keep_s1 = None
+        keep_s2 = None
+        if (
+            self.training
+            and isinstance(self.encoder_s1, VisionTransformer)
+            and isinstance(self.encoder_s2, VisionTransformer)
+            and getattr(self.encoder_s1, "patch_masking", False)
+        ):
+            target_overlap = getattr(self.encoder_s1, "patch_mask_overlap", None)
+            if target_overlap is not None and target_overlap <= 0:
+                target_overlap = None
+            keep_s1 = self.encoder_s1.sample_patch_keep_mask(s1.shape[0], s1.device)
+            if (
+                target_overlap is not None
+                and self.encoder_s1._num_patches() == self.encoder_s2._num_patches()
+            ):
+                keep_s2 = self.encoder_s2.sample_patch_keep_mask(
+                    s2.shape[0],
+                    s2.device,
+                    reference_keep=keep_s1,
+                    target_overlap=target_overlap,
+                )
+            else:
+                keep_s2 = self.encoder_s2.sample_patch_keep_mask(s2.shape[0], s2.device)
+
+        s1_features = self.encode_s1(s1, normalize=True, keep_mask=keep_s1) # normalize after projection
+        s2_features = self.encode_s2(s2, normalize=True, keep_mask=keep_s2)
 
         # # cosine similarity as logits
         logit_scale = self.logit_scale.exp()
@@ -560,19 +602,31 @@ class LorentzCIIP(CIIP):
         self.s1_alpha = nn.Parameter(torch.tensor(embed_dim**-0.5).log())
 
 
-    def encode_s2(self, s2: torch.Tensor, lorentz: bool, normalize: bool = False, post_head: bool = True):
+    def encode_s2(
+        self,
+        s2: torch.Tensor,
+        lorentz: bool,
+        normalize: bool = False,
+        post_head: bool = True,
+        keep_mask: torch.Tensor = None,
+    ):
         """
         Args:
             project: Lift features from the encoder onto the Hyperboloid.
 
         """
-        if normalize:
-            print("Warning: normalize=True is ignored in LorentzCIIP.encode_s2")
+        # if normalize:
+        #     print("Warning: normalize=True is ignored in LorentzCIIP.encode_s2")
         if post_head is False and lorentz:
             raise ValueError("Cannot project to Lorentzian space before projection head. Set post_head=True when lorentz=True.")
 
         # Get Euclidean features from the encoder (without L2 normalization).
-        s2_feats = super().encode_s2(s2, normalize=False, post_head=post_head) # get post-head un-norm euclidean feats
+        s2_feats = super().encode_s2(
+            s2,
+            normalize=False,
+            post_head=post_head,
+            keep_mask=keep_mask,
+        ) # get post-head un-norm euclidean feats
 
         # These features are space components of embeddings in the tangent
         # space of the Hyperboloid origin (which is Euclidean). Apply projection.
@@ -583,15 +637,27 @@ class LorentzCIIP(CIIP):
 
         return s2_feats
 
-    def encode_s1(self, s1: list[torch.Tensor], lorentz: bool, normalize: bool = False, post_head: bool = True):
-        if normalize:
-            print("Warning: normalize=True is ignored in LorentzCIIP.encode_s2")
+    def encode_s1(
+        self,
+        s1: list[torch.Tensor],
+        lorentz: bool,
+        normalize: bool = False,
+        post_head: bool = True,
+        keep_mask: torch.Tensor = None,
+    ):
+        # if normalize:
+        #     print("Warning: normalize=True is ignored in LorentzCIIP.encode_s2")
         if post_head is False and lorentz:
             raise ValueError("Cannot project to Lorentzian space before projection head. Set post_head=True when lorentz=True.")
             
         # Get Euclidean features from the encoder (without L2 normalization).
 
-        s1_feats = super().encode_s1(s1, normalize=False, post_head=post_head)
+        s1_feats = super().encode_s1(
+            s1,
+            normalize=False,
+            post_head=post_head,
+            keep_mask=keep_mask,
+        )
 
         if lorentz:
             s1_feats = s1_feats * self.s1_alpha.exp()
@@ -640,9 +706,34 @@ class LorentzCIIP(CIIP):
         self.s2_alpha.data = torch.clamp(self.s2_alpha.data, max=0.0)
         self.s1_alpha.data = torch.clamp(self.s1_alpha.data, max=0.0)
 
+        keep_s1 = None
+        keep_s2 = None
+        if (
+            self.training
+            and isinstance(self.encoder_s1, VisionTransformer)
+            and isinstance(self.encoder_s2, VisionTransformer)
+            and getattr(self.encoder_s1, "patch_masking", False)
+        ):
+            target_overlap = getattr(self.encoder_s1, "patch_mask_overlap", None)
+            if target_overlap is not None and target_overlap <= 0:
+                target_overlap = None
+            keep_s1 = self.encoder_s1.sample_patch_keep_mask(s1.shape[0], s1.device)
+            if (
+                target_overlap is not None
+                and self.encoder_s1._num_patches() == self.encoder_s2._num_patches()
+            ):
+                keep_s2 = self.encoder_s2.sample_patch_keep_mask(
+                    s2.shape[0],
+                    s2.device,
+                    reference_keep=keep_s1,
+                    target_overlap=target_overlap,
+                )
+            else:
+                keep_s2 = self.encoder_s2.sample_patch_keep_mask(s2.shape[0], s2.device)
+
         # shape: (batch_size, embed_dim)
-        s2_feats = self.encode_s2(s2, lorentz=True)
-        s1_feats = self.encode_s1(s1, lorentz=True)
+        s2_feats = self.encode_s2(s2, lorentz=True, keep_mask=keep_s2)
+        s1_feats = self.encode_s1(s1, lorentz=True, keep_mask=keep_s1)
 
         logit_scale = self.logit_scale.exp()
 

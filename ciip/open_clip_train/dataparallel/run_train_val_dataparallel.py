@@ -18,7 +18,7 @@ from ciip.open_clip_train.dataparallel.factory import (
     unwrap_dataparallel,
 )
 from ciip.open_clip_train.scheduler import const_lr, const_lr_cooldown, cosine_lr
-from ciip.open_clip_train.train import train_one_epoch
+from ciip.open_clip_train.dataparallel.train import train_one_epoch
 
 
 LATEST_CHECKPOINT_NAME = "epoch_latest.pt"
@@ -28,11 +28,17 @@ CONF = "prod_default"
 def _configure_logging(log_dir: str) -> None:
     os.makedirs(log_dir, exist_ok=True)
     log_path = os.path.join(log_dir, "out.log")
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s:%(name)s: %(message)s",
-        handlers=[logging.FileHandler(log_path), logging.StreamHandler()],
-    )
+    root_logger = logging.getLogger()
+    for handler in list(root_logger.handlers):
+        root_logger.removeHandler(handler)
+    root_logger.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(asctime)s %(levelname)s:%(name)s: %(message)s")
+    file_handler = logging.FileHandler(log_path)
+    file_handler.setFormatter(formatter)
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(stream_handler)
 
 
 def _select_device() -> torch.device:
@@ -94,9 +100,16 @@ def main(args: DictConfig, start_epoch: int = 0):
 
     exclude = lambda n, p: p.ndim < 2 or "bn" in n or "ln" in n or "bias" in n or "logit_scale" in n
     named_parameters = list(model.named_parameters())
-    gain_or_bias_params = []
-    rest_params = []
+    gain_or_bias_params = {"vision": [], "text": []}
+    rest_params = {"vision": [], "text": []}
     curvature_params = []
+
+    def _strip_module_prefix(name: str) -> str:
+        return name[len("module."):] if name.startswith("module.") else name
+
+    def _is_text_param(name: str) -> bool:
+        core = _strip_module_prefix(name)
+        return core.startswith("encoder_text") or "encoder_text." in core or core.startswith("text_encoder") or "text_encoder." in core
 
     for name, param in named_parameters:
         if not param.requires_grad:
@@ -104,10 +117,11 @@ def main(args: DictConfig, start_epoch: int = 0):
         if name.endswith("curv"):
             curvature_params.append(param)
             continue
+        target = "text" if _is_text_param(name) else "vision"
         if exclude(name, param):
-            gain_or_bias_params.append(param)
+            gain_or_bias_params[target].append(param)
         else:
-            rest_params.append(param)
+            rest_params[target].append(param)
 
     curvature_param_groups = []
     if curvature_params:
@@ -125,15 +139,36 @@ def main(args: DictConfig, start_epoch: int = 0):
             curvature_lr = args.train.lr * (1.0 / curvature_init)
         curvature_lr = max(float(curvature_lr), 0.0)
         curvature_param_groups.append(
-            {"params": curvature_params, "weight_decay": 0.0, "lr": curvature_lr}
+            {
+                "params": curvature_params,
+                "weight_decay": 0.0,
+                "lr": curvature_lr,
+                "lr_scale": curvature_lr / args.train.lr if args.train.lr > 0 else 1.0,
+            }
         )
 
+    param_groups = []
+    text_lr_scale = 0.1  # text encoder uses 10x smaller LR than S1/S2
+
+    def _add_group(params, weight_decay: float, lr_scale: float) -> None:
+        if not params:
+            return
+        param_groups.append(
+            {
+                "params": params,
+                "weight_decay": weight_decay,
+                "lr": args.train.lr * lr_scale,
+                "lr_scale": lr_scale,
+            }
+        )
+
+    _add_group(gain_or_bias_params["vision"], 0.0, 1.0)
+    _add_group(rest_params["vision"], args.train.wd, 1.0)
+    _add_group(gain_or_bias_params["text"], 0.0, text_lr_scale)
+    _add_group(rest_params["text"], args.train.wd, text_lr_scale)
+
     optimizer = optim.AdamW(
-        [
-            {"params": gain_or_bias_params, "weight_decay": 0.0},
-            {"params": rest_params, "weight_decay": args.train.wd},
-            *curvature_param_groups,
-        ],
+        [*param_groups, *curvature_param_groups],
         lr=args.train.lr,
         betas=(args.train.beta1, args.train.beta2),
         eps=args.train.eps,
@@ -159,6 +194,31 @@ def main(args: DictConfig, start_epoch: int = 0):
         scaler = GradScaler()
 
     os.makedirs(checkpoint_dir, exist_ok=True)
+
+    # Resume training if a checkpoint is provided.
+    resume_path = getattr(args.io, "resume", "")
+    if resume_path:
+        if os.path.exists(resume_path):
+            checkpoint = torch.load(resume_path, map_location=device)
+            state_dict = checkpoint.get("state_dict", checkpoint)
+            if any(k.startswith("module.") for k in state_dict):
+                state_dict = {k.replace("module.", "", 1): v for k, v in state_dict.items()}
+            unwrap_dataparallel(model).load_state_dict(state_dict, strict=False)
+            if "optimizer" in checkpoint:
+                try:
+                    optimizer.load_state_dict(checkpoint["optimizer"])
+                except ValueError as err:
+                    logging.warning(
+                        "Could not load optimizer state due to mismatch (%s). "
+                        "Optimizer will be reinitialized.", err)
+            if "scaler" in checkpoint and scaler is not None:
+                scaler.load_state_dict(checkpoint["scaler"])
+            if "loss_state_dict" in checkpoint and hasattr(loss, "load_state_dict"):
+                loss.load_state_dict(checkpoint["loss_state_dict"])
+            start_epoch = int(checkpoint.get("epoch", start_epoch))
+            logging.info("Resumed from checkpoint %s at epoch %s", resume_path, start_epoch)
+        else:
+            logging.warning("Resume checkpoint %s not found; starting from scratch.", resume_path)
 
     for epoch in range(start_epoch, args.train.epochs):
         logging.info("Start epoch %s", epoch)

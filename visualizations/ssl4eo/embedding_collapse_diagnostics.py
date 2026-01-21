@@ -16,7 +16,7 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple, TYPE_CHECKING
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -188,12 +188,37 @@ def compute_singular_values(tensor: torch.Tensor) -> np.ndarray:
     return s.to(torch.float32).cpu().numpy()
 
 
+def lorentz_to_poincare(points: torch.Tensor,
+                        curvature: torch.Tensor | float) -> torch.Tensor:
+    """
+    points: (N, D+1) Lorentz hyperboloid coords, first dim is time-like x0.
+    returns: (N, D) Poincaré ball coords.
+    """
+    if isinstance(curvature, torch.Tensor):
+        c = float(curvature.detach().cpu().item())
+    else:
+        c = float(curvature)
+
+    x0 = points[..., 0]          # (N,)
+    x_spatial = points[..., 1:]  # (N, D)
+
+    # rescale to curvature -1 (up to scale), if needed
+    if c != 1.0:
+        scale = math.sqrt(c)
+        x0 = x0 * scale
+        x_spatial = x_spatial * scale
+
+    denom = (x0 + 1.0).unsqueeze(-1).clamp_min(1e-8)  # (N, 1)
+    b = x_spatial / denom                             # (N, D)
+    return b
+
 def preprocess_projection_data(
     data: np.ndarray,
     *,
     mode: str,
     random_state: int,
     pca_components: int = 50,
+    curvature: Optional[float] = None,
 ) -> np.ndarray:
     """Prepare data prior to dimensionality reduction."""
 
@@ -203,11 +228,21 @@ def preprocess_projection_data(
         std = np.std(data, axis=0, keepdims=True)
         std = np.where(std < 1e-12, 1.0, std)
         data = (data - mean) / std
+    elif mode == 'poincare':
+        # project to poincare ball
+        data = np.asarray(data, dtype=np.float64)
+        if curvature is None:
+            raise ValueError("Curvature must be provided for poincare projection")
+        curvature_tensor = torch.tensor([curvature], dtype=torch.float64)
+        data = lorentz_to_poincare(data, curvature_tensor)
+
+        # p_s1 = lorentz_to_poincare(s1_embeddings.projected, curvature_tensor)
+        # p_s2 = lorentz_to_poincare(s2_embeddings.projected, curvature_tensor)
+
+
     elif mode == "l2":
-        norms = np.linalg.norm(data, axis=1, keepdims=True)
-        norms = np.maximum(norms, 1e-12)
-        data = data / norms
-    elif mode == "none":
+        raise NotImplementedError("L2 normalization not implemented yet")
+    elif mode == "raw":
         pass
     else:
         raise ValueError(f"Unknown preprocessing mode: {mode}")
@@ -1117,7 +1152,7 @@ def _register_layer_hooks(
             _attach_layers_resnet(encoder_s2, "s2")
 
         elif "DOFA" in enc_type or "ScaleMAE" in enc_type or 'VisionTransformer' in enc_type:
-            print("Attaching DOFA ViT S2 layers")
+            print("Attaching ViT S2 layer hooks")
             _attach_layers_dofa(encoder_s2, "s2")
 
         # elif "ScaleMAE" in enc_type:
@@ -1360,11 +1395,16 @@ def extract_embeddings_for_dataset(
     device: torch.device,
     max_batches_cka: int,
     autocast,
+    batch_size: int = 1,
     register_layer_hooks: bool = True,
 ) -> Tuple[ModalityEmbeddings, ModalityEmbeddings, List[str]]:
     base_dataset, indices = _unwrap_subset(dataset)
+    if batch_size <= 0:
+        raise ValueError("batch_size must be a positive integer.")
+
+    model_attr = model.module if isinstance(model, nn.DataParallel) else model
     if register_layer_hooks:
-        layer_cache, handles, capture_controller = _register_layer_hooks(model)
+        layer_cache, handles, capture_controller = _register_layer_hooks(model_attr)
     else:
         layer_cache = {"s1": {}, "s2": {}}
         handles = []
@@ -1385,24 +1425,42 @@ def extract_embeddings_for_dataset(
     s2_backbone_vectors: List[torch.Tensor] = []
     sample_ids: List[str] = []
 
-    has_posthead = hasattr(model, "compute_posthead") and inspect.ismethod(
-        getattr(model, "compute_posthead")
+    has_posthead = hasattr(model_attr, "compute_posthead") and inspect.ismethod(
+        getattr(model_attr, "compute_posthead")
     )
-    has_projected = hasattr(model, "compute_projected") and inspect.ismethod(
-        getattr(model, "compute_projected")
+    has_projected = hasattr(model_attr, "compute_projected") and inspect.ismethod(
+        getattr(model_attr, "compute_projected")
     )
 
-    def _to_tensor(array) -> torch.Tensor:
+    def _sample_to_tensor(array) -> torch.Tensor:
         tensor = torch.as_tensor(array)
-        if tensor.ndim == 3:
-            # Add batch dimension for single patch samples.
-            return tensor.unsqueeze(0)
-        if tensor.ndim == 4:
-            # Preserve batch if it already exists; only squeeze explicit singleton.
-            return tensor if tensor.shape[0] != 1 else tensor.squeeze(0)
-        raise ValueError("Unsupported sample shape for embedding extraction")
+        if tensor.ndim == 4 and tensor.shape[0] == 1:
+            tensor = tensor.squeeze(0)
+        if tensor.ndim != 3:
+            raise ValueError("Unsupported sample shape for embedding extraction")
+        return tensor
 
-    print("Extracting embeddings for num files (64 images per file)", len(indices))
+    def _iter_batches(sequence: Sequence[int], size: int) -> Iterable[List[int]]:
+        batch: List[int] = []
+        for idx in sequence:
+            batch.append(idx)
+            if len(batch) >= size:
+                yield batch
+                batch = []
+        if batch:
+            yield batch
+
+    def _compute_backbone(tensor: torch.Tensor, modality: str) -> torch.Tensor:
+        if isinstance(model, nn.DataParallel):
+            return model(tensor, modality=modality, output="backbone")
+        return model_attr.compute_backbone(tensor, modality=modality)
+
+    def _compute_projected(tensor: torch.Tensor, modality: str) -> torch.Tensor:
+        if isinstance(model, nn.DataParallel):
+            return model(tensor, modality=modality, output="projected")
+        return model_attr.compute_projected(tensor, modality=modality)
+
+    # print("Extracting embeddings for num files (64 images per file)", len(indices))
 
     # -------- NEW: counter for how many samples contributed to CKA --------
     cka_samples = 0
@@ -1410,21 +1468,50 @@ def extract_embeddings_for_dataset(
 
     with torch.no_grad():
         try:
-            for dataset_idx in indices:
-                sample = base_dataset[dataset_idx]
-                if isinstance(sample, dict):
-                    s1_img = sample.get("s1")
-                    s2_img = sample.get("s2")
-                    uid = sample.get("uid") or sample.get("id") or sample.get("file_name")
-                else:
-                    s1_img, s2_img = sample  # type: ignore[misc]
-                    uid = str(dataset_idx)
+            indices_list = list(indices)
+            for batch_indices in _iter_batches(indices_list, batch_size):
+                s1_samples: List[torch.Tensor] = []
+                s2_samples: List[torch.Tensor] = []
+                batch_uids: List[str] = []
 
-                if s1_img is None or s2_img is None:
+                for dataset_idx in batch_indices:
+                    sample = base_dataset[dataset_idx]
+                    if isinstance(sample, dict):
+                        s1_img = sample.get("s1")
+                        s2_img = sample.get("s2")
+                        uid = sample.get("uid") or sample.get("id") or sample.get("file_name")
+                    else:
+                        s1_img, s2_img = sample  # type: ignore[misc]
+                        uid = str(dataset_idx)
+
+                    if s1_img is None or s2_img is None:
+                        continue
+
+                    s1_samples.append(_sample_to_tensor(s1_img))
+                    s2_samples.append(_sample_to_tensor(s2_img))
+                    batch_uids.append(str(uid))
+
+                if not s1_samples:
                     continue
 
-                s1_tensor = _to_tensor(s1_img).to(device=device, dtype=input_dtype)
-                s2_tensor = _to_tensor(s2_img).to(device=device, dtype=input_dtype)
+                s1_tensor = torch.stack(s1_samples, dim=0).to(device=device, dtype=input_dtype)
+                s2_tensor = torch.stack(s2_samples, dim=0).to(device=device, dtype=input_dtype)
+
+                def _align_s2_to_msclip10(t: torch.Tensor) -> torch.Tensor:
+                    if t.ndim < 4:
+                        return t
+                    c = t.size(1)
+                    if c == 10:
+                        return t
+                    if c >= 13:
+                        keep = [1, 2, 3, 4, 5, 6, 7, 8, 11, 12]  # drop B1 (0) and B10 (10)
+                    elif c == 12:
+                        keep = [1, 2, 3, 4, 5, 6, 7, 8, 10, 11]  # drop B1 (0) and B10-equivalent (9)
+                    else:
+                        # fallback: drop first two channels
+                        keep = list(range(2, min(c, 12)))
+                    indices = torch.as_tensor(keep, device=t.device)
+                    return torch.index_select(t, 1, indices)
 
                 ctx = (
                     torch.autocast(device_type="cuda")
@@ -1440,58 +1527,22 @@ def extract_embeddings_for_dataset(
                 s2_backbone = None
 
                 with ctx:
-                    assert has_posthead == has_projected, (
-                        "Model must have both posthead and projected methods or re-implement."
-                    )
+                    # Always grab backbone; projected when available.
+                    expected_s2_ch = getattr(getattr(model_attr, "encoder_s2", None), "conv1", None)
+                    expected_s2_ch = getattr(expected_s2_ch, "in_channels", None)
 
-                    if has_posthead:
-                        # --------------------------------------------------
-                        # Decide whether this sample should be captured for CKA
-                        # --------------------------------------------------
-                        capture_for_cka = cka_samples < cka_limit
+                    if expected_s2_ch == 10:
+                        s2_tensor = _align_s2_to_msclip10(s2_tensor)
 
-                        if capture_for_cka:
-                            # Hooks ACTIVE: this sample contributes to CKA
-                            if model.encoder_s1 is not None:
-                                s1_raw = model.compute_posthead(s1_tensor, modality="s1")
-                            s2_raw = model.compute_posthead(s2_tensor, modality="s2")
+                    if model_attr.encoder_s1 is not None:
+                        s1_backbone = _compute_backbone(s1_tensor.float(), modality="s1")
+                        assert s1_backbone is not None, "S1 backbone extraction returned None"
+                    s2_backbone = _compute_backbone(s2_tensor.float(), modality="s2")
 
-                            assert s2_raw is not None, "S2 raw embedding extraction returned None"
-
-                            cka_samples += 1  # this sample counted toward the 40
-                        else:
-                            # Hooks SUSPENDED: no more CKA activations after limit
-                            with capture_controller.suspend():
-                                if model.encoder_s1 is not None:
-                                    s1_raw = model.compute_posthead(s1_tensor, modality="s1")
-                                s2_raw = model.compute_posthead(s2_tensor, modality="s2")
-                                assert s2_raw is not None, "S2 raw embedding extraction returned None"
-
-                        # Backbone / projected embeddings never contribute to CKA
-                        # so they stay under suspend as you already had:
-                        with capture_controller.suspend():
-                            if model.encoder_s1 is not None:
-                                s1_backbone = model.compute_backbone(
-                                    s1_tensor.float(), modality="s1"
-                                )
-                            s2_backbone = model.compute_backbone(
-                                s2_tensor.float(), modality="s2"
-                            )
-
-                            if model.encoder_s1 is not None:
-                                s1_norm = model.compute_projected(s1_tensor, modality="s1")
-                            s2_norm = model.compute_projected(s2_tensor, modality="s2")
-
-                    else:
-                        # No posthead: just backbone (already under no hooks for CKA)
-                        if model.encoder_s1 is not None:
-                            s1_backbone = model.compute_backbone(
-                                s1_tensor.float(), modality="s1"
-                            )
-                            assert s1_backbone is not None, "S1 backbone extraction returned None"
-                        s2_backbone = model.compute_backbone(
-                            s2_tensor.float(), modality="s2"
-                        )
+                    if has_projected:
+                        if model_attr.encoder_s1 is not None:
+                            s1_norm = _compute_projected(s1_tensor, modality="s1")
+                        s2_norm = _compute_projected(s2_tensor, modality="s2")
 
                 # --- rest of your code unchanged: push vectors to lists, etc. ---
                 def _flatten_embeddings(t: torch.Tensor) -> torch.Tensor:
@@ -1507,12 +1558,12 @@ def extract_embeddings_for_dataset(
                 if s2_norm is not None:
                     s2_norm_vectors.append(_flatten_embeddings(s2_norm).cpu().to(torch.float32))
 
-                if model.encoder_s1 is not None and s1_backbone is not None:
+                if model_attr.encoder_s1 is not None and s1_backbone is not None:
                     s1_backbone_vectors.append(_flatten_embeddings(s1_backbone).cpu().to(torch.float32))
                 if s2_backbone is not None:
                     s2_backbone_vectors.append(_flatten_embeddings(s2_backbone).cpu().to(torch.float32))
 
-                sample_ids.append(str(uid))
+                sample_ids.extend(batch_uids)
 
         finally:
             for handle in handles:
@@ -1576,7 +1627,7 @@ def extract_embeddings_for_dataset(
     # for name, tensors in layer_cache["s2"].items():
     #     print(f"S2 Layer captured: {name} with {len(tensors)} tensors")
 
-    if model.encoder_s1 is not None:
+    if model_attr.encoder_s1 is not None:
         s1_embeddings = ModalityEmbeddings(_stack(s1_vectors), _stack(s1_norm_vectors), s1_layers, backbone=_stack(s1_backbone_vectors))
     else:
         s1_embeddings = None

@@ -307,14 +307,9 @@ def compute_hyperbolic_context(
     aperture_s1 = _aperture_from_inner(s1_inner, eps, aperture_logk)
     aperture_s2 = _aperture_from_inner(s2_inner, eps, aperture_logk)
 
-    # # hyperbolic angle similarirites (equivalent to cosine sim)
-    # pairwise_lorentz = L.pairwise_inner(s1_points, s2_points, curvature) # loss function operates on angles
-    # pairwise_dist = L.pairwise_dist(s1_points, s2_points, curvature) # prior hyperbolic implemetnations use geodesic distances
-
-    # # Positive-pair similarities/distances = diagonal (i == j)
-    # positive_lorentz = torch.diagonal(pairwise_lorentz)
-    # positive_dist = torch.diagonal(pairwise_dist)
-
+    # hyperbolic angle similarirites (equivalent to cosine sim)
+    pairwise_dist = L.pairwise_dist(s1_points, s2_points, curvature)  # prior hyperbolic implementations use geodesic distances
+    positive_dist = torch.diagonal(pairwise_dist)
 
     return {
         "positive_angles": positive_angles,
@@ -325,7 +320,9 @@ def compute_hyperbolic_context(
         "s1_distances": s1_distances,
         "s2_distances": s2_distances,
         "curvature": curvature,
-        "angles": angles
+        "angles": angles,
+        "hyperbolic_distances": pairwise_dist,
+        "positive_hyperbolic_distances": positive_dist,
     }
 
 
