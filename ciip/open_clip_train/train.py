@@ -2,27 +2,42 @@ import json
 import logging
 import math
 import os
+import random
 import time
-import sys
+from contextlib import nullcontext
+from typing import Dict, Optional
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-
+from open_clip import get_input_dtype
+from torch.autograd.profiler import record_function
 from torch.nn.parallel.distributed import DistributedDataParallel
+from torch.utils.data import DataLoader, Dataset
 
 try:
     import wandb
 except ImportError:
     wandb = None
 
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
-sys.path.insert(0, parent_dir)
-from open_clip import get_input_dtype
-from open_clip_train.distributed import is_master
-from open_clip_train.zero_shot import zero_shot_eval
-from open_clip_train.precision import get_autocast
+from ciip.open_clip_train.distributed import is_master
+from ciip.open_clip_train.precision import get_autocast
+from ciip.open_clip_train.zero_shot import zero_shot_eval
 
+class Subset(Dataset):
+
+    def __init__(self, dataset, indices):
+        self.dataset = dataset
+        self.indices = indices
+
+    def __getitem__(self, idx):
+        return self.dataset[self.indices[idx]]
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getattr__(self, name):
+        return getattr(self.dataset, name)
 
 class AverageMeter(object):
     """Computes and stores the average and current value"""
@@ -41,6 +56,111 @@ class AverageMeter(object):
         self.sum += val * n
         self.count += n
         self.avg = self.sum / self.count
+
+
+def _compute_vc_geometry(features: torch.Tensor, vc_gamma: float, eps: float = 1e-6):
+    std = torch.std(features, dim=0)
+    std_min = std.min()
+    std_diff = (vc_gamma - std).relu().mean()
+
+    cov_fro = torch.tensor(0.0, device=features.device)
+    participation = torch.tensor(0.0, device=features.device)
+    if features.shape[0] > 1:
+        centered = features - features.mean(dim=0)
+        cov = centered.T @ centered / (centered.shape[0] - 1)
+        off_diag = cov - torch.diag(torch.diagonal(cov))
+        cov_fro = torch.linalg.norm(off_diag, ord="fro")
+
+        eigvals = torch.linalg.eigvalsh(cov).real
+        participation = (eigvals.sum() ** 2) / (eigvals.pow(2).sum() + eps)
+
+    return (
+        std_min.item(),
+        std_diff.item(),
+        cov_fro.item(),
+        participation.item(),
+    )
+
+
+def _update_vc_metric_meter(meters: Dict[str, AverageMeter], name: str, value: float, weight: int) -> None:
+    meter = meters.setdefault(name, AverageMeter())
+    if math.isnan(value):
+        meter.val = value
+        meter.avg = value
+    else:
+        meter.update(value, weight)
+
+
+def _accumulate_vc_metrics(
+        loss,
+        model_out: Dict[str, torch.Tensor],
+        vc_metrics_m: Dict[str, AverageMeter],
+        batch_size: int,
+) -> None:
+    if not getattr(loss, "vc_reg_enabled", False):
+        return
+    with torch.no_grad():
+        gathered_features = {}
+        for modality in ("s1", "s2"):
+            raw_key = f"{modality}_features_vc"
+            feature_key = f"{modality}_features"
+            features = model_out.get(raw_key)
+            if features is None:
+                features = model_out.get(feature_key)
+            gathered_features[modality] = features
+
+        world_size = getattr(loss, "world_size", 1)
+        if world_size > 1:
+            local_loss = getattr(loss, "local_loss", False)
+            rank = getattr(loss, "rank", 0)
+            use_horovod = getattr(loss, "use_horovod", False)
+
+            s1_tensor = gathered_features.get("s1")
+            s2_tensor = gathered_features.get("s2")
+            if s1_tensor is not None or s2_tensor is not None:
+                if s1_tensor is not None and s2_tensor is not None:
+                    s1_tensor, s2_tensor = gather_features(
+                        s1_tensor,
+                        s2_tensor,
+                        local_loss,
+                        False,
+                        rank,
+                        world_size,
+                        use_horovod,
+                    )
+                else:
+                    if s1_tensor is not None:
+                        s1_tensor, _ = gather_features(
+                            s1_tensor,
+                            s1_tensor,
+                            local_loss,
+                            False,
+                            rank,
+                            world_size,
+                            use_horovod,
+                        )
+                    if s2_tensor is not None:
+                        s2_tensor, _ = gather_features(
+                            s2_tensor,
+                            s2_tensor,
+                            local_loss,
+                            False,
+                            rank,
+                            world_size,
+                            use_horovod,
+                        )
+                gathered_features["s1"] = s1_tensor
+                gathered_features["s2"] = s2_tensor
+
+        for modality, features in gathered_features.items():
+            if features is None:
+                continue
+            features = features.detach()
+            std_min, std_diff, cov_fro, participation = _compute_vc_geometry(features, loss.vc_gamma)
+            _update_vc_metric_meter(vc_metrics_m, f"vc_std_min_{modality}", std_min, batch_size)
+            _update_vc_metric_meter(vc_metrics_m, f"vc_std_diff_{modality}", std_diff, batch_size)
+            _update_vc_metric_meter(vc_metrics_m, f"vc_cov_fro_{modality}", cov_fro, batch_size)
+            _update_vc_metric_meter(vc_metrics_m, f"vc_participation_ratio_{modality}", participation, batch_size)
 
 
 def postprocess_clip_output(model_out):
@@ -65,12 +185,28 @@ def backward(total_loss, scaler):
     else:
         total_loss.backward()
 
+TIME_FORMAT_STR: str = "%b_%d_%H_%M_%S"
+from datetime import datetime, timedelta
+def trace_handler(prof: torch.profiler.profile):
+   # Prefix for file names.
+   timestamp = datetime.now().strftime(TIME_FORMAT_STR)
+   file_prefix = f'/home/juro4948/ciip/mem_snapshots/{timestamp}_{prof.step}'
+
+   # Construct the trace file.
+   prof.export_chrome_trace(f"{file_prefix}.json.gz")
+
+   # Construct the memory timeline file.
+   prof.export_memory_timeline(f"{file_prefix}.html", device="cuda:0")
+
 
 def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist_model, args, tb_writer=None):
     # TODO: figure out what dist_model is
     device = torch.device(args.datamodule.device)
     autocast = get_autocast(args.model.precision)
     input_dtype = get_input_dtype(args.model.precision)
+    model_cfg = getattr(args, "model", None)
+    encoder_pair = getattr(model_cfg, "encoder_pair", "s1s2")
+    use_text = encoder_pair == "s2_text"
 
     model.train()
     
@@ -88,7 +224,105 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
     if args.train.accum_freq > 1:
         accum_s1, accum_s2, accum_features = [], [], {}
 
+
+    with torch.no_grad():
+        if epoch == 0 and args.train.apply_orthogonal_mapping and not use_text:
+            #log
+            logging.info("Computing optimal orthogonal mapping W for s1 to s2...")
+            base_dataset = dataloader.dataset
+            loader = DataLoader(base_dataset, batch_size=1000, shuffle=False, num_workers=args.model.workers, pin_memory=True)
+            it = iter(loader)
+            batch = next(it)
+            s1, s2 = batch
+            s1 = s1.to(device=device, dtype=input_dtype, non_blocking=True)
+            s2 = s2.to(device=device, dtype=input_dtype, non_blocking=True)
+
+
+            
+            ###### COMPUTE TRAINING ORTHOGONAL MAPPING ######
+            ####### WARMUP FOR ORTHOGONAL MAPPING #######
+            logging.info("Computing orthogonal matrix for **TRAIN**...")
+            NUM_WARMUP_BATCHES = 100
+            model.train()
+            for i, (s1, s2) in enumerate(loader):
+                s1 = s1.to(device)
+                s2 = s2.to(device)
+                if hasattr(model, "module"):
+                    _ = model.module.encode_s1(s1)
+                    _ = model.module.encode_s2(s2)
+                else:
+                    _ = model.encode_s1(s1)
+                    _ = model.encode_s2(s2)
+                if i >= NUM_WARMUP_BATCHES:
+                    print(f"Warmup for orthogonal mapping completed after {i} batches.")
+                    break
+
+            
+            if hasattr(model, "module"):
+                W, stats = model.module.compute_orthogonal_matrix(s1, s2)
+            else:
+                W, stats = model.compute_orthogonal_matrix(s2, s1)
+            logging.info(f"Orthogonal matrix train stats: {stats}")
+
+            # save stats to log directory
+            if args.io.save_logs and is_master(args):
+                with open(os.path.join(args.io.checkpoint_path, "orthogonal_matrix_stats_train.json"), "w") as f:
+                    json.dump(stats, f, indent=4)
+                W_path = os.path.join(args.io.checkpoint_path, "W_train.pt")
+                torch.save(W, W_path)
+                logging.info(f"Saved orthogonal matrix W to {W_path}")
+
+            # apply orthogonal mapping to modeltorch.save(
+            
+
+            if hasattr(model, "module"):
+                del model.module.encoder_s1._buffers["W"]
+                model.module.encoder_s1.register_buffer("W", None)
+                model.module.encoder_s1.apply_orthogonal_matrix = False
+                
+            else:
+                del model.encoder_s1._buffers["W"]
+                model.encoder_s1.register_buffer("W", None)
+                model.encoder_s1.apply_orthogonal_matrix = False
+            print("W is set to None in the model, so that it does not apply orthogonal mapping during training.")
+
+
+            ###### EVAL ORTHOGOANL MATRIX COMPUTATION ######
+            logging.info("Computing orthogonal matrix for **EVAL**...")
+            model.eval()
+            if hasattr(model, "module"):
+                W, stats = model.module.compute_orthogonal_matrix(s1, s2)
+            else:
+                W, stats = model.compute_orthogonal_matrix(s2, s1)
+            logging.info(f"Orthogonal matrix eval stats: {stats}")
+
+            # save stats to log directory
+            if args.io.save_logs and is_master(args):
+                with open(os.path.join(args.io.checkpoint_path, "orthogonal_matrix_stats.json"), "w") as f:
+                    json.dump(stats, f, indent=4)
+                # save W matrix to log directory
+                W_path = os.path.join(args.io.checkpoint_path, "W.pt")
+                torch.save(W, W_path)
+                logging.info(f"Saved orthogonal matrix W to {W_path}")
+
+
+            # delete  dataloader
+            del loader
+
+            # save the model weights after the warm up phase -> random weights with appropriate batch norm stats
+        if epoch == 0:
+            if is_master(args):
+                torch.save(
+                    model.state_dict(),
+                    os.path.join(args.io.checkpoint_path, "epoch_0.pt"),
+                )
+                logging.info(f"Saved initial model weights to {args.io.checkpoint_path}.")
+
+
+
+    model.train()
     losses_m = {}
+    vc_metrics_m: Dict[str, AverageMeter] = {}
     batch_time_m = AverageMeter()
     data_time_m = AverageMeter()
     end = time.time()
@@ -99,12 +333,20 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
         if not args.model.skip_scheduler:
             scheduler(step)
 
-        s1, s2 = batch
-        s1 = s1.to(device=device, dtype=input_dtype, non_blocking=True)
-        s2 = s2.to(device=device, dtype=input_dtype, non_blocking=True)
+        if use_text:
+            s1 = batch["s2"].to(device=device, dtype=input_dtype, non_blocking=True)
+            s2 = batch["text"].to(device=device, non_blocking=True)
+        else:
+            s1, s2 = batch['s1'], batch['s2']
+            s1 = s1.to(device=device, dtype=input_dtype, non_blocking=True)
+            s2 = s2.to(device=device, dtype=input_dtype, non_blocking=True)
+
+        
 
         data_time_m.update(time.time() - end)
         optimizer.zero_grad()
+
+        curv_scalar: Optional[float] = None
 
         if args.train.accum_freq == 1:
             with autocast():
@@ -120,6 +362,10 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 total_loss = sum(losses.values())
                 losses["loss"] = total_loss
 
+            if "curv" in model_out:
+                curv_scalar = float(model_out["curv"].detach().item())
+
+            _accumulate_vc_metrics(loss, model_out, vc_metrics_m, s1.shape[0])
             backward(total_loss, scaler)
         else:
             # First, cache the features without any gradient tracking.
@@ -130,7 +376,11 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                     for f in ("logit_scale", "logit_bias"):
                         model_out.pop(f, None)
 
+                    _accumulate_vc_metrics(loss, model_out, vc_metrics_m, s1.shape[0])
+
                     for key, val in model_out.items():
+                        if val.ndim == 0:
+                            continue
                         if key in accum_features:
                             accum_features[key].append(val)
                         else:
@@ -148,29 +398,58 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
             # Re-do the forward pass for those batches, and use the cached features from the other batches as negatives.
             # Call backwards each time, but only step optimizer at the end.
             optimizer.zero_grad()
+            accum_features_current_loop = {key: list(val) for key, val in accum_features.items()} # Ensure a copy
+
             for j in range(args.train.accum_freq):
                 s1 = accum_s1[j]
                 s2 = accum_s2[j]
-                with autocast():
-                    model_out = model(s1, s2)
 
-                    inputs_no_accum = {}
-                    inputs_no_accum["logit_scale"] = logit_scale = model_out.pop("logit_scale")
-                    if "logit_bias" in model_out:
-                        inputs_no_accum["logit_bias"] = model_out.pop("logit_bias")
+                is_last_backward_pass = (j == args.train.accum_freq - 1)
+                sync_context = model.no_sync() if not is_last_backward_pass else nullcontext()
+                with sync_context:
+                    with autocast():
+                        
+                        model_out = model(s1, s2)
 
-                    inputs = {}
-                    for key, val in accum_features.items():
-                        accumulated = accum_features[key]
-                        inputs[key] = torch.cat(accumulated[:j] + [model_out[key]] + accumulated[j + 1:])
+                        inputs_no_accum = {}
+                        inputs_no_accum["logit_scale"] = logit_scale = model_out.pop("logit_scale")
+                        if "logit_bias" in model_out:
+                            inputs_no_accum["logit_bias"] = model_out.pop("logit_bias")
+                        
 
-                    losses = loss(**inputs, **inputs_no_accum, output_dict=True)
-                    del inputs
-                    del inputs_no_accum
-                    total_loss = sum(losses.values())
-                    losses["loss"] = total_loss
+                        # inputs = {}
+                        # for key, val in accum_features.items():
+                        #     accumulated = accum_features[key]
+                        #     inputs[key] = torch.cat(accumulated[:j] + [model_out[key]] + accumulated[j + 1:])
+                        inputs = {}
+                        for key in accum_features_current_loop.keys(): # Iterate over keys
+                            # Use the copied list for concatenation, and replace the j-th element
+                            temp_accumulated = list(accum_features_current_loop[key]) # Create a copy for modification
+                            temp_accumulated[j] = model_out[key] # Replace with the current grad-tracked feature
+                            inputs[key] = torch.cat(temp_accumulated)
 
-                backward(total_loss, scaler)
+                        # Add scalar metadata (e.g. curvature) directly from the current
+                        # model output. These values should not be concatenated across
+                        # micro-batches because the loss expects scalars.
+                        for key, val in model_out.items():
+                            if key in inputs or key in inputs_no_accum:
+                                continue
+                            inputs[key] = val
+
+                        if "curv" in model_out:
+                            curv_scalar = float(model_out["curv"].detach().item())
+
+                        losses = loss(**inputs, **inputs_no_accum, output_dict=True)
+                        # logging.info(f"Losses for batch {i_accum}, inner pass {j + 1}/{args.train.accum_freq}: {losses}")
+                        
+                        raw_total_loss = sum(losses.values())
+                        losses["loss"] = raw_total_loss
+
+                    scaled_loss = raw_total_loss / args.train.accum_freq
+                    backward(scaled_loss, scaler)
+
+                del inputs
+                del inputs_no_accum
 
         if scaler is not None:
             if args.datamodule.horovod:
@@ -215,12 +494,32 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 losses_m[key].update(val.item(), batch_size)
 
             logit_scale_scalar = logit_scale.item()
-            loss_log = " ".join(
-                [
-                    f"{loss_name.capitalize()}: {loss_m.val:#.5g} ({loss_m.avg:#.5g})" 
-                    for loss_name, loss_m in losses_m.items()
-                ]
-            )
+            loss_param_state = {}
+            if hasattr(loss, "get_loggable_state"):
+                try:
+                    loss_param_state = loss.get_loggable_state()
+                except Exception:
+                    logging.exception("Failed to read CiipLoss loggable state")
+                    loss_param_state = {}
+
+            metrics_log_parts = [
+                f"{loss_name.capitalize()}: {loss_m.val:#.5g} ({loss_m.avg:#.5g})"
+                for loss_name, loss_m in losses_m.items()
+            ]
+            if vc_metrics_m:
+                metrics_log_parts.extend(
+                    f"{name}: {meter.val:#.5g} ({meter.avg:#.5g})"
+                    for name, meter in vc_metrics_m.items()
+                )
+            if loss_param_state:
+                metrics_log_parts.extend(
+                    f"[ParamState]{name}: {value:#.5g}" for name, value in loss_param_state.items()
+                )
+            if curv_scalar is None and loss_param_state:
+                curv_scalar = loss_param_state.get("curvature")
+            if curv_scalar is not None:
+                metrics_log_parts.append(f"curv: {curv_scalar:#.5g}")
+            metrics_log = " ".join(metrics_log_parts)
             samples_per_second = args.train.accum_freq * args.datamodule.batch_size * args.datamodule.world_size / batch_time_m.val
             samples_per_second_per_gpu = args.train.accum_freq * args.datamodule.batch_size / batch_time_m.val
             logging.info(
@@ -228,7 +527,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 f"Data (t): {data_time_m.avg:.3f} "
                 f"Batch (t): {batch_time_m.avg:.3f}, {samples_per_second:#g}/s, {samples_per_second_per_gpu:#g}/s/gpu "
                 f"LR: {optimizer.param_groups[0]['lr']:5f} "
-                f"Logit Scale: {logit_scale_scalar:.3f} " + loss_log
+                f"Logit Scale: {logit_scale_scalar:.3f} " + metrics_log
             )
 
             # Save train loss / etc. Using non avg meter values as loggers have their own smoothing
@@ -239,9 +538,14 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 "samples_per_second_per_gpu": samples_per_second_per_gpu,
                 "scale": logit_scale_scalar,
                 "lr": optimizer.param_groups[0]["lr"]
-            }            
+            }
             log_data.update({name:val.val for name,val in losses_m.items()})
-
+            if vc_metrics_m:
+                log_data.update({name: meter.val for name, meter in vc_metrics_m.items()})
+            if loss_param_state:
+                log_data.update({f"loss/{name}": value for name, value in loss_param_state.items()})
+            if curv_scalar is not None:
+                log_data["curv"] = curv_scalar
             log_data = {"train/" + name: val for name, val in log_data.items()}
 
             if tb_writer is not None:
@@ -252,10 +556,12 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 assert wandb is not None, 'Please install wandb.'
                 log_data['step'] = step  # for backwards compatibility
                 wandb.log(log_data, step=step)
-            
+
             # resetting batch / data time meters per log window
             batch_time_m.reset()
             data_time_m.reset()
+            for meter in vc_metrics_m.values():
+                meter.reset()
     # end for
 
 

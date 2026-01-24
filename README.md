@@ -24,6 +24,41 @@ $ pip install git+https://github.com/openai/CLIP.git
 
 Replace `cudatoolkit=11.0` above with the appropriate CUDA version on your machine or `cpuonly` when installing on a machine without a GPU.
 
+### AlphaEarth batch-uniformity regularization
+
+We adopt the AlphaEarth batch-uniformity loss to encourage better use of the embedding space. The loss measures the absolute dot product between each feature vector and a cyclically shifted copy of the batch, penalising non-orthogonal pairs. It is added to the InfoNCE objective with a small weight (default `0.05`).
+
+You can adjust or disable the term via both the CLI and the Hydra configuration files:
+
+* **CLI flags**: pass `--batch-uniformity-weight` to scale the additional term (set to `0` to disable its contribution) and combine it with `--batch-uniformity` / `--no-batch-uniformity` to force-enable or disable the regulariser. The existing VC regularisation controls are still present via `--vc-regularization`, `--no-vc-regularization`, and the associated `--vc-*` knobs.
+
+  ```bash
+  python -m ciip.open_clip_train.main \
+      --contrastive-weight 1.0 \
+      --batch-uniformity \
+      --batch-uniformity-weight 0.05 \
+      --vc-regularization \
+      --vc-weight 0.05
+  ```
+
+* **Hydra config**: when using `run_train_val.py` or the distributed runner, the options live under the `loss` section. For example, `ciip/open_clip_train/configs/local_default.yaml` includes:
+
+  ```yaml
+  loss:
+    local_loss: False
+    gather_with_grad: False
+    cache_labels: True
+    contrastive_weight: 1.0
+    batch_uniformity_enabled: True   # flip to False to skip the AlphaEarth term entirely
+    batch_uniformity_weight: 0.05
+    vc_enabled: False                # enable to activate the VC regulariser
+    vc_weight: 0.0
+    vc_gamma: 1.0
+    vc_covariance_weights: [1.0, 1.0]
+  ```
+
+  Override these keys in your experiment-specific config to tune or disable each auxiliary objective. When `vc_enabled` is `False`, the training loop skips all VC computations, avoiding the extra gather and statistics passes.
+
 ```python
 import torch
 import clip
@@ -197,3 +232,27 @@ Note that the `C` value should be determined via a hyperparameter sweep using a 
 
 * [OpenCLIP](https://github.com/mlfoundations/open_clip): includes larger and independently trained CLIP models up to ViT-G/14
 * [Hugging Face implementation of CLIP](https://huggingface.co/docs/transformers/model_doc/clip): for easier integration with the HF ecosystem
+
+## Debugging
+### General environment install
+Try using the temp.yml file for installation
+```bash
+$ conda env create -f temp.yml --name <your-name>
+```
+
+### Pyproj/rasterio error
+When installing and setting up your environment, if you see an error like
+```
+CRSError: The EPSG code is unknown. PROJ: proj_create_from_database: ...\proj\proj.db contains ... whereas a number >= 2 is expected. It comes from another PROJ installation.
+```
+you may need to check that your PROJ_DATA and PROJ_LIB variables are pointing to places with a shared parent folder. You can check this by opening up a python interpreter and
+typing:
+```bash
+>>> import rasterio
+>>> rasterio.show_versions()
+```
+PROJ DATA and GDAL DATA should be in the same rasterio folder. If they aren't, move one (probably the one that is not in your current conda environment) with
+```bash
+$ export PROJ_DATA=/home/jema2085/miniconda3/envs/ciip-jen/lib/python3.12/site-packages/rasterio/proj_data
+```
+for example.

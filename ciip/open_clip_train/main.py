@@ -29,13 +29,13 @@ except ImportError:
     hvd = None
 
 from open_clip import create_model_and_transforms, trace_model, get_tokenizer, create_loss
-from open_clip_train.data import get_data
-from open_clip_train.distributed import is_master, init_distributed_device, broadcast_object
-from open_clip_train.logger import setup_logging
-from open_clip_train.params import parse_args
-from open_clip_train.scheduler import cosine_lr, const_lr, const_lr_cooldown
-from open_clip_train.train import train_one_epoch, evaluate
-from open_clip_train.file_utils import pt_load, check_exists, start_sync_process, remote_sync
+from .data import get_data
+from .distributed import is_master, init_distributed_device, broadcast_object
+from .logger import setup_logging
+from .params import parse_args
+from .scheduler import cosine_lr, const_lr, const_lr_cooldown
+from .train import train_one_epoch, evaluate
+from .file_utils import pt_load, check_exists, start_sync_process, remote_sync
 
 
 LATEST_CHECKPOINT_NAME = "epoch_latest.pt"
@@ -301,6 +301,8 @@ def main(args):
         if args.distill:
             dist_model = torch.nn.parallel.DistributedDataParallel(dist_model, device_ids=[device], **ddp_args)
 
+    loss = create_loss(args)
+
     # create optimizer and scaler
     optimizer = None
     scaler = None
@@ -312,21 +314,72 @@ def main(args):
         include = lambda n, p: not exclude(n, p)
 
         named_parameters = list(model.named_parameters())
-        gain_or_bias_params = [p for n, p in named_parameters if exclude(n, p) and p.requires_grad]
-        rest_params = [p for n, p in named_parameters if include(n, p) and p.requires_grad]
+        gain_or_bias_params = []
+        rest_params = []
+        curvature_params = []
+
+        for name, param in named_parameters:
+            if not param.requires_grad:
+                continue
+            if name.endswith("curv"):
+                curvature_params.append(param)
+                continue
+            if exclude(name, param):
+                gain_or_bias_params.append(param)
+            else:
+                rest_params.append(param)
+
+        loss_params = [p for p in loss.parameters() if p.requires_grad]
+
+        param_groups = [
+            {"params": gain_or_bias_params, "weight_decay": 0.},
+            {"params": rest_params, "weight_decay": args.wd},
+        ]
+        if loss_params:
+            param_groups.append({"params": loss_params, "weight_decay": 0.})
+
+        if curvature_params:
+            curvature_init = None
+            loss_cfg = getattr(args, "loss", None)
+            if loss_cfg is not None:
+                curvature_init = getattr(loss_cfg, "curvature_init", None)
+                if curvature_init is None:
+                    curvature_init = getattr(loss_cfg, "hyperbolic_curvature_init", None)
+            if curvature_init is None:
+                curvature_init = getattr(args, "hyperbolic_curvature_init", None)
+            if curvature_init is None:
+                curvature_init = 1.0
+            curvature_init = max(float(curvature_init), 1e-6)
+            curvature_lr = getattr(args, "curvature_lr", None)
+            if curvature_lr is None and loss_cfg is not None:
+                curvature_lr = getattr(loss_cfg, "curvature_lr", None)
+            if curvature_lr is None:
+                # Scale the curvature learning rate inversely with the initialization
+                # to encourage faster curvature updates while keeping stability.
+                curvature_lr = args.lr * (1.0 / curvature_init)
+            curvature_lr = max(float(curvature_lr), 0.0)
+            param_groups.append({
+                "params": curvature_params,
+                "weight_decay": 0.,
+                "lr": curvature_lr,
+            })
 
         optimizer = optim.AdamW(
-            [
-                {"params": gain_or_bias_params, "weight_decay": 0.},
-                {"params": rest_params, "weight_decay": args.wd},
-            ],
+            param_groups,
             lr=args.lr,
             betas=(args.beta1, args.beta2),
             eps=args.eps,
         )
         if args.horovod:
-            optimizer = hvd.DistributedOptimizer(optimizer, named_parameters=model.named_parameters())
+            optimizer_named_parameters = list(model.named_parameters())
+            if loss_params:
+                optimizer_named_parameters.extend(
+                    (f"loss.{name}", param) for name, param in loss.named_parameters() if param.requires_grad
+                )
+            optimizer = hvd.DistributedOptimizer(optimizer, named_parameters=optimizer_named_parameters)
             hvd.broadcast_parameters(model.state_dict(), root_rank=0)
+            if loss_params:
+                hvd.broadcast_parameters(loss.state_dict(), root_rank=0)
             hvd.broadcast_optimizer_state(optimizer, root_rank=0)
 
         scaler = GradScaler() if args.precision == "amp" else None
@@ -426,8 +479,6 @@ def main(args):
         # Evaluate.
         evaluate(model, data, start_epoch, args, tb_writer=writer, tokenizer=tokenizer)
         return
-
-    loss = create_loss(args)
 
     for epoch in range(start_epoch, args.epochs):
         if is_master(args):

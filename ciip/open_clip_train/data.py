@@ -1,33 +1,641 @@
 # import ast
 # import json
+import glob
 import logging
 import os
+from functools import partial
 from dataclasses import dataclass
 from multiprocessing import Value
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import hydra
 import numpy as np
+import pandas as pd
 import rasterio
 import torch
+from open_clip import tokenize as clip_tokenize
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torchvision.transforms import Resize
-
-
+import xarray as xr
+from zarr.storage import ZipStore
+from torchvision import transforms
+import torchvision
+import torchvision.transforms.functional as F
 ### band statistics: mean & std
 # calculated from 50k data
-S1_MEAN = [-12.54847273, -20.19237134]
-S1_STD = [5.25697717, 5.91150917]
+### OLD SSL4EO v1.0 STATS
+# S1_MEAN = [-12.54847273, -20.19237134]
+# S1_STD = [5.25697717, 5.91150917]
 
-S2A_MEAN = [752.40087073, 884.29673756, 1144.16202635, 1297.47289228, 1624.90992062, 2194.6423161, 2422.21248945, 2517.76053101, 2581.64687018, 2645.51888987, 2368.51236873, 1805.06846033]
-S2A_STD = [1108.02887453, 1155.15170768, 1183.6292542, 1368.11351514, 1370.265037, 1355.55390699, 1416.51487101, 1474.78900051, 1439.3086061, 1582.28010962, 1455.52084939, 1343.48379601]
+# S2A_MEAN = [752.40087073, 884.29673756, 1144.16202635, 1297.47289228, 1624.90992062, 2194.6423161, 2422.21248945, 2517.76053101, 2581.64687018, 2645.51888987, 2368.51236873, 1805.06846033]
+# S2A_STD = [1108.02887453, 1155.15170768, 1183.6292542, 1368.11351514, 1370.265037, 1355.55390699, 1416.51487101, 1474.78900051, 1439.3086061, 1582.28010962, 1455.52084939, 1343.48379601]
 
-S2C_MEAN = [1605.57504906, 1390.78157673, 1314.8729939, 1363.52445545, 1549.44374991, 2091.74883118, 2371.7172463, 2299.90463006, 2560.29504086, 830.06605044, 22.10351321, 2177.07172323, 1524.06546312]
-S2C_STD = [786.78685367, 850.34818441, 875.06484736, 1138.84957046, 1122.17775652, 1161.59187054, 1274.39184232, 1248.42891965, 1345.52684884, 577.31607053, 51.15431158, 1336.09932639, 1136.53823676]
+# S2C_MEAN = [1605.57504906, 1390.78157673, 1314.8729939, 1363.52445545, 1549.44374991, 2091.74883118, 2371.7172463, 2299.90463006, 2560.29504086, 830.06605044, 22.10351321, 2177.07172323, 1524.06546312]
+# S2C_STD = [786.78685367, 850.34818441, 875.06484736, 1138.84957046, 1122.17775652, 1161.59187054, 1274.39184232, 1248.42891965, 1345.52684884, 577.31607053, 51.15431158, 1336.09932639, 1136.53823676]
+#######
+
+
+# V1.1
+S2L1C_MEAN = [2607.345, 2393.068, 2320.225, 2373.963, 2562.536, 3110.071, 3392.832, 3321.154, 3583.77, 1838.712, 1021.753, 3205.112, 2545.798]
+S2L1C_STD = [786.523, 849.702, 875.318, 1143.578, 1126.248, 1161.98, 1273.505, 1246.79, 1342.755, 576.795, 45.626, 1340.347, 1145.036]
+
+S2L2A_MEAN = [1793.243, 1924.863, 2184.553, 2340.936, 2671.402, 3240.082, 3468.412, 3563.244, 3627.704, 3711.071, 3416.714, 2849.625]
+S2L2A_STD = [1160.144, 1201.092, 1219.943, 1397.225, 1400.035, 1373.136, 1429.17, 1485.025, 1447.836, 1652.703, 1471.002, 1365.307]
+
+S1GRD_MEAN = [-12.577, -20.265]
+S1GRD_STD = [5.179, 5.872]
+
+S2RGB_MEAN = [2340.936, 2184.553, 1924.863]
+S2RGB_STD = [1397.225, 1219.943, 1201.092]
+
+####
+
+def _open_zarr_dataset(source):
+    try:
+        return xr.open_zarr(source, consolidated=True)
+    except Exception:
+        return xr.open_zarr(source, consolidated=False)
+
+
+def _canonicalize_band_label(label: object) -> str:
+    text = str(label).strip()
+    text = text.upper()
+    if text.startswith("B"):
+        text = text[1:]
+    if text.endswith("A"):
+        core = text[:-1].lstrip("0")
+        return f"{core or '0'}A"
+    core = text.lstrip("0")
+    return core or "0"
+
+
+def _transpose_spatial_first(da: xr.DataArray, band_dim: Optional[str]) -> xr.DataArray:
+    dims = list(da.dims)
+    ordered: List[str] = []
+    if band_dim and band_dim in dims:
+        ordered.append(band_dim)
+    spatial_candidates = [
+        dim
+        for dim in ("y", "x", "latitude", "longitude", "lat", "lon", "row", "col")
+        if dim in dims and dim not in ordered
+    ]
+    for dim in dims:
+        if dim not in ordered and dim not in spatial_candidates:
+            ordered.append(dim)
+    ordered.extend([d for d in spatial_candidates if d not in ordered])
+    if ordered and ordered != dims:
+        da = da.transpose(*ordered)
+    return da
+
+DEFAULT_S2_BANDS = ["1", "2", "3", "4", "5", "6", "7", "8", "8A", "9", "11", "12"]
+from pathlib import Path
+from typing import Optional, Callable, Dict, Any
+
+from pathlib import Path
+from typing import Optional, Callable, Dict, Any
+
+import numpy as np
+import xarray as xr
+import torch
+from torch.utils.data import Dataset
+
+
+from pathlib import Path
+from typing import Optional, Callable, Dict, Any
+
+import numpy as np
+import xarray as xr
+import torch
+from torch.utils.data import Dataset
+
+
+from pathlib import Path
+from typing import Optional, Callable, Dict, Any
+
+import numpy as np
+import xarray as xr
+import torch
+from torch.utils.data import Dataset
+
+import torchvision.transforms as T
+
+class SSL4EODataset(Dataset):
+    def __init__(
+        self,
+        root: str | Path,
+        seasons: list[int] = [0, 1, 2, 3],
+        transforms: Optional[Any] = None,
+        num_samples_per_file: int = 64,
+        num_timestamps: int = 4,
+        s2_tier: str = "S2L2A",
+        is_train: bool = True,
+        temporal_agg: str | None = None,
+        return_all_timestamps: bool = False,
+    ):
+        self.root = Path(root)
+        self.is_train = is_train
+        self.seasons = seasons
+        self.transforms = transforms
+        self.temporal_agg = temporal_agg
+        # New behavior: optionally return all timestamps so downstream can run the
+        # model per-season and average embeddings. Keep backward compatibility by
+        # honoring temporal_agg="mean" as a request to return all timestamps
+        # without averaging the raw images.
+        if self.temporal_agg is not None:
+            assert self.temporal_agg in {"mean"}, f"Unsupported temporal_agg: {self.temporal_agg}"
+            return_all_timestamps = True if self.temporal_agg == "mean" else return_all_timestamps
+        self.return_all_timestamps = return_all_timestamps
+        if transforms is not None:
+            self.s1_transforms = transforms["s1"]
+            self.s2_transforms = transforms["s2"]
+
+        self.num_samples_per_file = num_samples_per_file
+        self.num_timestamps = num_timestamps
+
+        assert len(self.seasons) == self.num_timestamps, (
+            f"len(seasons)={len(self.seasons)} must equal num_timestamps={self.num_timestamps}"
+        )
+
+        self.is_rgb = False
+        print(f'S2 tier: {s2_tier}, is_rgb: {self.is_rgb}')
+        self.s1_dir = self.root / "S1GRD"
+        if s2_tier in ["s2l2a", "S2L2A"]:
+            self.s2_dir = self.root / "S2L2A"
+        elif s2_tier in ["s2l1c", "S2L1C"]:
+            self.s2_dir = self.root / "S2L1C"
+        elif s2_tier in ['rgb', 'RGB']:
+            self.s2_dir = self.root / "S2L2A"
+            self.is_rgb = True
+        else:
+            raise ValueError(f"Unsupported s2_tier: {s2_tier}")
+        
+        print(f'S2 tier: {s2_tier}, is_rgb: {self.is_rgb}')
+                
+
+        print("S1 dir:", self.s1_dir)
+        print("S2 dir:", self.s2_dir)
+
+        assert self.s1_dir.exists(), f"Missing directory: {self.s1_dir}"
+        assert self.s2_dir.exists(), f"Missing directory: {self.s2_dir}"
+
+        # Shared filenames between S1 and S2
+        self.file_names = sorted(p.name for p in self.s2_dir.glob("*.zarr.zip"))
+        self.num_files = len(self.file_names)
+        assert self.num_files > 0, f"No zarr files found in {self.s2_dir}"
+
+        # Index by file (location), NOT by sample
+        self._len = self.num_files
+        print("Number of files (dataset length):", self._len)
+
+    def __len__(self) -> int:
+        return self._len
+
+    # -----------------------------------------------------
+    def _open_zarr_pair(self, file_idx: int):
+        """Open matching S1 and S2 zarr datasets for the given file index."""
+        fname = self.file_names[file_idx]
+        s1_path = self.s1_dir / fname
+        s2_path = self.s2_dir / fname
+
+        assert s1_path.exists(), f"Missing file: {s1_path}"
+        assert s2_path.exists(), f"Missing file: {s2_path}"
+
+        ds_s1 = xr.open_zarr(s1_path)
+        ds_s2 = xr.open_zarr(s2_path)
+        return ds_s1, ds_s2
+
+    # -----------------------------------------------------
+    def _apply_transforms(
+        self,
+        s1: torch.Tensor,  # (P, 2, H, W)
+        s2: torch.Tensor,  # (P, 12, H, W)
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Apply joint spatial transforms + per-modality transforms.
+
+        s1, s2: (P, C, H, W) where P = num_samples_per_file (64).
+        We apply the SAME crop/flip to all 64 samples and both modalities,
+        then apply s1_transforms/s2_transforms per sample.
+        """
+        if self.transforms is None:
+            return s1, s2
+
+        P, C1, H, W = s1.shape
+        _, C2, H2, W2 = s2.shape
+        assert C1 == 2, f"Expected 2 S1 channels, got {C1}"
+        assert C2 == 12 or C2 == 13 or C2 == 3, f"Expected 12 S2 channels, got {C2}"
+        assert (H, W) == (H2, W2)
+
+        s1_tensor = s1
+        s2_tensor = s2
+
+        # print descr stats of s2 before transforms
+        # print(f'S2 before transforms: mean={s2_tensor.mean().item():.4f}, std={s2_tensor.std().item():.4f}, min={s2_tensor.min().item():.4f}, max={s2_tensor.max().item():.4f}')
+    
+
+        if self.is_train:
+            # Use first sample to get crop params, then apply to all P
+            i, j, h, w = T.RandomCrop.get_params(s1_tensor[0], output_size=(224, 224))
+            s1_tensor = torch.stack(
+                [F.crop(s1_tensor[p], i, j, h, w) for p in range(P)],
+                dim=0,
+            )
+            s2_tensor = torch.stack(
+                [F.crop(s2_tensor[p], i, j, h, w) for p in range(P)],
+                dim=0,
+            )
+
+            # Joint horizontal flip
+            if random.random() < 0.5:
+                s1_tensor = torch.flip(s1_tensor, dims=[3])  # flip W
+                s2_tensor = torch.flip(s2_tensor, dims=[3])
+
+            # Joint vertical flip
+            if random.random() < 0.5:
+                s1_tensor = torch.flip(s1_tensor, dims=[2])  # flip H
+                s2_tensor = torch.flip(s2_tensor, dims=[2])
+
+        # Apply modality-specific transforms per patch
+        s1_out = torch.stack(
+            [self.s1_transforms(s1_tensor[p]) for p in range(P)],
+            dim=0,
+        )
+        # print shapes
+        # print(f'S2 shape before s2 transforms: {s2_tensor.shape}')
+        # print transforms
+        # print(f'S2 transforms: {self.s2_transforms}')
+        s2_out = torch.stack(
+            [self.s2_transforms(s2_tensor[p]) for p in range(P)],
+            dim=0,
+        )
+
+        # print out descriptive statistics of s2
+        # print(f'S2 after transforms: mean={s2_out.mean().item():.4f}, std={s2_out.std().item():.4f}, min={s2_out.min().item():.4f}, max={s2_out.max().item():.4f}')
+
+        return s1_out, s2_out
+
+    # -----------------------------------------------------
+    def __getitem__(self, file_idx: int) -> Dict[str, Any]:
+        """Index by file: return all 64 samples for one random season or all seasons."""
+        # Random time index (shared across modalities for this file)
+        time_idx = np.random.randint(0, self.num_timestamps)
+        season_name = self.seasons[time_idx]
+
+        ds_s1, ds_s2 = self._open_zarr_pair(file_idx)
+
+        # Expect (sample=64, time=4, band=C, y, x)
+        arr_s1 = ds_s1["bands"].values
+        arr_s2 = ds_s2["bands"].values
+
+        P, T, C_s1, H, W = arr_s1.shape
+        P2, T2, C_s2, H2, W2 = arr_s2.shape
+
+        assert P == self.num_samples_per_file, f"Expected {self.num_samples_per_file} samples/file, got {P}"
+        assert P2 == P and T2 == T and (H2, W2) == (H, W)
+        assert C_s1 == 2, f"Unexpected S1 channel count: {C_s1}"
+        assert C_s2 == 12 or C_s2 == 13 or C_s2 == 3, f"Unexpected S2 channel count: {C_s2}"
+
+        if self.return_all_timestamps:
+            # Return all seasons so the caller can feed them individually and
+            # average embeddings. No averaging happens here.
+            s1_list = []
+            s2_list = []
+            for t in range(T):
+                s1_np = arr_s1[:, t]  # (P, C1, H, W)
+                s2_np = arr_s2[:, t]  # (P, C2, H, W)
+
+                s1_t = torch.from_numpy(s1_np.astype("float32"))
+                s2_t = torch.from_numpy(s2_np.astype("float32"))
+
+                if self.is_rgb:
+                    if s2_t.ndim == 3 and s2_t.shape[0] >= 4:
+                        s2_t = s2_t[[3, 2, 1], ...]
+                    elif s2_t.ndim == 4 and s2_t.shape[1] >= 4:
+                        s2_t = s2_t[:, [3, 2, 1], ...]
+
+                s1_t, s2_t = self._apply_transforms(s1_t, s2_t)
+                s1_list.append(s1_t)
+                s2_list.append(s2_t)
+
+            # (P, T, C, H, W)
+            s1 = torch.stack(s1_list, dim=1)
+            s2 = torch.stack(s2_list, dim=1)
+        else:
+            s1_np = arr_s1[:, time_idx]  # (P, C1, H, W)
+            s2_np = arr_s2[:, time_idx]  # (P, C2, H, W)
+
+            s1 = torch.from_numpy(s1_np.astype("float32"))
+            s2 = torch.from_numpy(s2_np.astype("float32"))
+
+            if self.is_rgb:
+                if s2.ndim == 3 and s2.shape[0] >= 4:
+                    s2 = s2[[3, 2, 1], ...]
+                elif s2.ndim == 4 and s2.shape[1] >= 4:
+                    s2 = s2[:, [3, 2, 1], ...]
+
+            s1, s2 = self._apply_transforms(s1, s2)
+
+        return {
+            "s1": s1,  # (P, 2, 224, 224) or (P, T, 2, 224, 224)
+            "s2": s2,  # (P, 12, 224, 224) or (P, T, 12/3, 224, 224)
+            # optional metadata if you want:
+            # "file_idx": file_idx,
+            # "time_idx": time_idx,
+            # "season": season_name,
+        }
+
+
+class SSL4EOTextDataset(Dataset):
+    def __init__(
+        self,
+        root: str | Path,
+        seasons: list[int] = [0, 1, 2, 3],
+        transforms: Optional[Any] = None,
+        num_samples_per_file: int = 64,
+        num_timestamps: int = 4,
+        s2_tier: str = "S2L2A",
+        caption_column: str = "caption",
+        tokenizer: Optional[Callable[[list[str]], torch.Tensor]] = None,
+        is_train: bool = True,
+    ):
+        self.root = Path(root)
+        self.is_train = is_train
+        self.seasons = seasons
+        self.transforms = transforms
+        self.caption_column = caption_column
+        self.tokenize = tokenizer or partial(clip_tokenize, context_length=77)
+        if transforms is not None:
+            self.s2_transforms = transforms.get("s2")
+        else:
+            self.s2_transforms = None
+
+        self.num_samples_per_file = num_samples_per_file
+        self.num_timestamps = num_timestamps
+
+        assert len(self.seasons) == self.num_timestamps, (
+            f"len(seasons)={len(self.seasons)} must equal num_timestamps={self.num_timestamps}"
+        )
+
+        self.is_rgb = False
+        self.captions_dir = self.root / "captions"
+        if s2_tier in ["s2l2a", "S2L2A", "s2a"]:
+            self.s2_dir = self.root / "S2L2A"
+        elif s2_tier in ["s2l1c", "S2L1C", "s2c"]:
+            self.s2_dir = self.root / "S2L1C"
+        elif s2_tier in ["rgb", "RGB"]:
+            self.s2_dir = self.root / "S2L2A"
+            self.is_rgb = True
+        else:
+            raise ValueError(f"Unsupported s2_tier: {s2_tier}")
+
+        assert self.s2_dir.exists(), f"Missing directory: {self.s2_dir}"
+        assert self.captions_dir.exists(), f"Missing directory: {self.captions_dir}"
+
+        self.file_basenames: list[str] = []
+        for path in sorted(self.s2_dir.glob("*.zarr.zip")):
+            base = path.name.split(".zarr.zip")[0]
+            if (self.captions_dir / f"{base}.csv").exists():
+                self.file_basenames.append(base)
+        self.num_files = len(self.file_basenames)
+        assert self.num_files > 0, f"No paired zarr/caption files found in {self.s2_dir}"
+
+        self._len = self.num_files
+
+    def __len__(self) -> int:
+        return self._len
+
+    def _open_zarr_and_captions(self, base_name: str):
+        s2_path = self.s2_dir / f"{base_name}.zarr.zip"
+        caption_path = self.captions_dir / f"{base_name}.csv"
+        assert s2_path.exists(), f"Missing file: {s2_path}"
+        assert caption_path.exists(), f"Missing file: {caption_path}"
+        ds_s2 = xr.open_zarr(s2_path)
+        captions_df = pd.read_csv(caption_path, index_col=0)
+        if self.caption_column not in captions_df.columns and len(captions_df.columns) > 0:
+            captions_df = captions_df.rename(columns={captions_df.columns[0]: self.caption_column})
+        return ds_s2, captions_df
+
+    def _apply_s2_only_transforms(self, s2: torch.Tensor) -> torch.Tensor:
+        if self.transforms is None or self.s2_transforms is None:
+            return s2
+
+        P, C, H, W = s2.shape
+        assert C in (3, 12, 13), f"Unexpected S2 channel count: {C}"
+
+        s2_tensor = s2
+        if self.is_train:
+            i, j, h, w = T.RandomCrop.get_params(s2_tensor[0], output_size=(224, 224))
+            s2_tensor = torch.stack([F.crop(s2_tensor[p], i, j, h, w) for p in range(P)], dim=0)
+            if random.random() < 0.5:
+                s2_tensor = torch.flip(s2_tensor, dims=[3])
+            if random.random() < 0.5:
+                s2_tensor = torch.flip(s2_tensor, dims=[2])
+
+        s2_out = torch.stack([self.s2_transforms(s2_tensor[p]) for p in range(P)], dim=0)
+        return s2_out
+
+    def __getitem__(self, file_idx: int) -> Dict[str, Any]:
+        time_idx = np.random.randint(0, self.num_timestamps)
+        base_name = self.file_basenames[file_idx]
+
+        ds_s2, captions_df = self._open_zarr_and_captions(base_name)
+
+        arr_s2 = ds_s2["bands"].values
+        P, T, C_s2, H, W = arr_s2.shape
+        assert P == self.num_samples_per_file, f"Expected {self.num_samples_per_file} samples/file, got {P}"
+        assert T == self.num_timestamps, f"Unexpected number of timestamps: {T}"
+
+        captions_raw = captions_df[self.caption_column].to_numpy()
+        try:
+            captions = captions_raw.reshape(self.num_samples_per_file, self.num_timestamps)
+        except ValueError:
+            captions = captions_raw.reshape(self.num_samples_per_file, -1)
+        captions_for_time = captions[:, time_idx].tolist()
+
+        s2_np = arr_s2[:, time_idx]
+        s2 = torch.from_numpy(s2_np.astype("float32"))
+
+        if self.is_rgb:
+            if s2.ndim == 4 and s2.shape[1] >= 4:
+                s2 = s2[:, [3, 2, 1], ...]
+
+        s2 = self._apply_s2_only_transforms(s2)
+        text_tokens = self.tokenize(captions_for_time)
+        if isinstance(text_tokens, list):
+            text_tokens = torch.stack(text_tokens)
+
+        return {
+            "s2": s2,
+            "text": text_tokens,
+        }
+
+
+class SSL4EOAlignedTrioDataset(Dataset):
+    def __init__(
+        self,
+        root: str | Path,
+        seasons: list[int] = [0, 1, 2, 3],
+        transforms: Optional[Any] = None,
+        num_samples_per_file: int = 64,
+        num_timestamps: int = 4,
+        s2_tier: str = "S2L2A",
+        caption_column: str = "caption",
+        tokenizer: Optional[Callable[[list[str]], torch.Tensor]] = None,
+        is_train: bool = True,
+    ):
+        self.root = Path(root)
+        self.is_train = is_train
+        self.seasons = seasons
+        self.transforms = transforms
+        self.caption_column = caption_column
+        self.tokenize = tokenizer or partial(clip_tokenize, context_length=77)
+        if transforms is not None:
+            self.s1_transforms = transforms.get("s1")
+            self.s2_transforms = transforms.get("s2")
+        else:
+            self.s1_transforms = None
+            self.s2_transforms = None
+
+        self.num_samples_per_file = num_samples_per_file
+        self.num_timestamps = num_timestamps
+
+        assert len(self.seasons) == self.num_timestamps, (
+            f"len(seasons)={len(self.seasons)} must equal num_timestamps={self.num_timestamps}"
+        )
+
+        self.is_rgb = False
+        self.s1_dir = self.root / "S1GRD"
+        self.captions_dir = self.root / "captions"
+        if s2_tier in ["s2l2a", "S2L2A", "s2a"]:
+            self.s2_dir = self.root / "S2L2A"
+        elif s2_tier in ["s2l1c", "S2L1C", "s2c"]:
+            self.s2_dir = self.root / "S2L1C"
+        elif s2_tier in ["rgb", "RGB"]:
+            self.s2_dir = self.root / "S2L2A"
+            self.is_rgb = True
+        else:
+            raise ValueError(f"Unsupported s2_tier: {s2_tier}")
+
+        assert self.s1_dir.exists(), f"Missing directory: {self.s1_dir}"
+        assert self.s2_dir.exists(), f"Missing directory: {self.s2_dir}"
+        assert self.captions_dir.exists(), f"Missing directory: {self.captions_dir}"
+
+        self.file_basenames: list[str] = []
+        for path in sorted(self.s2_dir.glob("*.zarr.zip")):
+            base = path.name.split(".zarr.zip")[0]
+            if (self.captions_dir / f"{base}.csv").exists() and (self.s1_dir / f"{base}.zarr.zip").exists():
+                self.file_basenames.append(base)
+        self.num_files = len(self.file_basenames)
+        assert self.num_files > 0, f"No paired zarr/caption files found in {self.s2_dir}"
+
+        self._len = self.num_files
+
+    def __len__(self) -> int:
+        return self._len
+
+    def _open_triplet(self, base_name: str):
+        s1_path = self.s1_dir / f"{base_name}.zarr.zip"
+        s2_path = self.s2_dir / f"{base_name}.zarr.zip"
+        caption_path = self.captions_dir / f"{base_name}.csv"
+        assert s1_path.exists(), f"Missing file: {s1_path}"
+        assert s2_path.exists(), f"Missing file: {s2_path}"
+        assert caption_path.exists(), f"Missing file: {caption_path}"
+        ds_s1 = xr.open_zarr(s1_path)
+        ds_s2 = xr.open_zarr(s2_path)
+        captions_df = pd.read_csv(caption_path, index_col=0)
+        if self.caption_column not in captions_df.columns and len(captions_df.columns) > 0:
+            captions_df = captions_df.rename(columns={captions_df.columns[0]: self.caption_column})
+        return ds_s1, ds_s2, captions_df
+
+    def _apply_transforms(
+        self,
+        s1: torch.Tensor,
+        s2: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.transforms is None or self.s1_transforms is None or self.s2_transforms is None:
+            return s1, s2
+
+        P, C1, H, W = s1.shape
+        _, C2, H2, W2 = s2.shape
+        assert C1 == 2, f"Unexpected S1 channel count: {C1}"
+        assert C2 in (3, 12, 13), f"Unexpected S2 channel count: {C2}"
+        assert (H, W) == (H2, W2)
+
+        s1_tensor = s1
+        s2_tensor = s2
+        if self.is_train:
+            i, j, h, w = T.RandomCrop.get_params(s1_tensor[0], output_size=(224, 224))
+            s1_tensor = torch.stack([F.crop(s1_tensor[p], i, j, h, w) for p in range(P)], dim=0)
+            s2_tensor = torch.stack([F.crop(s2_tensor[p], i, j, h, w) for p in range(P)], dim=0)
+            if random.random() < 0.5:
+                s1_tensor = torch.flip(s1_tensor, dims=[3])
+                s2_tensor = torch.flip(s2_tensor, dims=[3])
+            if random.random() < 0.5:
+                s1_tensor = torch.flip(s1_tensor, dims=[2])
+                s2_tensor = torch.flip(s2_tensor, dims=[2])
+
+        s1_out = torch.stack([self.s1_transforms(s1_tensor[p]) for p in range(P)], dim=0)
+        s2_out = torch.stack([self.s2_transforms(s2_tensor[p]) for p in range(P)], dim=0)
+        return s1_out, s2_out
+
+    def __getitem__(self, file_idx: int) -> Dict[str, Any]:
+        time_idx = np.random.randint(0, self.num_timestamps)
+        base_name = self.file_basenames[file_idx]
+
+        ds_s1, ds_s2, captions_df = self._open_triplet(base_name)
+
+        arr_s1 = ds_s1["bands"].values
+        arr_s2 = ds_s2["bands"].values
+        P, T, C_s1, H, W = arr_s1.shape
+        P2, T2, C_s2, H2, W2 = arr_s2.shape
+        assert P == self.num_samples_per_file, f"Expected {self.num_samples_per_file} samples/file, got {P}"
+        assert P2 == P and T2 == T and (H2, W2) == (H, W)
+        assert C_s1 == 2, f"Unexpected S1 channel count: {C_s1}"
+        assert C_s2 in (3, 12, 13), f"Unexpected S2 channel count: {C_s2}"
+
+        captions_raw = captions_df[self.caption_column].to_numpy()
+        try:
+            captions = captions_raw.reshape(self.num_samples_per_file, self.num_timestamps)
+        except ValueError:
+            captions = captions_raw.reshape(self.num_samples_per_file, -1)
+        captions_for_time = captions[:, time_idx].tolist()
+
+        s1_np = arr_s1[:, time_idx]
+        s2_np = arr_s2[:, time_idx]
+
+        s1 = torch.from_numpy(s1_np.astype("float32"))
+        s2 = torch.from_numpy(s2_np.astype("float32"))
+
+        if self.is_rgb and s2.ndim == 4 and s2.shape[1] >= 4:
+            s2 = s2[:, [3, 2, 1], ...]
+
+        s1, s2 = self._apply_transforms(s1, s2)
+
+        text_tokens = self.tokenize(captions_for_time)
+        if isinstance(text_tokens, list):
+            text_tokens = torch.stack(text_tokens)
+
+        return {
+            "s1": s1,
+            "s2": s2,
+            "text": text_tokens,
+        }
+
+
+from torch.utils.data._utils.collate import default_collate
+
+def collate_fn(batch):
+    # batch is a list of dicts, e.g., {"s1": (64,2,H,W), "s2": (64,12,H,W)} or {"s2": (64,12,H,W), "text": (64, L)}
+    if isinstance(batch, list) and isinstance(batch[0], dict):
+        return {
+            k: torch.concat([b[k] for b in batch], dim=0)
+            for k in batch[0].keys()
+        }
 
 
 # ssl4eo
-class SSL4EODataset(Dataset):
+class SSL4EODatasetOld(Dataset):
     def __init__(self, root, s2_tier, s2_bands, transforms=None, target_image_dimension=(264, 264)):
         self.root = root
         self.num_locations = None
@@ -37,6 +645,13 @@ class SSL4EODataset(Dataset):
         self.s2_bands = s2_bands
         # https://pytorch.org/vision/main/generated/torchvision.transforms.Resize.html
         self.resize_transform = Resize(target_image_dimension)
+        # self.pair_aug = CIIPPairAug(
+        #     out_size=target_image_dimension,
+        #     cutout_p=0.25,
+        #     normalize_s1=self.normalize_s1,
+        #     normalize_s2=self.normalize_s2,
+        # )
+
 
         if 0 in self.s2_bands:
             raise ValueError('Band index should be between 1 and 12')
@@ -45,10 +660,10 @@ class SSL4EODataset(Dataset):
 
         if self.s2_tier == "s2a":
             stat_bands = ["1", "2", "3", "4", "5", "6", "7", "8", "8A", "9", "11", "12"]
-            self.s2_stats = {b: (m, s) for b, m, s in zip(stat_bands, S2A_MEAN, S2A_STD)}
+            self.s2_stats = {b: (m, s) for b, m, s in zip(stat_bands, S2L2A_MEAN, S2L2A_STD)}
         else:
             stat_bands = ["1", "2", "3", "4", "5", "6", "7", "8", "8A", "9", "10", "11", "12"]
-            self.s2_stats = {b: (m, s) for b, m, s in zip(stat_bands, S2C_MEAN, S2C_STD)}
+            self.s2_stats = {b: (m, s) for b, m, s in zip(stat_bands, S2L1C_MEAN, S2L1C_STD)}
 
         original_working_directory = hydra.utils.get_original_cwd()
         data_parent_directory = "/".join(original_working_directory.split("/")[:-2])
@@ -83,9 +698,6 @@ class SSL4EODataset(Dataset):
 
 
     def __getitem__(self, idx):
-        # if idx >= self.max_samples:
-        #     raise IndexError("Index out of bounds")
-
         ### get the sample corresponding to idx
         location_idx, season_idx = self.int_to_filepath(idx)
 
@@ -100,38 +712,56 @@ class SSL4EODataset(Dataset):
         path_to_s1_season = os.path.join(path_to_s1, s1_season_folders[season_idx])
         path_to_s2_season = os.path.join(path_to_s2, s2_season_folders[season_idx])
 
-        ############ Load and stack s1 images ##############
+        # ############ Load and stack s1 images ##############
         vh_path = os.path.join(path_to_s1_season, 'VH.tif')
         vv_path = os.path.join(path_to_s1_season, 'VV.tif')
+
+
         vh_image, _ = self.read_raster_image(vh_path)
         vv_image, _ = self.read_raster_image(vv_path)
 
-        # Normalize the VH and VV bands
-        # vh_image = self.normalize_image(vh_image)
-        # vv_image = self.normalize_image(vv_image)
+        # # Normalize the VH and VV bands
+        # # vh_image = self.normalize_image(vh_image)
+        # # vv_image = self.normalize_image(vv_image)
 
-        vv_image = torch.from_numpy(self.normalize(vv_image, S1_MEAN[0], S1_STD[0])).unsqueeze(0)
-        vh_image = torch.from_numpy(self.normalize(vh_image, S1_MEAN[1], S1_STD[1])).unsqueeze(0)
+        # vv_image = torch.from_numpy(self.normalize(vv_image, S1_MEAN[0], S1_STD[0])).unsqueeze(0)
+        # vh_image = torch.from_numpy(self.normalize(vh_image, S1_MEAN[1], S1_STD[1])).unsqueeze(0)
 
-        vh_image = self.resize_transform(vh_image).squeeze(0)
-        vv_image = self.resize_transform(vv_image).squeeze(0)
+        # vh_image = self.resize_transform(vh_image).squeeze(0)
+        # vv_image = self.resize_transform(vv_image).squeeze(0)
 
-        s1_composite_image = torch.stack((vh_image, vv_image), dim=0)
+        # s1_composite_image = torch.stack((vh_image, vv_image), dim=0)
         
 
-        ############### Load s2 images ###################
-        s2_band_images = []
-        for band in self.s2_bands:
-            band_path = os.path.join(path_to_s2_season, f'B{band}.tif')
-            band_img, _ = self.read_raster_image(band_path)
-            if band not in self.s2_stats:
-                raise ValueError(f"Statistics for band {band} not found")
-            mean, std = self.s2_stats[band]
-            band_img = torch.from_numpy(self.normalize(band_img, mean, std)).unsqueeze(0)
-            band_img = self.resize_transform(band_img).squeeze(0)
-            s2_band_images.append(band_img)
+        # ############### Load s2 images ###################
+        # s2_band_images = []
+        # for band in self.s2_bands:
+        #     band_path = os.path.join(path_to_s2_season, f'B{band}.tif')
+        #     band_img, _ = self.read_raster_image(band_path)
+        #     if band not in self.s2_stats:
+        #         raise ValueError(f"Statistics for band {band} not found")
+        #     mean, std = self.s2_stats[band]
+        #     band_img = torch.from_numpy(self.normalize(band_img, mean, std)).unsqueeze(0)
+        #     band_img = self.resize_transform(band_img).squeeze(0)
+        #     s2_band_images.append(band_img)
 
-        s2_composite_image = torch.stack(s2_band_images, dim=0)
+        # s2_composite_image = torch.stack(s2_band_images, dim=0)
+
+        vh = torch.from_numpy(vh_image).float().unsqueeze(0)
+        vv = torch.from_numpy(vv_image).float().unsqueeze(0)
+
+        # Geometry first (resize); no normalization yet
+        vh = self.resize_transform(vh).squeeze(0)
+        vv = self.resize_transform(vv).squeeze(0)
+        s1_composite_image = torch.stack([vh, vv], dim=0)   # [2,H,W]
+
+        s2_bands_t = []
+        for band in self.s2_bands:
+            arr, _ = self.read_raster_image(os.path.join(path_to_s2_season, f'B{band}.tif'))
+            t = torch.from_numpy(arr).float().unsqueeze(0)
+            t = self.resize_transform(t).squeeze(0)   # geometry first
+            s2_bands_t.append(t)
+        s2_composite_image = torch.stack(s2_bands_t, dim=0)
 
         # print(f'S1 composite image shape: {s1_composite_image.shape}')
         # print(f'S2 composite image shape: {s2_composite_image.shape}')
@@ -142,7 +772,26 @@ class SSL4EODataset(Dataset):
             s1_composite_image = self.transforms(s1_composite_image)
             s2_composite_image = self.transforms(s2_composite_image)
 
+        s1_composite_image = self.normalize_s1(s1_composite_image)
+        s2_composite_image = self.normalize_s2(s2_composite_image, self.s2_stats, self.s2_bands)
+
         return (s1_composite_image, s2_composite_image)
+
+
+  
+    def normalize_s1(self, x):  # x: [2,H,W] in your chosen S1 domain
+        mean = torch.tensor(S1GRD_MEAN, dtype=x.dtype, device=x.device)[:, None, None]
+        std  = torch.tensor(S1GRD_STD,  dtype=x.dtype, device=x.device)[:, None, None]
+        return (x - mean) / std
+
+    def normalize_s2(self, x , s2_stats, s2_bands):
+        means, stds = [], []
+        for b in s2_bands:
+            m, s = s2_stats[str(b)]     # <-- string key
+            means.append(m); stds.append(s)
+        mean = torch.tensor(means, dtype=x.dtype, device=x.device)[:, None, None]
+        std  = torch.tensor(stds,  dtype=x.dtype, device=x.device)[:, None, None]
+        return (x - mean) / std
 
 
     def int_to_filepath(self, i):
@@ -215,9 +864,58 @@ def generate_splits(dataset, val_frac, seed=None):
 
     return Subset(dataset, train_indices), Subset(dataset, val_indices)
 
+def plot_pixel_value_distributions(dataset, band_names=['0', '1'], modality='s1', title='Pixel Value Distribution'):
+    import matplotlib.pyplot as plt
+    print(f'Plotting pixel value distributions for {modality}...')
 
+    # Collect pixel values for each band
+    band_values = {band: [] for band in band_names}
 
-def get_ssl4eo_dataset(args, is_train, transforms):
+    # print length of dataset
+    print(f'Number of samples in dataset: {len(dataset)}')
+
+    if modality == 's1':
+        for s1, s2 in dataset:
+            # s2: (P, C, H, W)
+            s1_np = s1.numpy()
+            for i, band in enumerate(band_names):
+                band_data = s1_np[:, i, :, :].flatten()
+                band_values[band].extend(band_data.tolist())
+    else:
+        for s1, s2 in dataset:
+            # s2: (P, C, H, W)
+            s2_np = s2.numpy()
+            for i, band in enumerate(band_names):
+                band_data = s2_np[:, i, :, :].flatten()
+                band_values[band].extend(band_data.tolist())
+
+    # Plot histograms
+    print(f'Generating histograms for {modality}...')
+    num_bands = len(band_names)
+    cols = 4
+    rows = (num_bands + cols - 1) // cols
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 4, rows * 3))
+    axes = axes.flatten()
+
+    for i, band in enumerate(band_names):
+        axes[i].hist(band_values[band], bins=50, color='blue', alpha=0.7)
+        axes[i].set_title(f'Band {band} Pixels |  {title}')
+        axes[i].set_xlabel('Pixel Value')
+        axes[i].set_ylabel('Frequency')
+
+    # Remove any unused subplots
+    for j in range(i + 1, len(axes)):
+        fig.delaxes(axes[j])
+    # plt.title(title) 
+
+    plt.tight_layout()
+    # save plot to output dir
+    plt.savefig(f'pixel_value_distribution_{modality}.png', bbox_inches='tight')
+    print(f'Saved pixel value distribution plot for {modality} to pixel_value_distribution_{modality}.png')
+    plt.close()
+    
+
+def get_ssl4eo_dataset(args, is_train, transforms, tokenizer=None):
     root = args.dataset.root
     # root = args.dataset.train_data if is_train else args.val_data
     assert root
@@ -226,18 +924,70 @@ def get_ssl4eo_dataset(args, is_train, transforms):
     else:
         default_bands = ["1", "2", "3", "4", "5", "6", "7", "8", "8A", "9", "10", "11", "12"]
 
-    
-    dataset = SSL4EODataset(
-        root, # root file path
-        args.dataset.s2_tier,
-        default_bands,  # from config file
-        transforms=transforms,  # transforms
-        target_image_dimension=(args.dataset.dimension, args.dataset.dimension)
-    )
+    # dataset = SSL4EODataset(
+    #     root, # root file path
+    #     s2_tier="S2L2A",
+    #     seasons=[0,1,2,3],
+    #     transforms=None,  # transforms
+    #     is_train=True
+    # )
+    # # sample 2000 samples to plot pixel distribution
+    # data_sample = Subset(dataset, np.random.choice(range(len(dataset)), size=10, replace=False))
+
+
+    # # plot histogram of pixel values
+    # # plot_pixel_value_distributions(data_sample, band_names=['0','1'], modality='s1', title='s1 without transforms')
+    # plot_pixel_value_distributions(data_sample, band_names=default_bands, modality='s2', title='s2 without transforms')
+
+    model_cfg = getattr(args, "model", None)
+    encoder_pair = getattr(model_cfg, "encoder_pair", "s1s2")
+    if encoder_pair == "s2_text":
+        dataset = SSL4EOTextDataset(
+            root,
+            seasons=[0, 1, 2, 3],
+            transforms=transforms,
+            s2_tier=args.dataset.s2_tier,
+            tokenizer=tokenizer,
+            is_train=is_train,
+        )
+    elif encoder_pair == "s1s2_text":
+        dataset = SSL4EOAlignedTrioDataset(
+            root,
+            seasons=[0, 1, 2, 3],
+            transforms=transforms,
+            s2_tier=args.dataset.s2_tier,
+            tokenizer=tokenizer,
+            is_train=is_train,
+        )
+    else:
+        dataset = SSL4EODataset(
+            root,
+            seasons=[0,1,2,3],
+            transforms=transforms,  
+            s2_tier = args.dataset.s2_tier,
+            is_train=is_train
+        )
+
+    # # sample 2000 samples to plot pixel distribution
+    # data_sample = Subset(dataset, np.random.choice(range(len(dataset)), size=10, replace=False))
+    # # plot histogram of pixel values
+    # # plot_pixel_value_distributions(data_sample, band_names=['0','1'], modality='s1', title='s1 with transforms')
+    # plot_pixel_value_distributions(data_sample, band_names=default_bands, modality='s2', title='s2 with transforms')
+
 
     return dataset_to_datainfo(args, dataset, is_train)
 
 
+
+class Divideby10000Normalize:
+    """
+    Normalizes image tensor for DINO: scales to [0,1] range by dividing by 10000.
+    """
+
+    def __call__(self, img: torch.Tensor) -> torch.Tensor:
+        img = img.float() / 10000.0
+        return torch.clamp(img, 0.0, 1.0)
+    
 def dataset_to_datainfo(args, dataset, is_train):
     num_samples = len(dataset)
     sampler = DistributedSampler(dataset) if args.datamodule.distributed and is_train else None
@@ -247,11 +997,13 @@ def dataset_to_datainfo(args, dataset, is_train):
         dataset,
         batch_size=args.datamodule.batch_size,
         shuffle=shuffle,
-        num_workers=args.model.workers,
+        num_workers=4, #args.model.workers,
         pin_memory=True,
         sampler=sampler,
         # drop_last=is_train,
         drop_last=True,
+        collate_fn=collate_fn,
+        
     )
     dataloader.num_samples = num_samples
     dataloader.num_batches = len(dataloader)
@@ -307,13 +1059,115 @@ def get_dataset_fn(data_path, dataset_type):
         raise ValueError(f"Unsupported dataset type: {dataset_type}")
     
 
+
+import random
+class BandwiseJitter(torch.nn.Module):
+    def __init__(self, sigma=0.02, kind="multiplicative", p=0.8):
+        super().__init__()
+        assert kind in ("multiplicative", "additive")
+        self.sigma = sigma
+        self.kind = kind
+        self.p = p
+
+    def forward(self, x):
+        if random.random() > self.p:
+            return x
+        C, H, W = x.shape
+        # jitter per band, handle the batch dimension -> each file contains 64 images 
+        eps = torch.randn( C, 1, 1, device=x.device, dtype=x.dtype) * self.sigma
+        # eps = torch.randn(C, 1, 1, device=x.device, dtype=x.dtype) * self.sigma
+        if self.kind == "multiplicative":
+            return x * (1.0 + eps)
+        else:
+            return x + eps
+        
+class Clamp_S1:
+    """
+    Normalizes image tensor for DINO: scales to [0,1] range by dividing by 10000.
+    """
+
+    def __call__(self, img: torch.Tensor) -> torch.Tensor:
+        img = torch.clamp(img, -25.0, 0.0)
+        return img + 25.0 / 25.0
+    
+
+
+def get_transform(modality, is_train):
+    if modality == "s1":
+        if is_train:
+            return transforms.Compose([
+                # transforms.Normalize(mean=S1GRD_MEAN, std=S1GRD_STD),
+                Clamp_S1()
+            ])
+        else:
+            raise NotImplementedError("S1 validation transforms - check norm method.")
+            return transforms.Compose([
+                transforms.CenterCrop(224),
+                # transforms.Normalize(mean=S1GRD_MEAN, std=S1GRD_STD),
+            ])
+    elif modality.lower() == "s2a" or modality.lower() == "s2l2a":
+        if is_train:
+            return transforms.Compose([
+                transforms.RandomApply(
+                    [transforms.GaussianBlur(kernel_size=3)],
+                    p=0.3,
+                ),
+                BandwiseJitter(sigma=0.02, kind="multiplicative", p=0.8),
+                # transforms.Normalize(mean=S2L2A_MEAN, std=S2L2A_STD),
+                Divideby10000Normalize(),
+                # clamp 0-1
+
+            ])
+        else:
+            raise NotImplementedError("S2 validation transforms - check norm method.")
+        return transforms.Compose([
+                transforms.CenterCrop(224),
+                transforms.Normalize(mean=S2L2A_MEAN, std=S2L2A_STD),
+            ])
+    elif modality.lower() == "s2c" or modality.lower() == "s2l1c":
+        raise NotImplementedError("S2 validation transforms - check norm method.")
+        print("Using S2 13 band L1C normalization.")
+        if is_train:
+            return transforms.Compose([
+                transforms.RandomApply(
+                    [transforms.GaussianBlur(kernel_size=3)],
+                    p=0.3,
+                ),
+                BandwiseJitter(sigma=0.02, kind="multiplicative", p=0.8),
+                transforms.Normalize(mean=S2L1C_MEAN, std=S2L1C_STD),
+                
+
+            ])
+        else:
+            return transforms.Compose([
+                transforms.CenterCrop(224),
+                transforms.Normalize(mean=S2L1C_MEAN, std=S2L1C_STD),
+            ])
+    elif modality=='rgb':
+        if is_train:
+            raise NotImplementedError("RGB transforms not implemented yet.")
+        else:
+            return transforms.Compose([
+                transforms.CenterCrop(224),
+                transforms.Normalize(mean=S2RGB_MEAN, std=S2RGB_STD),
+            ])
+    else:
+        raise ValueError(f"Unsupported modality: {modality}")
+
 # def get_data(args, preprocess_fns, epoch=0, tokenizer=None):
 def get_data(args, preprocess_fns=None):
     data = {}
+    model_cfg = getattr(args, "model", None)
+    encoder_pair = getattr(model_cfg, "encoder_pair", "s1s2")
+    tokenizer = None
+    if encoder_pair in ("s2_text", "s1s2_text"):
+        context_length = getattr(getattr(model_cfg, "text", None), "context_length", 77)
+        tokenizer = partial(clip_tokenize, context_length=context_length)
 
     if args.dataset.dataset_type == "ssl4eo":
         ### make splits
         if args.train.use_val:
+            raise NotImplementedError("use_val not implemented for ssl4eo yet.")
             # first prepare full dataset
             full_datainfo = get_dataset_fn(args.dataset.train_data, args.dataset.dataset_type)(
                 args, is_train=True, transforms=preprocess_fns) # is_train and transforms don't matter here
@@ -328,8 +1182,19 @@ def get_data(args, preprocess_fns=None):
 
 
         else:
+            transforms_map = {}
+            if encoder_pair == "s2_text":
+                s2_preprocess = get_transform(args.dataset.s2_tier, is_train=True)
+                assert s2_preprocess is not None
+                transforms_map = {"s2": s2_preprocess}
+            else:
+                s1_preprocess = get_transform("s1", is_train=True)
+                s2_preprocess = get_transform(args.dataset.s2_tier, is_train=True)
+                assert s1_preprocess is not None and s2_preprocess is not None
+                transforms_map = {"s1": s1_preprocess, "s2": s2_preprocess}
+                
             data['train'] = get_dataset_fn(args.dataset.train_data, args.dataset.dataset_type)(
-                args, is_train=True, transforms=preprocess_fns)
+                args, is_train=True, transforms=transforms_map, tokenizer=tokenizer)
 
         return data
     

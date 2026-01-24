@@ -133,6 +133,12 @@ def parse_args(args):
         help="When scheduler w/ cooldown used, perform cooldown from total_epochs - cooldown_epochs onwards."
     )
     parser.add_argument("--lr", type=float, default=None, help="Learning rate.")
+    parser.add_argument(
+        "--curvature-lr",
+        type=float,
+        default=None,
+        help="Optional learning rate override for the LorentzCIIP curvature parameter.",
+    )
     parser.add_argument("--beta1", type=float, default=None, help="Adam beta 1.")
     parser.add_argument("--beta2", type=float, default=None, help="Adam beta 2.")
     parser.add_argument("--eps", type=float, default=None, help="Adam epsilon.")
@@ -452,6 +458,107 @@ def parse_args(args):
         action="store_true",
         help='Use SigLip (sigmoid) loss.'
     )
+    parser.add_argument(
+        "--contrastive-weight",
+        type=float,
+        default=1.0,
+        help="Weight applied to the InfoNCE contrastive loss term.",
+    )
+    parser.add_argument(
+        "--hyperbolic-loss",
+        dest="hyperbolic",
+        action="store_true",
+        help="Enable the hyperbolic angle-based contrastive loss term.",
+    )
+    parser.add_argument(
+        "--no-hyperbolic-loss",
+        dest="hyperbolic",
+        action="store_false",
+        help="Disable the hyperbolic angle-based contrastive loss term.",
+    )
+    parser.set_defaults(hyperbolic=None)
+    parser.add_argument(
+        "--hyperbolic-normalize",
+        dest="hyperbolic_normalize",
+        action="store_true",
+        help="Normalize features before lifting them to the hyperboloid.",
+    )
+    parser.add_argument(
+        "--no-hyperbolic-normalize",
+        dest="hyperbolic_normalize",
+        action="store_false",
+        help="Skip feature normalization before hyperbolic lifting.",
+    )
+    parser.set_defaults(hyperbolic_normalize=None)
+    parser.add_argument(
+        "--hyperbolic-margin-weight",
+        type=float,
+        default=None,
+        help="Weight applied to the hyperbolic angular margin penalty.",
+    )
+    parser.add_argument(
+        "--hyperbolic-curvature-init",
+        type=float,
+        default=None,
+        help="Initial curvature value for the hyperbolic contrastive loss (must be positive).",
+    )
+    parser.add_argument(
+        "--hyperbolic-eps",
+        type=float,
+        default=None,
+        help="Numerical epsilon used for hyperbolic computations.",
+    )
+    parser.add_argument(
+        "--vc-regularization",
+        dest="vc_enabled",
+        action="store_true",
+        help="Enable the variance-covariance (VC) regularizer during contrastive training.",
+    )
+    parser.add_argument(
+        "--no-vc-regularization",
+        dest="vc_enabled",
+        action="store_false",
+        help="Disable the variance-covariance (VC) regularizer during contrastive training.",
+    )
+    parser.set_defaults(vc_enabled=None)
+    parser.add_argument(
+        "--vc-weight",
+        type=float,
+        default=0.0,
+        help="Overall weight applied to the VC regularizer term.",
+    )
+    parser.add_argument(
+        "--vc-gamma",
+        type=float,
+        default=1.0,
+        help="Target standard deviation γ used by the VC variance penalty.",
+    )
+    parser.add_argument(
+        "--vc-covariance-weights",
+        type=float,
+        nargs="+",
+        default=None,
+        help="Per-modality covariance weights for the VC regularizer. Provide one or two floats.",
+    )
+    parser.add_argument(
+        "--batch-uniformity-weight",
+        type=float,
+        default=0.05,
+        help="Weight applied to the AlphaEarth batch-uniformity loss term.",
+    )
+    parser.add_argument(
+        "--batch-uniformity",
+        dest="batch_uniformity_enabled",
+        action="store_true",
+        help="Enable the AlphaEarth batch-uniformity loss term.",
+    )
+    parser.add_argument(
+        "--no-batch-uniformity",
+        dest="batch_uniformity_enabled",
+        action="store_false",
+        help="Disable the AlphaEarth batch-uniformity loss term.",
+    )
+    parser.set_defaults(batch_uniformity_enabled=None)
 
     args = parser.parse_args(args)
 

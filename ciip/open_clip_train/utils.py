@@ -7,14 +7,13 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, Union
 
+import numpy as np
 import torch
-import sys
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
-sys.path.insert(0, parent_dir)
-from model_ciip import CIIP
-from loss import CiipLoss
+from omegaconf import DictConfig, ListConfig, OmegaConf
 from torch import nn
-from omegaconf import DictConfig, OmegaConf
+
+from ciip.model_ciip import CIIP, LorentzCIIP
+from ..loss import CiipLoss, SigLipLoss
 
 
 def get_cast_dtype(precision: str):
@@ -60,9 +59,49 @@ def convert_weights_to_lp(model: nn.Module, dtype=torch.float16):
 convert_weights_to_fp16 = convert_weights_to_lp  # backwards compat
 
 
+_SENTINEL = object()
+
+
+def _resolve_section(cfg, key):
+    if cfg is None:
+        return None
+    if isinstance(cfg, DictConfig):
+        try:
+            return cfg[key]
+        except Exception:
+            return None
+    if isinstance(cfg, dict):
+        return cfg.get(key)
+    return getattr(cfg, key, None)
+
+
+def _get_cfg_value(cfg, key, default=_SENTINEL):
+    if cfg is None:
+        return default
+    if isinstance(cfg, DictConfig):
+        if key in cfg:
+            return cfg[key]
+        return default
+    if isinstance(cfg, dict):
+        return cfg.get(key, default)
+    return getattr(cfg, key, default)
+
+
+def _resolve_value(key, *cfgs, default=None):
+    for cfg in cfgs:
+        value = _get_cfg_value(cfg, key, _SENTINEL)
+        if value is not _SENTINEL:
+            return value
+    return default
+
 
 def create_loss(args):
-    if args.distill:
+    datamodule_cfg = _resolve_section(args, "datamodule")
+    loss_cfg = _resolve_section(args, "loss")
+    if loss_cfg is None:
+        loss_cfg = args
+
+    if bool(_resolve_value("distill", args, loss_cfg, default=False)):
         raise NotImplementedError("DistillClipLoss not currently supported")
         # return DistillClipLoss(
         #     local_loss=args.local_loss,
@@ -84,24 +123,58 @@ def create_loss(args):
         #     world_size=args.world_size,
         #     use_horovod=args.horovod,
         # )
-    elif args.siglip:
-        raise NotImplementedError("SigLip not currently supported")
+    siglip_enabled = bool(_resolve_value("siglip", args, loss_cfg, default=False))
+    if siglip_enabled:
+        # raise NotImplementedError("SigLip not currently supported")
         # assert not args.horovod, "Horovod not currently supported for SigLip"
-        # return SigLipLoss(
-        #     rank=args.rank,
-        #     world_size=args.world_size,
-        # )
+        return SigLipLoss(
+            rank=_resolve_value("rank", args, datamodule_cfg, default=0),
+            world_size=_resolve_value("world_size", args, datamodule_cfg, default=1),
+        )
+    vc_covariance_weights = _resolve_value("vc_covariance_weights", loss_cfg, args, default=None)
+    if isinstance(vc_covariance_weights, (DictConfig, ListConfig)):
+        vc_covariance_weights = OmegaConf.to_object(vc_covariance_weights)
+
+    matryoshka_dims = _resolve_value("matryoshka_dims", loss_cfg, args, default=None)
+    if isinstance(matryoshka_dims, (DictConfig, ListConfig)):
+        matryoshka_dims = OmegaConf.to_object(matryoshka_dims)
+
+    matryoshka_relative_weights = _resolve_value("matryoshka_weights", loss_cfg, args, default=None)
+    if isinstance(matryoshka_relative_weights, (DictConfig, ListConfig)):
+        matryoshka_relative_weights = OmegaConf.to_object(matryoshka_relative_weights)
+
     return CiipLoss(
-        local_loss=args.local_loss,
-        gather_with_grad=args.gather_with_grad,
-        cache_labels=True,
-        rank=args.rank,
-        world_size=args.world_size,
-        use_horovod=args.horovod,
+        local_loss=_resolve_value("local_loss", loss_cfg, args, default=False),
+        gather_with_grad=_resolve_value("gather_with_grad", loss_cfg, args, default=False),
+        cache_labels=_resolve_value("cache_labels", loss_cfg, args, default=True),
+        rank=_resolve_value("rank", loss_cfg, args, datamodule_cfg, default=0),
+        world_size=_resolve_value("world_size", loss_cfg, args, datamodule_cfg, default=1),
+        use_horovod=_resolve_value("horovod", loss_cfg, args, datamodule_cfg, default=False),
+        contrastive_weight=_resolve_value("contrastive_weight", loss_cfg, args, default=1.0),
+        vc_reg_enabled=_resolve_value("vc_enabled", loss_cfg, args, default=False),
+        vc_weight=_resolve_value("vc_weight", loss_cfg, args, default=0.0),
+        vc_gamma=_resolve_value("vc_gamma", loss_cfg, args, default=1.0),
+        vc_covariance_weights=vc_covariance_weights,
+        batch_uniformity_enabled=_resolve_value("batch_uniformity_enabled", loss_cfg, args, default=True),
+        batch_uniformity_weight=_resolve_value(
+            "batch_uniformity_weight", loss_cfg, args, default=0.05
+        ),
+        hyperbolic=_resolve_value("hyperbolic", loss_cfg, args, default=True),
+        hyperbolic_normalize=_resolve_value("hyperbolic_normalize", loss_cfg, args, default=True),
+        hyperbolic_curvature_init=_resolve_value("hyperbolic_curvature_init", loss_cfg, args, default=1.0),
+        hyperbolic_eps=_resolve_value("hyperbolic_eps", loss_cfg, args, default=1e-5),
+        centroid_lambda=_resolve_value("centroid_lambda", loss_cfg, args, default=0.0),
+        centroid_p=_resolve_value("centroid_p", loss_cfg, args, default=1.0),
+        centroid_q=_resolve_value("centroid_q", loss_cfg, args, default=0.5),
+        matryoshka_enabled=_resolve_value("matryoshka_enabled", loss_cfg, args, default=False),
+        matryoshka_weight=_resolve_value("matryoshka_weight", loss_cfg, args, default=1.0),
+        matryoshka_dims=matryoshka_dims,
+        matryoshka_relative_weights=matryoshka_relative_weights,
+        matryoshka_normalize=_resolve_value("matryoshka_normalize", loss_cfg, args, default=True),
     )
 
 
-def create_model(args, device):
+def create_model(args, device, **model_kwargs):
 
 # (
 #         model_name: str,
@@ -124,6 +197,16 @@ def create_model(args, device):
     model_name = "CIIP"
     precision = args.model.precision
     pretrained = args.model.pretrain.load
+    # check if kwargs
+    if "init_logit_scale" in model_kwargs:
+        init_logit_scale = model_kwargs['init_logit_scale']
+    else:
+        init_logit_scale = np.log(1 / 0.07)
+    
+    if 'init_logit_bias' in model_kwargs:
+            init_logit_bias = model_kwargs['init_logit_bias']
+    else:
+        init_logit_bias = None
 
     # force_preprocess_cfg = force_preprocess_cfg or {}
     # preprocess_cfg = asdict(PreprocessCfg())
@@ -147,21 +230,60 @@ def create_model(args, device):
     # cast_dtype set for fp16 and bf16 (manual mixed-precision), not set for 'amp' or 'pure' modes
     cast_dtype = get_cast_dtype(precision)
 
-    model = CIIP(embed_dim=args.model.embed_dim,
-        s1_resolution=args.model.s1_resolution,
-        s1_layers=OmegaConf.to_object(args.model.s1_layers),
-        s1_width=args.model.width,
-        s1_patch_size=args.model.s1_patch_size, # used by transformer
-        s1_bands=len(args.model.s1_bands),
-        s2_resolution=args.model.s2_resolution,
-        s2_layers=OmegaConf.to_object(args.model.s2_layers), #Resnet-34
-        s2_width=args.model.width,
-        s2_patch_size=args.model.s2_patch_size, # used by transformer
-        s2_bands=len(args.model.s2_bands),
-        framework=args.model.framework,
-        pretrain=args.model.pretrain.load,
-        s1_weights=args.model.pretrain.s1_weights,
-        s2_weights=args.model.pretrain.s2_weights)
+    # pre_projection_dim = getattr(args.model, "pre_projection_dim", args.model.embed_dim)
+
+    def _maybe_to_object(value):
+        return OmegaConf.to_object(value) if OmegaConf.is_config(value) else value
+
+    if args.loss.hyperbolic:
+        print("Using hyperbolic model")
+        model = LorentzCIIP(embed_dim=args.model.embed_dim,
+            # pre_projection_dim=pre_projection_dim,
+            s1_resolution=args.model.s1_resolution,
+            s1_layers=_maybe_to_object(args.model.s1_layers),
+            s1_width=args.model.width,
+            s1_patch_size=args.model.s1_patch_size, # used by transformer
+            s1_bands=len(args.model.s1_bands),
+            s2_resolution=args.model.s2_resolution,
+            s2_layers=_maybe_to_object(args.model.s2_layers), #Resnet-34
+            s2_width=args.model.width,
+            s2_patch_size=args.model.s2_patch_size, # used by transformer
+            s2_bands=len(args.model.s2_bands),
+            framework=args.model.framework,
+            pretrain=args.model.pretrain.load,
+            s1_weights=args.model.pretrain.s1_weights,
+            s2_weights=args.model.pretrain.s2_weights,
+            patch_masking=getattr(args.model, "patch_masking", False),
+            patch_mask_ratio=getattr(args.model, "patch_mask_ratio", 0.0),
+            patch_mask_overlap=getattr(args.model, "patch_mask_overlap", 0.0),
+            init_logit_scale=init_logit_scale,
+            init_logit_bias=init_logit_bias,
+            curv_init=args.loss.curvature_init,
+            learn_curv=args.loss.learn_curv,
+            entail_weight=args.loss.entail_weight)
+    else:
+
+        model = CIIP(embed_dim=args.model.embed_dim,
+            # pre_projection_dim=1024,#pre_projection_dim,
+            s1_resolution=args.model.s1_resolution,
+            s1_layers=_maybe_to_object(args.model.s1_layers),
+            s1_width=args.model.width,
+            s1_patch_size=args.model.s1_patch_size, # used by transformer
+            s1_bands=len(args.model.s1_bands),
+            s2_resolution=args.model.s2_resolution,
+            s2_layers=_maybe_to_object(args.model.s2_layers), #Resnet-34
+            s2_width=args.model.width,
+            s2_patch_size=args.model.s2_patch_size, # used by transformer
+            s2_bands=len(args.model.s2_bands),
+            framework=args.model.framework,
+            pretrain=args.model.pretrain.load,
+            s1_weights=args.model.pretrain.s1_weights,
+            s2_weights=args.model.pretrain.s2_weights,
+            patch_masking=getattr(args.model, "patch_masking", False),
+            patch_mask_ratio=getattr(args.model, "patch_mask_ratio", 0.0),
+            patch_mask_overlap=getattr(args.model, "patch_mask_overlap", 0.0),
+            init_logit_scale=init_logit_scale,
+            init_logit_bias=init_logit_bias)
     # , 
         # cast_dtype=cast_dtype)
 

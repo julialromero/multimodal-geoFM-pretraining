@@ -1,18 +1,18 @@
 import glob
 import logging
 import os
+import random
 import re
 import subprocess
-import sys
-import random
-import hydra
 from datetime import datetime
 from functools import partial
-from omegaconf import DictConfig, OmegaConf
-from comet_ml import Experiment
-from comet_ml.integration.pytorch import log_model
+
+import hydra
 import numpy as np
 import torch
+from comet_ml import Experiment
+from comet_ml.integration.pytorch import log_model
+from omegaconf import DictConfig, OmegaConf
 from torch import optim
 from torch.cuda.amp import GradScaler
 
@@ -31,21 +31,24 @@ try:
 except ImportError:
     hvd = None
 
-######## added
-from comet_ml import Experiment
-from comet_ml.integration.pytorch import log_model
-from utils import create_loss, create_model
+# from ciip.open_clip_train import transforms
+from ciip.open_clip_train.data import get_data
+from ciip.open_clip_train.distributed import (
+    broadcast_object,
+    init_distributed_device,
+    is_master,
+)
+from ciip.open_clip_train.file_utils import (
+    check_exists,
+    pt_load,
+    remote_sync,
+    start_sync_process,
+)
+from ciip.open_clip_train.logger import setup_logging
+from ciip.open_clip_train.scheduler import const_lr, const_lr_cooldown, cosine_lr
+from ciip.open_clip_train.train import evaluate, train_one_epoch
+from ciip.open_clip_train.utils import create_loss, create_model
 from torchvision.transforms import v2
-###
-
-# from open_clip import create_model_and_transforms #, trace_model, get_tokenizer, create_loss
-from open_clip_train.data import get_data
-from open_clip_train.distributed import is_master, init_distributed_device, broadcast_object
-from open_clip_train.logger import setup_logging
-from open_clip_train.params import parse_args
-from open_clip_train.scheduler import cosine_lr, const_lr, const_lr_cooldown
-from open_clip_train.train import train_one_epoch, evaluate
-from open_clip_train.file_utils import pt_load, check_exists, start_sync_process, remote_sync
 
 
 LATEST_CHECKPOINT_NAME = "epoch_latest.pt"
@@ -77,11 +80,10 @@ def get_latest_checkpoint(path: str, remote : bool):
         return checkpoints[-1]
     return None
 
-@hydra.main(config_path="configs", config_name=CONF)
+@hydra.main(config_path="configs", config_name=CONF, version_base=None)
 # def main(args):
 def main(args: DictConfig, start_epoch=0):
-    # args = parse_args(args)
-
+    
     if torch.cuda.is_available():
         # This enables tf32 on Ampere GPUs which is only 8% slower than
         # float16 and almost as accurate as float32
@@ -92,35 +94,43 @@ def main(args: DictConfig, start_epoch=0):
 
     # fully initialize distributed device environment
     device = init_distributed_device(args.datamodule)
-    print('After distribution: ', args.datamodule)
-
-    # get the name of the experiments
-    if True: #args.train.name is None:
-        # raise NotImplementedError('Name not yet supported.')
-        # sanitize model name for filesystem / uri use, easier if we don't use / in name as a rule?
-        model_name_safe = args.model.framework.replace('/', '-')
-        date_str = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
-        if args.datamodule.distributed:
-            # sync date_str from master to all ranks
-            date_str = broadcast_object(args.datamodule, date_str)
-        args.train.name = '-'.join([
-            date_str,
-            f"model_{model_name_safe}",
-            f"lr_{args.train.lr}",
-            f"b_{args.datamodule.batch_size}",
-            f"j_{args.model.workers}",
-            f"p_{args.model.precision}",
-        ])
-        print(f'Experiment name using {args.train.name}.')
+    # print('After distribution: ', args.datamodule)
 
     resume_latest = args.io.resume == 'latest'
-    log_base_path = os.path.join(args.io.logs, args.train.name)
+    resume_specified = bool(args.io.resume) and not resume_latest
+
+    # get the name of the experiments
+    if resume_specified:
+        # Ensure logs/checkpoints go to the same directory as the resume checkpoint
+        resume_checkpoint_dir = os.path.dirname(args.io.resume)
+        log_base_path = os.path.dirname(resume_checkpoint_dir)
+        args.train.name = os.path.basename(log_base_path)
+    else:
+        if True: #args.train.name is None:
+            # raise NotImplementedError('Name not yet supported.')
+            # sanitize model name for filesystem / uri use, easier if we don't use / in name as a rule?
+            model_name_safe = args.model.framework.replace('/', '-')
+            date_str = datetime.now().strftime("%Y_%m_%d-%H_%M_%S")
+            if args.datamodule.distributed:
+                # sync date_str from master to all ranks
+                date_str = broadcast_object(args.datamodule, date_str)
+            args.train.name = '-'.join([
+                date_str,
+                f"model_{model_name_safe}",
+                f"lr_{args.train.lr}",
+                f"b_{args.datamodule.batch_size}",
+                f"j_{args.model.workers}",
+                f"p_{args.model.precision}",
+            ])
+            print(f'Experiment name using {args.train.name}.')
+
+        log_base_path = os.path.join(args.io.logs, args.train.name)
     args.log_path = None
     if is_master(args, local=args.log_local):
         os.makedirs(log_base_path, exist_ok=True)
         log_filename = f'out-{args.datamodule.rank}' if args.log_local else 'out.log'
         args.log_path = os.path.join(log_base_path, log_filename)
-        if os.path.exists(args.log_path) and not resume_latest:
+        if os.path.exists(args.log_path) and not (resume_latest or resume_specified):
             print(
                 "Error. Experiment already exists. Use --name {} to specify a new experiment."
             )
@@ -183,7 +193,7 @@ def main(args: DictConfig, start_epoch=0):
                 logging.info(f'No latest resume checkpoint found in {checkpoint_path}.')
         if args.datamodule.distributed:
             # sync found checkpoint path to all ranks
-            resume_from = broadcast_object(args, resume_from)
+            resume_from = broadcast_object(args.datamodule, resume_from)
         args.io.resume = resume_from
 
     if args.copy_codebase:
@@ -245,7 +255,8 @@ def main(args: DictConfig, start_epoch=0):
         model_kwargs['init_logit_scale'] = np.log(10)  # different from CLIP
         model_kwargs['init_logit_bias'] = -10
     if model_kwargs:
-        raise NotImplementedError('Model kwargs not yet supported.')
+        print(model_kwargs)
+        # raise NotImplementedError('Model kwargs not yet supported.')
     model = create_model(
         args,
         device=device,
@@ -261,7 +272,7 @@ def main(args: DictConfig, start_epoch=0):
         # aug_cfg=args.aug_cfg,
         # pretrained_image=args.pretrained_image,
         # output_dict=True,
-        # **model_kwargs,
+        **model_kwargs,
     )
     if args.distill:
         raise NotImplementedError('Distillation not yet supported.')
@@ -314,6 +325,7 @@ def main(args: DictConfig, start_epoch=0):
     
         if args.distill:
             dist_model = torch.nn.parallel.DistributedDataParallel(dist_model, device_ids=[device], **ddp_args)
+    loss = create_loss(args)
 
     # create optimizer and scaler
     optimizer = None
@@ -326,22 +338,70 @@ def main(args: DictConfig, start_epoch=0):
         include = lambda n, p: not exclude(n, p)
 
         named_parameters = list(model.named_parameters())
-        gain_or_bias_params = [p for n, p in named_parameters if exclude(n, p) and p.requires_grad]
-        rest_params = [p for n, p in named_parameters if include(n, p) and p.requires_grad]
+        gain_or_bias_params = []
+        rest_params = []
+        curvature_params = []
 
-        optimizer= optim.AdamW(
-        [
+        for name, param in named_parameters:
+            if not param.requires_grad:
+                continue
+            if name.endswith("curv"):
+                curvature_params.append(param)
+                continue
+            if exclude(name, param):
+                gain_or_bias_params.append(param)
+            else:
+                rest_params.append(param)
+
+        loss_params = [p for p in loss.parameters() if p.requires_grad]
+
+        param_groups = [
             {"params": gain_or_bias_params, "weight_decay": 0.},
             {"params": rest_params, "weight_decay": args.train.wd},
-        ],
-        lr=args.train.lr,
-        betas=(args.train.beta1, args.train.beta2),
-        eps=args.train.eps,
+        ]
+        if loss_params:
+            param_groups.append({"params": loss_params, "weight_decay": 0.})
+
+        if curvature_params:
+            loss_cfg = getattr(args, "loss", None)
+            curvature_init = getattr(loss_cfg, "curvature_init", None) if loss_cfg is not None else None
+            if curvature_init is None and loss_cfg is not None:
+                curvature_init = getattr(loss_cfg, "hyperbolic_curvature_init", None)
+            if curvature_init is None:
+                curvature_init = 1.0
+            curvature_init = max(float(curvature_init), 1e-6)
+            curvature_lr = getattr(args.train, "curvature_lr", None)
+            if curvature_lr is None and loss_cfg is not None:
+                curvature_lr = getattr(loss_cfg, "curvature_lr", None)
+            if curvature_lr is None:
+                # Mirror the single-node setup by boosting curvature updates.
+                curvature_lr = args.train.lr * (1.0 / curvature_init)
+            curvature_lr = max(float(curvature_lr), 0.0)
+            param_groups.append({
+                "params": curvature_params,
+                "weight_decay": 0.,
+                "lr": curvature_lr,
+            })
+
+        optimizer = optim.AdamW(
+            param_groups,
+            lr=args.train.lr,
+            betas=(args.train.beta1, args.train.beta2),
+            eps=args.train.eps,
         )
 
         if args.datamodule.horovod:
-            optimizer = hvd.DistributedOptimizer(optimizer, named_parameters=model.named_parameters())
+            optimizer_named_parameters = list(model.named_parameters())
+            if loss_params:
+                optimizer_named_parameters.extend(
+                    (f"loss.{name}", param)
+                    for name, param in loss.named_parameters()
+                    if param.requires_grad
+                )
+            optimizer = hvd.DistributedOptimizer(optimizer, named_parameters=optimizer_named_parameters)
             hvd.broadcast_parameters(model.state_dict(), root_rank=0)
+            if loss_params:
+                hvd.broadcast_parameters(loss.state_dict(), root_rank=0)
             hvd.broadcast_optimizer_state(optimizer, root_rank=0)
 
         scaler = GradScaler() if args.model.precision == "amp" else None
@@ -349,37 +409,55 @@ def main(args: DictConfig, start_epoch=0):
     # optionally resume from a checkpoint
     start_epoch = 0
     if args.io.resume is not None:
-        raise NotImplementedError('Resume not yet supported.')
-        # checkpoint = pt_load(args.resume, map_location='cpu')
-        # if 'epoch' in checkpoint:
-        #     # resuming a train checkpoint w/ epoch and optimizer state
-        #     start_epoch = checkpoint["epoch"]
-        #     sd = checkpoint["state_dict"]
-        #     if not args.distributed and next(iter(sd.items()))[0].startswith('module'):
-        #         sd = {k[len('module.'):]: v for k, v in sd.items()}
-        #     model.load_state_dict(sd)
-        #     if optimizer is not None:
-        #         optimizer.load_state_dict(checkpoint["optimizer"])
-            # if scaler is not None and 'scaler' in checkpoint:
-            #     scaler.load_state_dict(checkpoint['scaler'])
-        #     logging.info(f"=> resuming checkpoint '{args.resume}' (epoch {start_epoch})")
-        # else:
-        #     # loading a bare (model only) checkpoint for fine-tune or evaluation
-        #     model.load_state_dict(checkpoint)
-        #     logging.info(f"=> loaded checkpoint '{args.resume}' (epoch {start_epoch})")
-
-
-    if args.dataset.use_transforms:
-      transforms = v2.Compose([
-          v2.RandomResizedCrop(size=(args.model.s1_resolution, args.model.s2_resolution), antialias=True),
-          v2.RandomHorizontalFlip(p=0.5),
-          v2.RandomVerticalFlip(p=0.5),
-          v2.GaussianBlur(3),
-      ])
+        # raise NotImplementedError('Resume not yet supported.')
+        checkpoint = pt_load(args.io.resume, map_location='cpu')
+        if 'epoch' in checkpoint:
+            # resuming a train checkpoint w/ epoch and optimizer state
+            start_epoch = checkpoint["epoch"]
+            sd = checkpoint["state_dict"]
+            if not args.datamodule.distributed and next(iter(sd.items()))[0].startswith('module'):
+                sd = {k[len('module.'):]: v for k, v in sd.items()}
+            model.load_state_dict(sd)
+            if optimizer is not None:
+                optimizer.load_state_dict(checkpoint["optimizer"])
+            if 'loss_state_dict' in checkpoint:
+                loss.load_state_dict(checkpoint['loss_state_dict'])
+            if scaler is not None and 'scaler' in checkpoint:
+                scaler.load_state_dict(checkpoint['scaler'])
+            logging.info(f"=> resuming checkpoint '{args.io.resume}' (epoch {start_epoch})")
+        else:
+            # loading a bare (model only) checkpoint for fine-tune or evaluation
+            model.load_state_dict(checkpoint)
+            logging.info(f"=> loaded checkpoint '{args.io.resume}' (epoch {start_epoch})")
     else:
-        transforms = None
+        logging.info(f"=> no checkpoint found at '{args.io.resume}', starting from scratch.")
+        # save the omegaconf config to a yaml file
+        if is_master(args):
+            config_file = os.path.join(args.io.logs, "prod_default.yaml")
+            with open(config_file, "w") as f:
+                OmegaConf.save(args, f)
+            logging.info(f"Saved config to {config_file}")
 
-    data = get_data(args, transforms)
+
+    # if args.dataset.use_transforms:
+    # #   transforms = v2.Compose([
+    # #       v2.RandomResizedCrop(size=(args.model.s1_resolution, args.model.s2_resolution), antialias=True),
+    # #       v2.RandomHorizontalFlip(p=0.5),
+    # #       v2.RandomVerticalFlip(p=0.5),
+    # #       v2.GaussianBlur(3),
+    # #   ])
+    #     assert args.model.s1_resolution != args.model.s2_resolution, 'S1 target resolution is not the same as S2 target resolution'
+    #     # transforms = PairGeom(out_size=args.model.s1_resolution)
+    #     # transforms = transforms.PairAugmented(
+    #     #     pair_geom=transforms.PairGeom(out_size=args.model.s1_resolution)
+
+    #     # )
+    #     raise NotImplementedError('Transforms not yet supported.')
+        
+    # else:
+    #     transforms = None
+
+    data = get_data(args)
     assert len(data), 'At least one train or eval dataset must be specified.'
 
     # create scheduler if train
@@ -449,7 +527,10 @@ def main(args: DictConfig, start_epoch=0):
         # evaluate(model, data, start_epoch, args, tb_writer=writer, tokenizer=tokenizer)
         # return
 
-    loss = create_loss(args.datamodule)
+    # MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT=100000
+    # torch.cuda.memory._record_memory_history(
+    #    max_entries=MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT
+    # )
 
     for epoch in range(start_epoch, args.train.epochs):
         if is_master(args):
@@ -462,19 +543,25 @@ def main(args: DictConfig, start_epoch=0):
         #     evaluate(model, data, completed_epoch, args, tb_writer=writer, tokenizer=tokenizer)
 
         # Saving checkpoints.
-        if args.io.save_logs:
+        checkpoint_dict = None
+        if args.io.save_logs or args.train.save_most_recent:
             checkpoint_dict = {
                 "epoch": completed_epoch,
                 "name": args.train.name,
                 "state_dict": original_model.state_dict(),
                 "optimizer": optimizer.state_dict(),
+                "loss_state_dict": loss.state_dict(),
             }
             if scaler is not None:
                 checkpoint_dict["scaler"] = scaler.state_dict()
 
-            if completed_epoch == args.train.epochs \
-                    or (args.io.save_frequency > 0 and (completed_epoch % args.io.save_frequency) == 0):
-                # save checkpoints within outputs file
+        if args.io.save_logs and is_master(args):
+            should_save_epoch = (
+                completed_epoch == args.train.epochs
+                or (args.io.save_frequency > 0 and (completed_epoch % args.io.save_frequency) == 0)
+                or completed_epoch == 1
+            )
+            if should_save_epoch and checkpoint_dict is not None:
                 torch.save(
                     checkpoint_dict,
                     os.path.join(args.io.checkpoint_path, f"epoch_{completed_epoch}.pt"),
@@ -482,16 +569,16 @@ def main(args: DictConfig, start_epoch=0):
 
                 # log out via comet
                 # TBD if we want the whole checkpoint dict or just some specific hyper-params . . .
-                if(args.io.comet_ml):
-                    experiment.log_parameters(checkpoint_dict)
-                    log_model(experiment, model=original_model, model_name="CIIP!")
+                # if(args.io.comet_ml):
+                #     experiment.log_parameters(checkpoint_dict)
+                #     log_model(experiment, model=original_model, model_name="CIIP!")
 
-        if args.train.delete_previous_checkpoint:
+        if args.train.delete_previous_checkpoint and args.io.save_logs and is_master(args):
             previous_checkpoint = os.path.join(args.io.checkpoint_path, f"epoch_{completed_epoch - 1}.pt")
             if os.path.exists(previous_checkpoint):
                 os.remove(previous_checkpoint)
 
-        if args.train.save_most_recent:
+        if args.train.save_most_recent and checkpoint_dict is not None and is_master(args):
             # try not to corrupt the latest checkpoint if save fails
             tmp_save_path = os.path.join(args.io.checkpoint_path, "tmp.pt")
             latest_save_path = os.path.join(args.io.checkpoint_path, LATEST_CHECKPOINT_NAME)

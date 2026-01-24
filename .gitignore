@@ -17,3 +17,19 @@ dist/
 # don't save the model checkpoints
 checkpoints/ 
 log/
+
+
+**/configs/prod_default.yaml
+# **
+*.in
+data/**
+local/*
+**/local/*
+**/notebooks/
+!ciip/visualizations/ssl4eo/notebooks/
+!ciip/visualizations/ssl4eo/notebooks/**
+**/tests/
+
+# **/open_clip_train/outputs/
+**/ciip/lightning_logs/
+# **/metadata.json
