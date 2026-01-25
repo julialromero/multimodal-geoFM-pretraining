@@ -328,7 +328,10 @@ class VisionTransformer(nn.Module):
             top = torch.randint(0, grid - block_h + 1, (1,), device=device).item()
             left = torch.randint(0, grid - block_w + 1, (1,), device=device).item()
             mask[idx, top:top + block_h, left:left + block_w] = False
-        return mask.view(batch_size, total)
+        keep_mask = mask.view(batch_size, total)
+        num_keep = total - num_mask
+        keep_mask = self._fix_keep_count(keep_mask, num_keep)
+        return keep_mask
 
     def sample_patch_keep_mask(
         self,
@@ -338,6 +341,9 @@ class VisionTransformer(nn.Module):
         target_overlap: float = None,
         max_attempts: int = 20,
     ) -> torch.Tensor:
+        total = self._num_patches()
+        num_keep = int(round(total * (1.0 - self.patch_mask_ratio)))
+        num_keep = max(1, min(num_keep, total))
         if self.patch_mask_block:
             if reference_keep is None or target_overlap is None:
                 return self._block_keep_mask(batch_size, device)
@@ -353,11 +359,7 @@ class VisionTransformer(nn.Module):
                 if best is None or score < best_delta:
                     best = candidate
                     best_delta = score
-            return best
-
-        total = self._num_patches()
-        num_keep = int(round(total * (1.0 - self.patch_mask_ratio)))
-        num_keep = max(1, min(num_keep, total))
+            return self._fix_keep_count(best, num_keep)
         keep_mask = torch.zeros(batch_size, total, dtype=torch.bool, device=device)
         if reference_keep is None or target_overlap is None:
             for idx in range(batch_size):
@@ -379,33 +381,63 @@ class VisionTransformer(nn.Module):
             keep_from_ref = ref_keep_idx[torch.randperm(ref_keep_idx.numel(), device=device)[:num_from_ref]]
             keep_from_drop = ref_drop_idx[torch.randperm(ref_drop_idx.numel(), device=device)[:num_from_drop]]
             keep_mask[idx, torch.cat([keep_from_ref, keep_from_drop], dim=0)] = True
-        return keep_mask
+        return self._fix_keep_count(keep_mask, num_keep)
+
+    def _fix_keep_count(self, keep_mask: torch.Tensor, num_keep: int) -> torch.Tensor:
+        fixed = keep_mask.clone()
+        for idx in range(keep_mask.shape[0]):
+            keep_idx = torch.nonzero(fixed[idx], as_tuple=False).view(-1)
+            drop_idx = torch.nonzero(~fixed[idx], as_tuple=False).view(-1)
+            if keep_idx.numel() > num_keep:
+                remove = keep_idx[
+                    torch.randperm(keep_idx.numel(), device=keep_mask.device)[:keep_idx.numel() - num_keep]
+                ]
+                fixed[idx, remove] = False
+            elif keep_idx.numel() < num_keep:
+                add = drop_idx[
+                    torch.randperm(drop_idx.numel(), device=keep_mask.device)[:num_keep - keep_idx.numel()]
+                ]
+                fixed[idx, add] = True
+        return fixed
 
     def forward(self, x: torch.Tensor, keep_mask: torch.Tensor = None):
         x = self.conv1(x)  # shape = [*, width, grid, grid]
         x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
         x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
-        x = torch.cat([self.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device), x], dim=1)  # shape = [*, grid ** 2 + 1, width]
-        x = x + self.positional_embedding.to(x.dtype)
-        x = self.ln_pre(x)
         if self.patch_masking and self.training:
             if keep_mask is None:
                 keep_mask = self.sample_patch_keep_mask(x.shape[0], x.device)
-            keep_mask = keep_mask.to(dtype=x.dtype)
-            cls_mask = torch.ones((x.shape[0], 1), dtype=keep_mask.dtype, device=x.device)
-            token_mask = torch.cat([cls_mask, keep_mask], dim=1).unsqueeze(-1)
-            x = x * token_mask
+            else:
+                num_keep = int(round(self._num_patches() * (1.0 - self.patch_mask_ratio)))
+                num_keep = max(1, min(num_keep, self._num_patches()))
+                keep_mask = self._fix_keep_count(keep_mask, num_keep)
+            x = x + self.positional_embedding[1:].to(x.dtype)
+            x = self.ln_pre(x)
+            scores = torch.rand(x.shape[0], x.shape[1], device=x.device)
+            scores = scores.masked_fill(~keep_mask, -1.0)
+            num_keep = int(keep_mask.sum(dim=1).max().item())
+            keep_idx = torch.topk(scores, k=num_keep, dim=1).indices
+            gather_idx = keep_idx.unsqueeze(-1).expand(-1, -1, x.shape[-1])
+            x = torch.gather(x, dim=1, index=gather_idx)
+        else:
+            x = torch.cat(
+                [
+                    self.class_embedding.to(x.dtype)
+                    + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device),
+                    x,
+                ],
+                dim=1,
+            )  # shape = [*, grid ** 2 + 1, width]
+            x = x + self.positional_embedding.to(x.dtype)
+            x = self.ln_pre(x)
 
         x = x.permute(1, 0, 2)  # NLD -> LND
         x = self.transformer(x)
         x = x.permute(1, 0, 2)  # LND -> NLD
 
         x = self.ln_post(x)
-        if keep_mask is not None:
-            patch_tokens = x[:, 1:, :]
-            keep_mask = keep_mask.to(dtype=patch_tokens.dtype).unsqueeze(-1)
-            denom = keep_mask.sum(dim=1).clamp(min=1.0)
-            x = (patch_tokens * keep_mask).sum(dim=1) / denom
+        if self.patch_masking and self.training:
+            x = x.mean(dim=1)
         else:
             x = x[:, 0, :]
 
