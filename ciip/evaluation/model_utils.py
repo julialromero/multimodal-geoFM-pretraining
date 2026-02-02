@@ -200,17 +200,54 @@ class CiipEvaluationAdapter(EvaluationAdapter):
             dtype = self.dtype_s2
 
         replaced_modules = []
+        replaced_proj = None
         for attr in ("fc", "proj"):
             module = getattr(encoder, attr, None)
             if isinstance(module, nn.Module):
                 replaced_modules.append((attr, module))
                 setattr(encoder, attr, nn.Identity())
+            elif attr == "proj" and module is not None:
+                # ViT proj is a Parameter; drop it to expose pre-projection features.
+                replaced_proj = module
+                setattr(encoder, attr, None)
         try:
-
-            features = encoder(images.type(dtype))
+            inputs = images.type(dtype)
+            if (
+                hasattr(encoder, "transformer")
+                and hasattr(encoder, "class_embedding")
+                and hasattr(encoder, "positional_embedding")
+                and hasattr(encoder, "ln_pre")
+                and hasattr(encoder, "ln_post")
+                and hasattr(encoder, "conv1")
+            ):
+                x = encoder.conv1(inputs)
+                x = x.reshape(x.shape[0], x.shape[1], -1)
+                x = x.permute(0, 2, 1)
+                x = torch.cat(
+                    [
+                        encoder.class_embedding.to(x.dtype)
+                        + torch.zeros(
+                            x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device
+                        ),
+                        x,
+                    ],
+                    dim=1,
+                )
+                x = x + encoder.positional_embedding.to(x.dtype)
+                x = encoder.ln_pre(x)
+                x = x.permute(1, 0, 2)
+                x = encoder.transformer(x)
+                x = x.permute(1, 0, 2)
+                x = encoder.ln_post(x)
+                x = x[:, 1:, :]
+                features = x.mean(dim=1)
+            else:
+                features = encoder(inputs)
         finally:
             for attr, module in replaced_modules:
                 setattr(encoder, attr, module)
+            if replaced_proj is not None:
+                setattr(encoder, "proj", replaced_proj)
 
         if isinstance(features, (tuple, list)):
             features = features[0]
@@ -902,6 +939,7 @@ def build_model_from_checkpoint(
     }
     embed_dim, pre_dim = _infer_projection_dims(cleaned)
     print(f'Inferred embed_dim: {embed_dim}, pre_dim: {pre_dim}')
+    logging.info("Embedding dims: pre-projection=%d, projected=%d", pre_dim, embed_dim)
     is_lorentz = any(key.startswith("curv") or "lorentz" in key for key in cleaned)
 
     print(f'Is Lorentz model: {is_lorentz}')

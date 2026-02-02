@@ -37,6 +37,7 @@ PROBE_LABELS: Dict[str, str] = {
     "linear_probe_divideby10000": "divideby10000",
     "linear_probe_ssl4eonorm": "ssl4eonorm",
 }
+VIT_RESULTS = "auto"
 
 DATASET = "eurosat"
 DATASET_LABEL = "EuroSAT"
@@ -65,70 +66,80 @@ FRACTIONS_FOR_COLLECTION: List[float] = sorted(set(TARGET_FRACTIONS) | set(LINE_
 # ]
 
 # ALLOWED_MODELS: List[str] = [
-#     "random rcf_13ch",
-#     "rcf_13ch",
-#     "croma",
-#     # "dofa_base_s2_13ch",
-#     "scalemae_large_rgb",
-#     "moco",
-#     "dino",
-#     "resnet50_s2_rgb_moco",
-#     "ciip_resnet50_epoch20",
-#     "Vanilla CIIP (S2A) epoch_50",
-#     "Hyperbolic CIIP (S2A) epoch_70"
-# ]
-
-
-# #### FULL SET OF MODELS #####
-# ALLOWED_MODELS: List[str] = [
 #     "rcf_13ch",
 #     "croma",
 #     "dofa_base_s2_13ch",
-#     "vitsmall16_s2_all_moco",
 #     "scalemae_large_rgb",
-#     "resnet18_s2_all_moco",
-#     "resnet50_s2_all_moco",
-#     "moco",  # resnet50 all moco
+#     "moco",
 #     "dino",
-#     "resnet18_s2_rgb_moco",
-#     "resnet50_s2_rgb_moco",
-#     "resnet152_imagenet_rgb",
-#     "random_resnet50_s2_12",
-#     "ciip_resnet50_epoch20",
-#     "Vanilla CIIP (S2A) epoch_50",
-#     "Hyperbolic CIIP (S2A) epoch_70",
-#     "CIIP (S2-text) epoch_70",
-#     "llama3_ms_clip_base",
-#     # "Hyperbolic (BS=10k, clamped-18) epoch_70",
-#     "S1-S2-Text CIIP epoch_135",
-#     "S1-S2-Text CIIP epoch_215",
-#     "S1-S2-Text CIIP epoch_265"
+#     "vitsmall16_s2_all_moco",
 # ]
 
-# PREFERRED_MODEL_ORDER: List[str] = [
-#     # "rcf_13ch",
-#     "croma",
-#     # "dofa_base_s2_13ch",
-#     # "vitsmall16_s2_all_moco",
-#     # "scalemae_large_rgb",
-#     "resnet18_s2_all_moco",
-#     "moco",  # resnet50 all moco
-#     "resnet50_s2_all_moco",
-#     # "dino",
-#     "resnet18_s2_rgb_moco",
-#     "resnet50_s2_rgb_moco",
-#     "resnet152_imagenet_rgb",
-#     # "random_resnet50_s2_12",
-#     # "ciip_resnet50_epoch20",
-#     "Vanilla CIIP (S2A) epoch_50",
-#     "Hyperbolic CIIP (S2A) epoch_70",
-#     "CIIP (S2-text) epoch_70",
-#     "llama3_ms_clip_base"
-#     # "Hyperbolic (BS=10k, clamped-18) epoch_70",
-#     "S1-S2-Text CIIP epoch_70",
-#     "S1-S2-Text CIIP epoch_150",
-#     "S1-S2-Text CIIP epoch_200"
-# ]
+
+#### FULL SET OF MODELS #####
+ALLOWED_MODELS: List[str] = [
+    "rcf_13ch",
+    "croma",
+    "dofa_base_s2_13ch",
+    "vitsmall16_s2_all_moco",
+    "scalemae_large_rgb",
+    # "resnet18_s2_all_moco",
+    "resnet50_s2_all_moco",
+    "moco",  # resnet50 all moco
+    "dino",
+    # "resnet18_s2_rgb_moco",
+    # "resnet50_s2_rgb_moco",
+    "resnet152_imagenet_rgb",
+    "llama3_ms_clip_base",
+    # "Vanilla CIIP (BS=12k) (scaled)",
+    # "Vanilla CIIP (BS=8k) (scaled)",
+    # "Vanilla CIIP (BS=8k) (band-norm)",
+    # "Vanilla CIIP (BS=20k) (scaled)"
+    # "VCReg Loss (BS=12k) (scaled)",
+    # "Alpha Earth Uniformity (BS=12k) (scaled)",
+    # "Vanilla CIIP (BS=12k) (scaled), ls<=18",
+    # "Vanilla CIIP (BS=12k) (scaled), ls<=35",
+    "Matryoshka (BS=12k) (scaled)",
+    "ViT CIIP (BS=12k, scaled)",
+    "ViT DAI CIIP (BS=12k) (scaled)",
+    # "ViT DAI CIIP PROJECTED (BS=12k) (scaled)",
+    "Matryoshka ViT CIIP (BS=12k) (scaled)",
+    "Text-S2 alignment (BS=8k) (band-norm)"
+    # 'Masked ViT CIIP (BS=12k, scaled)'
+]
+
+PREFERRED_MODEL_ORDER: List[str] = [
+    "rcf_13ch",
+    "croma",
+    "dofa_base_s2_13ch",
+    "vitsmall16_s2_all_moco",
+    "scalemae_large_rgb",
+    # "resnet18_s2_all_moco",
+    "resnet50_s2_all_moco",
+    "moco",  # resnet50 all moco
+    "dino",
+    # "resnet18_s2_rgb_moco",
+    # "resnet50_s2_rgb_moco",
+    "resnet152_imagenet_rgb",
+    "llama3_ms_clip_base",
+    "Vanilla CIIP (BS=12k) (scaled)",
+    "Vanilla CIIP (BS=8k) (scaled)",
+    "Vanilla CIIP (BS=8k) (band-norm)",
+    "Vanilla CIIP (BS=20k) (scaled)"
+    # "VCReg Loss (BS=12k) (scaled)",
+    # "Alpha Earth Uniformity (BS=12k) (scaled)",
+    # "Vanilla CIIP (BS=12k) (scaled), ls<=18",
+    # "Vanilla CIIP (BS=12k) (scaled), ls<=35",
+    "Matryoshka (BS=12k) (scaled)",
+    "ViT CIIP (BS=12k, scaled)",
+    "ViT DAI CIIP (BS=12k) (scaled)",
+    # "ViT DAI CIIP PROJECTED (BS=12k) (scaled)",
+    "Matryoshka ViT CIIP (BS=12k) (scaled)",
+    "Text-S2 alignment (BS=8k) (band-norm)"
+    # 'Masked ViT CIIP (BS=12k, scaled)'
+]
+
+
 
 # # ##### JUST CIIP AND RCF #####
 # PREFERRED_MODEL_ORDER: List[str] = [
@@ -147,106 +158,38 @@ FRACTIONS_FOR_COLLECTION: List[float] = sorted(set(TARGET_FRACTIONS) | set(LINE_
 #     "Hyperbolic (BS=10k) epoch_70"
 # ]
 
-# PREFERRED_MODEL_ORDER: List[str] = [
-#     "Hyperbolic CIIP (S2A) epoch_10",
-#     "Hyperbolic CIIP (S2A) epoch_20",
-#     "Hyperbolic CIIP (S2A) epoch_30",
-#     "Hyperbolic CIIP (S2A) epoch_40",
-#     "Hyperbolic CIIP (S2A) epoch_50",
-#     "Hyperbolic CIIP (S2A) epoch_60",
-#     "Hyperbolic CIIP (S2A) epoch_70",
-#     "Hyperbolic CIIP (S2A) epoch_80",
-    
-# ]
-
-# ALLOWED_MODELS: List[str] = [
-#     "Hyperbolic CIIP (S2A) epoch_10",
-#     "Hyperbolic CIIP (S2A) epoch_20",
-#     "Hyperbolic CIIP (S2A) epoch_30",
-#     "Hyperbolic CIIP (S2A) epoch_40",
-#     "Hyperbolic CIIP (S2A) epoch_50",
-#     "Hyperbolic CIIP (S2A) epoch_60",
-#     "Hyperbolic CIIP (S2A) epoch_70",
-#     "Hyperbolic CIIP (S2A) epoch_80",
-# ]
-
-# PREFERRED_MODEL_ORDER: List[str] = [
-#     "Vanilla CIIP (S2A) epoch_10",
-#     "Vanilla CIIP (S2A) epoch_20",
-#     "Vanilla CIIP (S2A) epoch_30",
-#     "Vanilla CIIP (S2A) epoch_40",
-#     "Vanilla CIIP (S2A) epoch_50",
-#     "Vanilla CIIP (S2A) epoch_60",
-#     "Vanilla CIIP (S2A) epoch_70",
-#     "Vanilla CIIP (S2A) epoch_80",
-#     "Vanilla CIIP (S2A) epoch_90",
-#     # "Vanilla CIIP (S2A) epoch_115",
-# ]
-# ALLOWED_MODELS: List[str] = [
-#     "Vanilla CIIP (S2A) epoch_10",
-#     "Vanilla CIIP (S2A) epoch_20",
-#     "Vanilla CIIP (S2A) epoch_30",
-#     "Vanilla CIIP (S2A) epoch_40",
-#     "Vanilla CIIP (S2A) epoch_50",
-#     "Vanilla CIIP (S2A) epoch_60",
-#     "Vanilla CIIP (S2A) epoch_70",
-#     "Vanilla CIIP (S2A) epoch_80",
-#     "Vanilla CIIP (S2A) epoch_90",
-#     # "Vanilla CIIP (S2A) epoch_115",
-# ]
-
-# PREFERRED_MODEL_ORDER: List[str] = [
-#     "CIIP (S2-text) epoch_5",
-#     "CIIP (S2-text) epoch_10",
-#     "CIIP (S2-text) epoch_20",
-#     "CIIP (S2-text) epoch_30",
-#     "CIIP (S2-text) epoch_40",
-#     "CIIP (S2-text) epoch_50",
-#     "CIIP (S2-text) epoch_60",
-#     "CIIP (S2-text) epoch_70",
-# ]
-
-# ALLOWED_MODELS: List[str] = [
-#     "CIIP (S2-text) epoch_5",
-#     "CIIP (S2-text) epoch_10",
-#     "CIIP (S2-text) epoch_20",
-#     "CIIP (S2-text) epoch_30",
-#     "CIIP (S2-text) epoch_40",
-#     "CIIP (S2-text) epoch_50",
-#     "CIIP (S2-text) epoch_60",
-#     "CIIP (S2-text) epoch_70",
-# ]
-
 # "1_8_2026": "Vanilla CIIP (BS=12k) (scaled)",
 #     "1_12_2026": "Vanilla CIIP (BS=8k) (scaled)",
 #     "1_14_2026": "Vanilla CIIP (BS=20k) (scaled)",
 
-PREFERRED_MODEL_ORDER: List[str] = [
-    # "Vanilla CIIP (BS=12k) (scaled)",
-    "Vanilla CIIP (BS=8k) (scaled)",
-    "Vanilla CIIP (BS=8k) (band-norm)",
-    # "Vanilla CIIP (BS=20k) (scaled)"
-    # "VCReg Loss (BS=12k) (scaled)",
-    # "Alpha Earth Uniformity (BS=12k) (scaled)",
-    # "Vanilla CIIP (BS=12k) (scaled), ls<=18",
-    # "Vanilla CIIP (BS=12k) (scaled), ls<=35",
-    # # "Matroyshka v2",
-    # "ViT CIIP (BS=12k) (scaled)",
-]
-PREFERRED_MODEL_ORDER: List[str] = []
+# PREFERRED_MODEL_ORDER: List[str] = [
+#     "Vanilla CIIP (BS=12k) (scaled)",
+#     "Vanilla CIIP (BS=8k) (scaled)",
+#     "Vanilla CIIP (BS=8k) (band-norm)",
+#     "Vanilla CIIP (BS=20k) (scaled)"
+#     "VCReg Loss (BS=12k) (scaled)",
+#     "Alpha Earth Uniformity (BS=12k) (scaled)",
+#     "Vanilla CIIP (BS=12k) (scaled), ls<=18",
+#     "Vanilla CIIP (BS=12k) (scaled), ls<=35",
+#     "Matroyshka v2",
+#     "ViT CIIP (BS=12k, scaled)",
+#     'Masked ViT CIIP (BS=12k, scaled)'
+# ]
+# PREFERRED_MODEL_ORDER: List[str] = []
 
-ALLOWED_MODELS: List[str] = [
-    # "Vanilla CIIP (BS=12k) (scaled)",
-    "Vanilla CIIP (BS=8k) (scaled)",
-    "Vanilla CIIP (BS=8k) (band-norm)"
-    # "Vanilla CIIP (BS=20k) (scaled)"
-    # "VCReg Loss (BS=12k) (scaled)",
-    # "Alpha Earth Uniformity (BS=12k) (scaled)",
-    # "Vanilla CIIP (BS=12k) (scaled), ls<=18",
-    # "Vanilla CIIP (BS=12k) (scaled), ls<=35",
-    # # "Matroyshka v2",
-    # "ViT CIIP (BS=12k) (scaled)",
-]
+# ALLOWED_MODELS: List[str] = [
+#     "Vanilla CIIP (BS=12k) (scaled)",
+#     "Vanilla CIIP (BS=8k) (scaled)",
+#     "Vanilla CIIP (BS=8k) (band-norm)",
+#     "Vanilla CIIP (BS=20k) (scaled)"
+#     "VCReg Loss (BS=12k) (scaled)",
+#     "Alpha Earth Uniformity (BS=12k) (scaled)",
+#     "Vanilla CIIP (BS=12k) (scaled), ls<=18",
+#     "Vanilla CIIP (BS=12k) (scaled), ls<=35",
+#     "Matroyshka v2",
+#     "ViT CIIP (BS=12k, scaled)",
+#     'Masked ViT CIIP (BS=12k, scaled)'
+# ]
 # ALLOWED_MODELS: List[str] = []
 
 
@@ -277,9 +220,13 @@ RUN_LABELS: Dict[str, str] = {
     "2025_12_28-20_16_37-model_resnet50-lr_0.001-b_2-j_6-p_amp_bfloat16": "Matryoshka (BS=12k) (scaled)",
     "2026_01_01-09_37_25-model_resnet50-lr_0.001-b_2-j_6-p_amp_bfloat16": "VCReg Loss (BS=12k) (scaled)",
     "2026_01_03-00_02_16-model_resnet50-lr_0.002-b_2-j_6-p_amp_bfloat16": "Alpha Earth Uniformity (BS=12k) (scaled)",
-    "1_8_2026": "ViT CIIP (BS=12k) (scaled)",
+    "1_8_2026": "ViT CIIP (BS=12k, scaled)",
+    "1_28-ViT-DAI": "ViT DAI CIIP (BS=12k) (scaled)",
+    "1_28-ViT-DAI___projected": "ViT DAI CIIP PROJECTED (BS=12k) (scaled)",
+    "2026_01_29_matryoshka_vit": "Matryoshka ViT CIIP (BS=12k) (scaled)",
     "2026_01_12-14_13_43-model_resnet50-lr_0.002-b_6-j_6-p_amp_bfloat16": "Vanilla CIIP (BS=8k) (scaled)",
     "2026_01_14-18_01_06-model_resnet50-lr_0.002-b_2-j_6-p_amp_bfloat16": "Vanilla CIIP (BS=20k) (scaled)",
+    "2026_01_20-08_11_45-model_transformer-lr_0.002-b_2-j_6-p_amp_bfloat16": 'Masked ViT CIIP (BS=12k, scaled)'
 }
 GIF_FRAME_DURATION_SECONDS = 3  # increase to slow down playback
 
@@ -309,11 +256,16 @@ def _matryoshka_tag(parts: tuple[str, ...]) -> Optional[str]:
     return next((p for p in parts if p.startswith("matryoshka_dim_")), None)
 
 
-def _format_matryoshka_label(epoch_token: Optional[str], mat_tag: Optional[str]) -> Optional[str]:
+def _format_matryoshka_label(
+    epoch_token: Optional[str],
+    mat_tag: Optional[str],
+    base_label: Optional[str] = None,
+) -> Optional[str]:
     if epoch_token is None or mat_tag is None:
         return None
     dim = mat_tag.split("_")[-1]
-    return f"Matryoshka {epoch_token} ndim={dim}"
+    prefix = base_label or "Matryoshka"
+    return f"{prefix} {epoch_token} ndim={dim}"
 
 
 def select_fraction_accuracies(path: Path) -> Dict[float, Optional[float]]:
@@ -339,6 +291,66 @@ def select_fraction_accuracies(path: Path) -> Dict[float, Optional[float]]:
     return selected
 
 
+def _normalize_epoch_token(token: Optional[str]) -> Optional[str]:
+    if token and token.endswith("_CLS"):
+        return token[:-4]
+    if token and token.endswith("_meanpool"):
+        return token[:-9]
+    return token
+
+
+def _epoch_from_label(label: str) -> Optional[int]:
+    match = re.search(r"epoch_(\d+)", label)
+    return int(match.group(1)) if match else None
+
+
+def _strip_epoch_token(label: str) -> str:
+    base = re.sub(r"\s*epoch_\d+(?:_meanpool|_CLS)?", "", label).strip()
+    base = re.sub(r"\s*ndim=\d+", "", base).strip()
+    base = re.sub(r"\s\[(CLS|meanpool)\]", "", base).strip()
+    return re.sub(r"\s{2,}", " ", base)
+
+
+def _vit_epoch_variant(token: Optional[str]) -> Optional[str]:
+    if token is None:
+        return None
+    if token.endswith("_CLS"):
+        return "CLS"
+    if token.endswith("_meanpool"):
+        return "meanpool"
+    return None
+
+
+def _is_vit_run(base_run: str) -> bool:
+    if "vit" in base_run.lower():
+        return True
+    base_label = RUN_LABELS.get(base_run, "")
+    return "vit" in base_label.lower()
+
+
+def _meanpool_epochs_exist(base_run: str) -> bool:
+    root = UNIFIED_EVAL_ROOT / "ciip_checkpoint" / base_run
+    if not root.exists():
+        return False
+    for path in root.rglob("epoch_*_meanpool"):
+        if path.is_dir():
+            return True
+    return False
+
+
+def _resolve_vit_mode(base_run: str, vit_results: str) -> Optional[str]:
+    if not _is_vit_run(base_run):
+        return None
+    meanpool_exists = (UNIFIED_EVAL_ROOT / "ciip_checkpoint" / f"{base_run}_meanpool").exists()
+    if not meanpool_exists:
+        meanpool_exists = _meanpool_epochs_exist(base_run)
+    if vit_results == "meanpool":
+        return "meanpool"
+    if vit_results == "cls":
+        return "cls"
+    return "meanpool" if meanpool_exists else "cls"
+
+
 def extract_model_label(path: Path, probe_subdir: str) -> Optional[str]:
     """Create a concise model label from the path, applying ciip rules."""
     try:
@@ -356,15 +368,26 @@ def extract_model_label(path: Path, probe_subdir: str) -> Optional[str]:
         model_root = "resnet50_s2_all_moco"
     if model_root == "ciip_checkpoint":
         epoch_token = next((p for p in after_root if p.startswith("epoch_")), None)
+        raw_epoch_token = epoch_token
         run_dir = after_root[1] if len(after_root) > 1 else None
-        base_label = RUN_LABELS.get(run_dir) if run_dir else None
+        if run_dir is None:
+            return None
+        base_run = run_dir[:-9] if run_dir.endswith("_meanpool") else run_dir
+        vit_mode = _resolve_vit_mode(base_run, VIT_RESULTS)
+        if VIT_RESULTS != "auto" and vit_mode is not None:
+            if vit_mode == "meanpool" and (raw_epoch_token is None or not raw_epoch_token.endswith("_meanpool")):
+                return None
+            if vit_mode == "cls" and (raw_epoch_token is None or not raw_epoch_token.endswith("_CLS")):
+                return None
+        epoch_token = _normalize_epoch_token(epoch_token)
+        base_label = RUN_LABELS.get(base_run) if base_run else None
         if base_label is None and run_dir is not None:
-            base_label = run_dir
+            base_label = base_run
         if base_label is None:
             return None
         if mat_tag is None and ("Matroyshka" in base_label or "Matryoshka" in base_label):
             mat_tag = "matryoshka_dim_2048"
-        mat_label = _format_matryoshka_label(epoch_token, mat_tag)
+        mat_label = _format_matryoshka_label(epoch_token, mat_tag, base_label)
         if mat_label is not None:
             label = mat_label
         elif epoch_token is None:
@@ -377,6 +400,10 @@ def extract_model_label(path: Path, probe_subdir: str) -> Optional[str]:
                 label = f"Matryoshka {epoch_token} ndim=2048"
             else:
                 label = f"{base_label} {epoch_token}"
+        if VIT_RESULTS == "auto" and vit_mode is not None:
+            variant = _vit_epoch_variant(raw_epoch_token)
+            if variant is not None:
+                label = f"{label} [{variant}]"
     else:
         label = model_root
     
@@ -405,14 +432,18 @@ def parse_preprocess_label(model: str) -> tuple[str, str]:
     return cleaned_model, preprocess
 
 
-def collect_results() -> Dict[str, Dict[str, Dict[float, Optional[float]]]]:
-    """Gather knn and linear probe accuracies, picking best of raw vs batchnorm."""
+def collect_results(
+    epoch_map: Optional[Dict[str, int]] = None,
+) -> Dict[str, Dict[str, Dict[float, Optional[float]]]]:
+    """Gather knn and linear probe accuracies (batchnorm variants only)."""
 
     def method_and_variant(filename: str) -> Optional[tuple[str, str]]:
         if "backbone" not in filename:
             return None
+        if "batchnorm" not in filename:
+            return None
         method = "knn" if "knn" in filename else "linear"
-        variant = "normalized" if "batchnorm" in filename else "raw"
+        variant = "normalized"
         return method, variant
 
     # base_label -> variant -> method -> fractions
@@ -441,39 +472,28 @@ def collect_results() -> Dict[str, Dict[str, Dict[float, Optional[float]]]]:
             
             # Check if base model (without probe label or epoch) is allowed
             base_model = model_label.rsplit(" (", 1)[0]
-            if " epoch_" in base_model:
-                base_model = base_model.split(" epoch_")[0]
+            base_model = _strip_epoch_token(base_model)
             if ALLOWED_MODELS and base_model not in ALLOWED_MODELS:
                 continue
+            if epoch_map:
+                desired = epoch_map.get(base_model)
+                if desired is not None:
+                    epoch = _epoch_from_label(model_label)
+                    if epoch != desired:
+                        continue
 
             fraction_accs = select_fraction_accuracies(path)
             model_entry = by_model.setdefault(model_label, {})
             variant_entry = model_entry.setdefault(variant, {})
             variant_entry[method] = fraction_accs
 
-    def variant_score(variant_data: Dict[str, Dict[float, Optional[float]]]) -> float:
-        scores: List[float] = []
-        for method in ("linear", "knn"):
-            frac_map = variant_data.get(method, {})
-            for val in frac_map.values():
-                if val is not None:
-                    scores.append(val)
-        return sum(scores) / len(scores) if scores else float("-inf")
-
     results: Dict[str, Dict[str, Dict[float, Optional[float]]]] = {}
     for base_label, variants in by_model.items():
         if not variants:
             continue
-        best_variant = None
-        best_score = float("-inf")
-        for variant_name, data in variants.items():
-            score = variant_score(data)
-            if score > best_score or (score == best_score and variant_name == "normalized"):
-                best_score = score
-                best_variant = variant_name
-        if best_variant is None:
+        chosen = variants.get("normalized")
+        if chosen is None:
             continue
-        chosen = variants[best_variant]
         # Don't add variant suffix here since probe label is already in base_label
         results[base_label] = chosen
 
@@ -576,12 +596,6 @@ def sorted_models(
 def select_best_epoch_per_model(
     results: Dict[str, Dict[str, Dict[float, Optional[float]]]],
 ) -> Dict[str, Dict[str, Dict[float, Optional[float]]]]:
-    weighted_scores = compute_weighted_scores(
-        results,
-        methods=["linear", "knn"],
-        fractions=FRACTIONS_FOR_COLLECTION,
-    )
-
     def base_label(model: str) -> str:
         # Preserve preprocess suffix, drop epoch token for grouping.
         prefix, suffix = model.rsplit(" (", 1) if " (" in model else (model, "")
@@ -590,6 +604,14 @@ def select_best_epoch_per_model(
             prefix = prefix.split(" epoch_")[0]
         return f"{prefix}{suffix}"
 
+    def score_at_fraction(entry: Dict[str, Dict[float, Optional[float]]], fraction: float) -> float:
+        vals: List[float] = []
+        for method in ("linear", "knn"):
+            val = entry.get(method, {}).get(fraction)
+            if val is not None:
+                vals.append(val)
+        return max(vals) if vals else float("-inf")
+
     best_for_base: Dict[str, str] = {}
     for model in results.keys():
         base = base_label(model)
@@ -597,34 +619,73 @@ def select_best_epoch_per_model(
         if current is None:
             best_for_base[base] = model
             continue
-        cur_weighted = weighted_scores.get(current, float("nan"))
-        new_weighted = weighted_scores.get(model, float("nan"))
-        cur_overall = results[current]
-        new_overall = results[model]
-
-        def overall_mean(entry: Dict[str, Dict[float, Optional[float]]]) -> float:
-            vals: List[float] = []
-            for method in ("linear", "knn"):
-                for val in entry.get(method, {}).values():
-                    if val is not None:
-                        vals.append(val)
-            return float(sum(vals) / len(vals)) if vals else float("-inf")
-
-        cur_mean = overall_mean(cur_overall)
-        new_mean = overall_mean(new_overall)
-
-        cur_weighted_ok = not math.isnan(cur_weighted)
-        new_weighted_ok = not math.isnan(new_weighted)
-        if new_weighted_ok and not cur_weighted_ok:
+        cur_score = score_at_fraction(results[current], 0.01)
+        new_score = score_at_fraction(results[model], 0.01)
+        if new_score > cur_score:
             best_for_base[base] = model
-        elif new_weighted_ok and cur_weighted_ok:
-            if new_weighted < cur_weighted or (
-                math.isclose(new_weighted, cur_weighted) and new_mean > cur_mean
-            ):
-                best_for_base[base] = model
-        elif not new_weighted_ok and not cur_weighted_ok:
-            if new_mean > cur_mean:
-                best_for_base[base] = model
+
+    return {model: results[model] for model in best_for_base.values()}
+
+
+def select_best_epoch_preproc_per_model(
+    results: Dict[str, Dict[str, Dict[float, Optional[float]]]],
+    *,
+    method: str,
+) -> tuple[Dict[str, Dict[str, Dict[float, Optional[float]]]], Dict[str, str]]:
+    def base_label(model: str) -> str:
+        cleaned_model, _ = parse_preprocess_label(model)
+        if " epoch_" in cleaned_model:
+            cleaned_model = cleaned_model.split(" epoch_")[0]
+        return cleaned_model
+
+    def score_at_fraction(entry: Dict[str, Dict[float, Optional[float]]], fraction: float) -> float:
+        val = entry.get(method, {}).get(fraction)
+        return val if val is not None else float("-inf")
+
+    best_for_base: Dict[str, str] = {}
+    for model in results.keys():
+        base = base_label(model)
+        current = best_for_base.get(base)
+        if current is None:
+            best_for_base[base] = model
+            continue
+        cur_score = score_at_fraction(results[current], 0.01)
+        new_score = score_at_fraction(results[model], 0.01)
+        if new_score > cur_score:
+            best_for_base[base] = model
+
+    out: Dict[str, Dict[str, Dict[float, Optional[float]]]] = {}
+    for base, model in best_for_base.items():
+        out[base] = {method: results[model].get(method, {})}
+    return out, best_for_base
+
+
+def select_best_preprocess_only(
+    results: Dict[str, Dict[str, Dict[float, Optional[float]]]],
+) -> Dict[str, Dict[str, Dict[float, Optional[float]]]]:
+    def base_label(model: str) -> str:
+        cleaned_model, _ = parse_preprocess_label(model)
+        return cleaned_model
+
+    def score_at_fraction(entry: Dict[str, Dict[float, Optional[float]]], fraction: float) -> float:
+        vals: List[float] = []
+        for method in ("linear", "knn"):
+            val = entry.get(method, {}).get(fraction)
+            if val is not None:
+                vals.append(val)
+        return max(vals) if vals else float("-inf")
+
+    best_for_base: Dict[str, str] = {}
+    for model in results.keys():
+        base = base_label(model)
+        current = best_for_base.get(base)
+        if current is None:
+            best_for_base[base] = model
+            continue
+        cur_score = score_at_fraction(results[current], 0.01)
+        new_score = score_at_fraction(results[model], 0.01)
+        if new_score > cur_score:
+            best_for_base[base] = model
 
     return {model: results[model] for model in best_for_base.values()}
 
@@ -885,6 +946,8 @@ def render_table(
     method: str,
     results: Dict[str, Dict[str, Dict[float, Optional[float]]]],
     output_name: str,
+    *,
+    best_label_map: Optional[Dict[str, str]] = None,
 ) -> Path:
     """Render a LaTeX-style table for a given method and save as PNG."""
     models = sorted_models(
@@ -917,7 +980,8 @@ def render_table(
             best_by_frac[frac] = max(vals)
 
     for model in models:
-        model_name, preprocess = parse_preprocess_label(model)
+        display_label = best_label_map.get(model, model) if best_label_map else model
+        model_name, preprocess = parse_preprocess_label(display_label)
         row = [model_name, preprocess]
         weighted_val = weighted_scores.get(model)
         row.append(f"{weighted_val:.3f}" if weighted_val is not None and not math.isnan(weighted_val) else "N/A")
@@ -927,7 +991,7 @@ def render_table(
         rows.append(row)
 
     max_label_len = max((len(m) for m in models), default=10)
-    model_col_width = max(0.30, min(0.52, 0.013 * max_label_len))
+    model_col_width = max(0.62, min(0.70, 0.016 * max_label_len))
     preprocess_col_width = 0.22
     weighted_col_width = 0.16
     other_col_width = 0.16
@@ -940,7 +1004,8 @@ def render_table(
     ax.set_title(
         f"{DATASET_LABEL} backbone: {'Linear Probe' if method == 'linear' else 'k-NN'}",
         fontsize=14,
-        pad=4,
+        pad=0,
+        y=1.01,
     )
 
     table = ax.table(
@@ -949,6 +1014,7 @@ def render_table(
         loc="center",
         cellLoc="center",
         colWidths=col_widths,
+        bbox=[0.0, 0.0, 1.0, 0.96],
     )
     table.auto_set_font_size(False)
     table.set_fontsize(12)
@@ -980,7 +1046,7 @@ def render_table(
             if val is not None and abs(val - best) < 1e-6:
                 table[(row_idx, col_idx)]._text.set_fontweight("bold")
 
-    fig.tight_layout(pad=0.5)
+    fig.tight_layout(pad=0.2)
     output_path = UNIFIED_EVAL_ROOT / output_name
     fig.savefig(output_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
@@ -1131,7 +1197,7 @@ def render_line_plots(
 
 
 def main() -> None:
-    global DATASET, DATASET_LABEL, LINEAR_PROBE_SUBDIRS, ALLOWED_MODELS, PREFERRED_MODEL_ORDER, RUN_LABELS
+    global DATASET, DATASET_LABEL, LINEAR_PROBE_SUBDIRS, ALLOWED_MODELS, PREFERRED_MODEL_ORDER, RUN_LABELS, VIT_RESULTS
 
     parser = argparse.ArgumentParser(description="Plot kNN vs linear probe results.")
     parser.add_argument(
@@ -1153,32 +1219,114 @@ def main() -> None:
         default=["linear_probe"],
         help="Which linear probe subdirectories to read metrics from (can specify multiple).",
     )
-    parser.add_argument(
+    best_group = parser.add_mutually_exclusive_group()
+    best_group.add_argument(
         "--best-epoch-only",
         action="store_true",
         help="Only keep the best epoch per model (default is to include all epochs).",
+    )
+    best_group.add_argument(
+        "--best-epoch-preproc",
+        action="store_true",
+        help="Only keep the best epoch+preproc per model for each method (default is to include all).",
+    )
+    best_group.add_argument(
+        "--best-preprocess-only",
+        action="store_true",
+        help="Only keep the best preprocess per model/epoch (default is to include all).",
+    )
+    parser.add_argument(
+        "--vit-results",
+        choices=["auto", "cls", "meanpool"],
+        default="auto",
+        help="Which ViT unified-eval results to read (auto prefers _meanpool if present).",
+    )
+    parser.add_argument(
+        "--epoch-map",
+        type=str,
+        default=None,
+        help="Comma-separated model=epoch filters (e.g., '1_28-ViT-DAI=200,2026_01_29_matryoshka_vit=200').",
     )
     args = parser.parse_args()
 
     DATASET = args.dataset.lower()
     DATASET_LABEL = "EuroSAT" if DATASET == "eurosat" else "BigEarthNet"
     LINEAR_PROBE_SUBDIRS = args.probe_subdir
+    VIT_RESULTS = args.vit_results
     if MATRYOSHKA_ONLY and LINEAR_PROBE_SUBDIRS == ["linear_probe"]:
         LINEAR_PROBE_SUBDIRS = list(PROBE_LABELS.keys())
     RUN_LABELS.update(_discover_matryoshka_runs(UNIFIED_EVAL_ROOT))
 
-    results = collect_results()
+    epoch_map: Dict[str, int] = {}
+    if args.epoch_map:
+        entries: List[str] = []
+        buf: List[str] = []
+        depth = 0
+        for ch in args.epoch_map:
+            if ch == "(":
+                depth += 1
+            elif ch == ")" and depth > 0:
+                depth -= 1
+            if ch == "," and depth == 0:
+                entry = "".join(buf).strip()
+                if entry:
+                    entries.append(entry)
+                buf = []
+                continue
+            buf.append(ch)
+        tail = "".join(buf).strip()
+        if tail:
+            entries.append(tail)
+        for entry in entries:
+            if not entry.strip():
+                continue
+            if "=" not in entry:
+                raise ValueError(f"Invalid --epoch-map entry: {entry}")
+            name, value = entry.rsplit("=", 1)
+            name = _strip_epoch_token(name.strip())
+            name = RUN_LABELS.get(name, name)
+            value = value.strip()
+            value = value.strip().strip('"').strip("'")
+            try:
+                epoch_map[name] = int(value)
+            except ValueError as exc:
+                raise ValueError(f"Invalid epoch in --epoch-map: {entry}") from exc
+
+    results = collect_results(epoch_map=epoch_map if epoch_map else None)
     if not results and ALLOWED_MODELS:
         print("No results found with ALLOWED_MODELS; retrying without model filter.")
         ALLOWED_MODELS = []
         PREFERRED_MODEL_ORDER = []
         _allowed_epochs_for_label.cache_clear()
         results = collect_results()
+    best_labels_linear: Optional[Dict[str, str]] = None
+    best_labels_knn: Optional[Dict[str, str]] = None
     if args.best_epoch_only:
         results = select_best_epoch_per_model(results)
+    elif args.best_epoch_preproc:
+        best_linear, best_labels_linear = select_best_epoch_preproc_per_model(results, method="linear")
+        best_knn, best_labels_knn = select_best_epoch_preproc_per_model(results, method="knn")
+        merged: Dict[str, Dict[str, Dict[float, Optional[float]]]] = {}
+        for base, entry in best_linear.items():
+            merged.setdefault(base, {}).update(entry)
+        for base, entry in best_knn.items():
+            merged.setdefault(base, {}).update(entry)
+        results = merged
+    elif args.best_preprocess_only:
+        results = select_best_preprocess_only(results)
     output_path = plot_results(results)
-    linear_table_path = render_table("linear", results, f"{DATASET}_linear_probe_table.png")
-    knn_table_path = render_table("knn", results, f"{DATASET}_knn_table.png")
+    linear_table_path = render_table(
+        "linear",
+        results,
+        f"{DATASET}_linear_probe_table.png",
+        best_label_map=best_labels_linear,
+    )
+    knn_table_path = render_table(
+        "knn",
+        results,
+        f"{DATASET}_knn_table.png",
+        best_label_map=best_labels_knn,
+    )
     model_list = sorted_models(list(results.keys()), results=results)
     model_colors = compute_model_colors(model_list)
     bump_chart_path = render_bump_chart(results, model_colors)

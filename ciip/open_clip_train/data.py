@@ -1100,9 +1100,10 @@ def get_transform(modality, is_train):
                 Clamp_S1()
             ])
         else:
-            raise NotImplementedError("S1 validation transforms - check norm method.")
+            # raise NotImplementedError("S1 validation transforms - check norm method.")
             return transforms.Compose([
                 transforms.CenterCrop(224),
+                Clamp_S1()
                 # transforms.Normalize(mean=S1GRD_MEAN, std=S1GRD_STD),
             ])
     elif modality.lower() == "s2a" or modality.lower() == "s2l2a":
@@ -1119,14 +1120,13 @@ def get_transform(modality, is_train):
 
             ])
         else:
-            raise NotImplementedError("S2 validation transforms - check norm method.")
-        return transforms.Compose([
-                transforms.CenterCrop(224),
-                transforms.Normalize(mean=S2L2A_MEAN, std=S2L2A_STD),
-            ])
+            # raise NotImplementedError("S2 validation transforms - check norm method.")
+            return transforms.Compose([
+                    transforms.CenterCrop(224),
+                    # transforms.Normalize(mean=S2L2A_MEAN, std=S2L2A_STD),
+                    Divideby10000Normalize(),
+                ])
     elif modality.lower() == "s2c" or modality.lower() == "s2l1c":
-        raise NotImplementedError("S2 validation transforms - check norm method.")
-        print("Using S2 13 band L1C normalization.")
         if is_train:
             return transforms.Compose([
                 transforms.RandomApply(
@@ -1139,6 +1139,7 @@ def get_transform(modality, is_train):
 
             ])
         else:
+            print("Using S2 13 band L1C normalization.")
             return transforms.Compose([
                 transforms.CenterCrop(224),
                 transforms.Normalize(mean=S2L1C_MEAN, std=S2L1C_STD),
@@ -1215,6 +1216,108 @@ def get_data(args, preprocess_fns=None):
     
     # return data
 
+
+def _update_running_stats(
+    running_sum: torch.Tensor,
+    running_sumsq: torch.Tensor,
+    running_count: torch.Tensor,
+    batch: torch.Tensor,
+) -> None:
+    batch = batch.double()
+    running_sum += batch.sum(dim=(0, 2, 3))
+    running_sumsq += (batch ** 2).sum(dim=(0, 2, 3))
+    running_count += batch.shape[0] * batch.shape[2] * batch.shape[3]
+
+
+def compute_ssl4eo_band_stats(
+    root: str | Path,
+    s2_tier: str = "S2L2A",
+    max_files: Optional[int] = None,
+    seed: Optional[int] = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+
+    transforms_map = {
+        "s1": get_transform("s1", is_train=True),
+        "s2": get_transform(s2_tier, is_train=True),
+    }
+    dataset = SSL4EODataset(
+        root=root,
+        seasons=[0, 1, 2, 3],
+        transforms=transforms_map,
+        s2_tier=s2_tier,
+        is_train=True,
+    )
+
+    num_files = len(dataset) if max_files is None else min(max_files, len(dataset))
+    if num_files < 1:
+        raise ValueError("No files selected for statistics computation.")
+
+    first_sample = dataset[0]
+    s1_channels = first_sample["s1"].shape[1]
+    s2_channels = first_sample["s2"].shape[1]
+
+    s1_sum = torch.zeros(s1_channels, dtype=torch.float64)
+    s1_sumsq = torch.zeros(s1_channels, dtype=torch.float64)
+    s1_count = torch.zeros(s1_channels, dtype=torch.float64)
+    s2_sum = torch.zeros(s2_channels, dtype=torch.float64)
+    s2_sumsq = torch.zeros(s2_channels, dtype=torch.float64)
+    s2_count = torch.zeros(s2_channels, dtype=torch.float64)
+
+    for idx in range(num_files):
+        sample = dataset[idx]
+        _update_running_stats(s1_sum, s1_sumsq, s1_count, sample["s1"])
+        _update_running_stats(s2_sum, s2_sumsq, s2_count, sample["s2"])
+
+    s1_mean = s1_sum / s1_count
+    s2_mean = s2_sum / s2_count
+    s1_var = s1_sumsq / s1_count - s1_mean ** 2
+    s2_var = s2_sumsq / s2_count - s2_mean ** 2
+    s1_std = torch.sqrt(torch.clamp(s1_var, min=0.0))
+    s2_std = torch.sqrt(torch.clamp(s2_var, min=0.0))
+
+    return s1_mean, s1_std, s2_mean, s2_std
+
+
+def _format_band_stats(prefix: str, bands: list[str], mean: torch.Tensor, std: torch.Tensor) -> None:
+    print(f"{prefix} bands: {bands}")
+    print(f"{prefix} mean: {mean.tolist()}")
+    print(f"{prefix} std: {std.tolist()}")
+
+
+def _parse_band_names(s2_tier: str, s2_channels: int) -> list[str]:
+    tier = s2_tier.lower()
+    if tier in ("s2l2a", "s2a"):
+        return DEFAULT_S2_BANDS[:s2_channels]
+    if tier in ("s2l1c", "s2c"):
+        return ["1", "2", "3", "4", "5", "6", "7", "8", "8A", "9", "10", "11", "12"][:s2_channels]
+    if tier in ("rgb",):
+        return ["4", "3", "2"][:s2_channels]
+    return [str(i) for i in range(s2_channels)]
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Compute SSL4EO bandwise mean/std after transforms.")
+    parser.add_argument("--root", type=str, required=True, help="SSL4EO root (contains S1GRD/S2L2A).")
+    parser.add_argument("--s2-tier", type=str, default="S2L2A", help="S2 tier: S2L2A, S2L1C, or RGB.")
+    parser.add_argument("--max-files", type=int, default=None, help="Limit number of files processed.")
+    parser.add_argument("--seed", type=int, default=0, help="Seed for transform randomness.")
+    args = parser.parse_args()
+
+    s1_mean, s1_std, s2_mean, s2_std = compute_ssl4eo_band_stats(
+        root=args.root,
+        s2_tier=args.s2_tier,
+        max_files=args.max_files,
+        seed=args.seed,
+    )
+    _format_band_stats("S1", ["VV", "VH"][: len(s1_mean)], s1_mean, s1_std)
+    s2_bands = _parse_band_names(args.s2_tier, len(s2_mean))
+    _format_band_stats("S2", s2_bands, s2_mean, s2_std)
 
 
 ########################################################################################
