@@ -284,12 +284,12 @@ class SSL4EODataset(Dataset):
 
         ds_s1, ds_s2 = self._open_zarr_pair(file_idx)
 
-        # Expect (sample=64, time=4, band=C, y, x)
-        arr_s1 = ds_s1["bands"].values
-        arr_s2 = ds_s2["bands"].values
+        bands_s1 = ds_s1["bands"]
+        bands_s2 = ds_s2["bands"]
 
-        P, T, C_s1, H, W = arr_s1.shape
-        P2, T2, C_s2, H2, W2 = arr_s2.shape
+        # Expect (sample=64, time=4, band=C, y, x)
+        P, T, C_s1, H, W = bands_s1.shape
+        P2, T2, C_s2, H2, W2 = bands_s2.shape
 
         assert P == self.num_samples_per_file, f"Expected {self.num_samples_per_file} samples/file, got {P}"
         assert P2 == P and T2 == T and (H2, W2) == (H, W)
@@ -299,6 +299,8 @@ class SSL4EODataset(Dataset):
         if self.return_all_timestamps:
             # Return all seasons so the caller can feed them individually and
             # average embeddings. No averaging happens here.
+            arr_s1 = bands_s1.values
+            arr_s2 = bands_s2.values
             s1_list = []
             s2_list = []
             for t in range(T):
@@ -322,8 +324,8 @@ class SSL4EODataset(Dataset):
             s1 = torch.stack(s1_list, dim=1)
             s2 = torch.stack(s2_list, dim=1)
         else:
-            s1_np = arr_s1[:, time_idx]  # (P, C1, H, W)
-            s2_np = arr_s2[:, time_idx]  # (P, C2, H, W)
+            s1_np = bands_s1.isel(time=time_idx).values  # (P, C1, H, W)
+            s2_np = bands_s2.isel(time=time_idx).values  # (P, C2, H, W)
 
             s1 = torch.from_numpy(s1_np.astype("float32"))
             s2 = torch.from_numpy(s2_np.astype("float32"))
@@ -335,6 +337,9 @@ class SSL4EODataset(Dataset):
                     s2 = s2[:, [3, 2, 1], ...]
 
             s1, s2 = self._apply_transforms(s1, s2)
+
+        ds_s1.close()
+        ds_s2.close()
 
         return {
             "s1": s1,  # (P, 2, 224, 224) or (P, T, 2, 224, 224)
@@ -990,14 +995,15 @@ class Divideby10000Normalize:
     
 def dataset_to_datainfo(args, dataset, is_train):
     num_samples = len(dataset)
-    sampler = DistributedSampler(dataset) if args.datamodule.distributed and is_train else None
+    sampler = DistributedSampler(dataset, drop_last=True) if args.datamodule.distributed and is_train else None
     shuffle = is_train and sampler is None
+    num_workers = getattr(getattr(args, "model", None), "workers", 0)
 
     dataloader = DataLoader(
         dataset,
         batch_size=args.datamodule.batch_size,
         shuffle=shuffle,
-        num_workers=4, #args.model.workers,
+        num_workers=num_workers,
         pin_memory=True,
         sampler=sampler,
         # drop_last=is_train,
@@ -1007,6 +1013,8 @@ def dataset_to_datainfo(args, dataset, is_train):
     )
     dataloader.num_samples = num_samples
     dataloader.num_batches = len(dataloader)
+    logging.info("Dataloader samples: %s, batches: %s", num_samples, dataloader.num_batches)
+
 
     return DataInfo(dataloader, sampler)
 

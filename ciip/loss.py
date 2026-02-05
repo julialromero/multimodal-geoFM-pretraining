@@ -1,4 +1,6 @@
+import logging
 import math
+import os
 from contextlib import nullcontext
 from typing import Dict, List, Optional, Tuple
 
@@ -23,6 +25,32 @@ except ImportError:
 from . import lorentz as L
 
 
+def _setup_gather_logger() -> logging.Logger:
+    logger = logging.getLogger("ciip.gather_debug")
+    if not logger.handlers:
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter(
+            "%(asctime)s | %(levelname)s | %(message)s", datefmt="%Y-%m-%d,%H:%M:%S"
+        )
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+    return logger
+
+
+_GATHER_LOG = _setup_gather_logger()
+_GATHER_CONTEXT: Dict[str, int] = {}
+
+
+def _set_gather_context(ctx: Optional[Dict[str, int]]) -> None:
+    if ctx is None:
+        _GATHER_CONTEXT.clear()
+        return
+    _GATHER_CONTEXT.clear()
+    _GATHER_CONTEXT.update(ctx)
+
+
 def gather_features(
         s1_features,
         s2_features,
@@ -33,6 +61,37 @@ def gather_features(
         use_horovod=False
 ):
     assert has_distributed, 'torch.distributed did not import correctly, please use a PyTorch version with support.'
+    debug_first = int(os.environ.get("CIIP_GATHER_DEBUG_FIRST", "5"))
+    debug_every = int(os.environ.get("CIIP_GATHER_DEBUG_EVERY", "50"))
+    call_idx = getattr(gather_features, "_debug_counter", 0) + 1
+    setattr(gather_features, "_debug_counter", call_idx)
+    do_log = (
+        rank == 0
+        and (call_idx <= debug_first or (debug_every > 0 and call_idx % debug_every == 0))
+    )
+    ctx = _GATHER_CONTEXT if _GATHER_CONTEXT else {}
+    ctx_epoch = ctx.get("epoch")
+    ctx_batch = ctx.get("batch")
+    ctx_accum = ctx.get("accum")
+    ctx_micro = ctx.get("micro")
+    ctx_step = ctx.get("step")
+
+    if do_log:
+        _GATHER_LOG.info(
+            "Rank0 gather_features enter call=%s epoch=%s batch=%s accum=%s micro=%s train_step=%s s1_shape=%s s2_shape=%s local_loss=%s gather_with_grad=%s world_size=%s dist_init=%s",
+            call_idx,
+            ctx_epoch,
+            ctx_batch,
+            ctx_accum,
+            ctx_micro,
+            ctx_step,
+            tuple(s1_features.shape),
+            tuple(s2_features.shape),
+            local_loss,
+            gather_with_grad,
+            world_size,
+            dist.is_initialized() if has_distributed else False,
+        )
     if use_horovod:
         assert hvd is not None, 'Please install horovod'
         if gather_with_grad:
@@ -52,14 +111,146 @@ def gather_features(
                 all_s2_features = torch.cat(gathered_s2_features, dim=0)
     else:
         # We gather tensors from all gpus
+        bs = torch.tensor([s1_features.shape[0]], device=s1_features.device)
+        if do_log:
+            _GATHER_LOG.info(
+                "Rank0 gather_features call=%s epoch=%s batch=%s accum=%s micro=%s train_step=%s before all_reduce MIN",
+                call_idx,
+                ctx_epoch,
+                ctx_batch,
+                ctx_accum,
+                ctx_micro,
+                ctx_step,
+            )
+        try:
+            torch.distributed.all_reduce(bs, op=torch.distributed.ReduceOp.MIN)
+        except Exception:
+            if rank == 0:
+                _GATHER_LOG.exception(
+                    "Rank0 gather_features call=%s epoch=%s batch=%s accum=%s micro=%s train_step=%s all_reduce MIN failed",
+                    call_idx,
+                    ctx_epoch,
+                    ctx_batch,
+                    ctx_accum,
+                    ctx_micro,
+                    ctx_step,
+                )
+            raise
+        bs_min = int(bs.item())
+        if do_log:
+            _GATHER_LOG.info(
+                "Rank0 gather_features call=%s epoch=%s batch=%s accum=%s micro=%s train_step=%s after all_reduce MIN bs_min=%s",
+                call_idx,
+                ctx_epoch,
+                ctx_batch,
+                ctx_accum,
+                ctx_micro,
+                ctx_step,
+                bs_min,
+            )
+
+        bs2 = torch.tensor([s1_features.shape[0]], device=s1_features.device)
+        if do_log:
+            _GATHER_LOG.info(
+                "Rank0 gather_features call=%s epoch=%s batch=%s accum=%s micro=%s train_step=%s before all_reduce MAX",
+                call_idx,
+                ctx_epoch,
+                ctx_batch,
+                ctx_accum,
+                ctx_micro,
+                ctx_step,
+            )
+        try:
+            torch.distributed.all_reduce(bs2, op=torch.distributed.ReduceOp.MAX)
+        except Exception:
+            if rank == 0:
+                _GATHER_LOG.exception(
+                    "Rank0 gather_features call=%s epoch=%s batch=%s accum=%s micro=%s train_step=%s all_reduce MAX failed",
+                    call_idx,
+                    ctx_epoch,
+                    ctx_batch,
+                    ctx_accum,
+                    ctx_micro,
+                    ctx_step,
+                )
+            raise
+        bs_max = int(bs2.item())
+        if do_log:
+            _GATHER_LOG.info(
+                "Rank0 gather_features call=%s epoch=%s batch=%s accum=%s micro=%s train_step=%s after all_reduce MAX bs_max=%s",
+                call_idx,
+                ctx_epoch,
+                ctx_batch,
+                ctx_accum,
+                ctx_micro,
+                ctx_step,
+                bs_max,
+            )
+
+        if bs_min != bs_max:
+            if rank == 0:
+                _GATHER_LOG.error(
+                    "Rank0 gather_features call=%s epoch=%s batch=%s accum=%s micro=%s train_step=%s unequal batch sizes across ranks: min=%s max=%s",
+                    call_idx,
+                    ctx_epoch,
+                    ctx_batch,
+                    ctx_accum,
+                    ctx_micro,
+                    ctx_step,
+                    bs_min,
+                    bs_max,
+                )
+            raise RuntimeError(f"Unequal batch sizes across ranks: min={bs_min}, max={bs_max}")
+
+
         if gather_with_grad:
+            if do_log:
+                _GATHER_LOG.info(
+                    "Rank0 gather_features call=%s epoch=%s batch=%s accum=%s micro=%s train_step=%s before all_gather (with grad)",
+                    call_idx,
+                    ctx_epoch,
+                    ctx_batch,
+                    ctx_accum,
+                    ctx_micro,
+                    ctx_step,
+                )
             all_s1_features = torch.cat(torch.distributed.nn.all_gather(s1_features), dim=0)
             all_s2_features = torch.cat(torch.distributed.nn.all_gather(s2_features), dim=0)
+            if do_log:
+                _GATHER_LOG.info(
+                    "Rank0 gather_features call=%s epoch=%s batch=%s accum=%s micro=%s train_step=%s after all_gather (with grad)",
+                    call_idx,
+                    ctx_epoch,
+                    ctx_batch,
+                    ctx_accum,
+                    ctx_micro,
+                    ctx_step,
+                )
         else:
             gathered_s1_features = [torch.zeros_like(s1_features) for _ in range(world_size)]
             gathered_s2_features = [torch.zeros_like(s2_features) for _ in range(world_size)]
+            if do_log:
+                _GATHER_LOG.info(
+                    "Rank0 gather_features call=%s epoch=%s batch=%s accum=%s micro=%s train_step=%s before all_gather (no grad)",
+                    call_idx,
+                    ctx_epoch,
+                    ctx_batch,
+                    ctx_accum,
+                    ctx_micro,
+                    ctx_step,
+                )
             dist.all_gather(gathered_s1_features, s1_features)
             dist.all_gather(gathered_s2_features, s2_features)
+            if do_log:
+                _GATHER_LOG.info(
+                    "Rank0 gather_features call=%s epoch=%s batch=%s accum=%s micro=%s train_step=%s after all_gather (no grad)",
+                    call_idx,
+                    ctx_epoch,
+                    ctx_batch,
+                    ctx_accum,
+                    ctx_micro,
+                    ctx_step,
+                )
             if not local_loss:
                 # ensure grads for local rank when all_* features don't have a gradient
                 gathered_s1_features[rank] = s1_features
@@ -148,9 +339,14 @@ class CiipLoss(nn.Module):
         self.matryoshka_enabled = bool(matryoshka_enabled)
         self.matryoshka_weight = float(matryoshka_weight)
         self.matryoshka_normalize = bool(matryoshka_normalize)
-        self.matryoshka_dims = self._normalize_matryoshka_dims(matryoshka_dims)
+        self._matryoshka_dims = matryoshka_dims
+        self._matryoshka_relative_weights = matryoshka_relative_weights
+
+    def set_gather_context(self, ctx: Optional[Dict[str, int]]) -> None:
+        _set_gather_context(ctx)
+        self.matryoshka_dims = self._normalize_matryoshka_dims(self._matryoshka_dims)
         self.matryoshka_dim_weights = self._normalize_matryoshka_weights(
-            matryoshka_relative_weights,
+            self._matryoshka_relative_weights,
             len(self.matryoshka_dims),
         )
 

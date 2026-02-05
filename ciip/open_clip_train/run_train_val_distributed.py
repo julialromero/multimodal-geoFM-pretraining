@@ -10,6 +10,7 @@ from functools import partial
 import hydra
 import numpy as np
 import torch
+import torch.distributed as dist
 from comet_ml import Experiment
 from comet_ml.integration.pytorch import log_model
 from omegaconf import DictConfig, OmegaConf
@@ -45,7 +46,12 @@ from ciip.open_clip_train.file_utils import (
     start_sync_process,
 )
 from ciip.open_clip_train.logger import setup_logging
-from ciip.open_clip_train.scheduler import const_lr, const_lr_cooldown, cosine_lr
+from ciip.open_clip_train.scheduler import (
+    const_lr,
+    const_lr_cooldown,
+    cosine_lr,
+    resolve_warmup_steps,
+)
 from ciip.open_clip_train.train import evaluate, train_one_epoch
 from ciip.open_clip_train.utils import create_loss, create_model
 from torchvision.transforms import v2
@@ -153,7 +159,14 @@ def main(args: DictConfig, start_epoch=0):
     # Setup wandb, tensorboard, checkpoint logging
     args.wandb = False #'wandb' in args.report_to or 'all' in args.report_to
     args.tensorboard = False #'tensorboard' in args.report_to or 'all' in args.report_to
-    args.io.checkpoint_path = os.path.join(log_base_path, "checkpoints")
+    checkpoint_path = getattr(args.io, "checkpoint_path", None)
+    if checkpoint_path:
+        if os.path.isabs(checkpoint_path):
+            args.io.checkpoint_path = checkpoint_path
+        else:
+            args.io.checkpoint_path = os.path.join(log_base_path, checkpoint_path)
+    else:
+        args.io.checkpoint_path = os.path.join(log_base_path, "checkpoints")
     if is_master(args):
         args.tensorboard_path = os.path.join(log_base_path, "tensorboard") if args.tensorboard else ''
         for dirname in [args.tensorboard_path, args.io.checkpoint_path]:
@@ -304,8 +317,6 @@ def main(args: DictConfig, start_epoch=0):
         model.set_grad_checkpointing()
 
     if is_master(args):
-        logging.info("Model:")
-        logging.info(f"{str(model)}")
         logging.info("Params:")
         params_file = os.path.join(args.io.logs, args.train.name, "params.txt")
         with open(params_file, "w") as f:
@@ -321,6 +332,8 @@ def main(args: DictConfig, start_epoch=0):
         if args.ddp_static_graph:
             # this doesn't exist in older PyTorch, arg only added if enabled
             ddp_args['static_graph'] = True
+        if getattr(args.model, "patch_masking", False):
+            ddp_args['find_unused_parameters'] = True
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device], **ddp_args)
     
         if args.distill:
@@ -463,9 +476,15 @@ def main(args: DictConfig, start_epoch=0):
     # create scheduler if train
     scheduler = None
     if 'train' in data and optimizer is not None:
-        total_steps = (data["train"].dataloader.num_batches // args.train.accum_freq) * args.train.epochs
+        steps_per_epoch = data["train"].dataloader.num_batches // args.train.accum_freq
+        total_steps = steps_per_epoch * args.train.epochs
+        warmup_steps = resolve_warmup_steps(
+            args.train.warmup,
+            getattr(args.train, "warmup_epochs", None),
+            steps_per_epoch,
+        )
         # if args.lr_scheduler == "cosine":
-        scheduler = cosine_lr(optimizer, args.train.lr, args.train.warmup, total_steps)
+        scheduler = cosine_lr(optimizer, args.train.lr, warmup_steps, total_steps)
         # elif args.lr_scheduler == "const":
         #     scheduler = const_lr(optimizer, args.lr, args.warmup, total_steps)
         # elif args.lr_scheduler == "const-cooldown":
@@ -534,7 +553,7 @@ def main(args: DictConfig, start_epoch=0):
 
     for epoch in range(start_epoch, args.train.epochs):
         if is_master(args):
-            logging.info(f'Start epoch {epoch}')
+            logging.debug(f'Start epoch {epoch}')
 
         train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist_model, args, tb_writer=writer)
         completed_epoch = epoch + 1
@@ -562,10 +581,12 @@ def main(args: DictConfig, start_epoch=0):
                 or completed_epoch == 1
             )
             if should_save_epoch and checkpoint_dict is not None:
+                logging.info("Rank0: saving checkpoint for epoch %s", completed_epoch)
                 torch.save(
                     checkpoint_dict,
                     os.path.join(args.io.checkpoint_path, f"epoch_{completed_epoch}.pt"),
                 )
+                logging.info("Rank0: finished saving checkpoint for epoch %s", completed_epoch)
 
                 # log out via comet
                 # TBD if we want the whole checkpoint dict or just some specific hyper-params . . .
@@ -584,6 +605,10 @@ def main(args: DictConfig, start_epoch=0):
             latest_save_path = os.path.join(args.io.checkpoint_path, LATEST_CHECKPOINT_NAME)
             torch.save(checkpoint_dict, tmp_save_path)
             os.replace(tmp_save_path, latest_save_path)
+
+        # Ensure all ranks wait for checkpointing before next epoch.
+        if args.datamodule.distributed:
+            dist.barrier()
 
 
     if args.wandb and is_master(args):

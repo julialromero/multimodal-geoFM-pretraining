@@ -17,7 +17,12 @@ from ciip.open_clip_train.dataparallel.factory import (
     create_model_and_loss,
     unwrap_dataparallel,
 )
-from ciip.open_clip_train.scheduler import const_lr, const_lr_cooldown, cosine_lr
+from ciip.open_clip_train.scheduler import (
+    const_lr,
+    const_lr_cooldown,
+    cosine_lr,
+    resolve_warmup_steps,
+)
 from ciip.open_clip_train.dataparallel.train import train_one_epoch
 
 
@@ -94,7 +99,8 @@ def main(args: DictConfig, start_epoch: int = 0):
         )
 
     data = get_data(args, transforms)
-    total_steps = (data["train"].dataloader.num_batches // args.train.accum_freq) * args.train.epochs
+    steps_per_epoch = data["train"].dataloader.num_batches // args.train.accum_freq
+    total_steps = steps_per_epoch * args.train.epochs
 
     model, loss = create_model_and_loss(args, device)
 
@@ -174,15 +180,19 @@ def main(args: DictConfig, start_epoch: int = 0):
         eps=args.train.eps,
     )
 
-    warmup = max(args.train.warmup, 0)
-    scheduler = cosine_lr(optimizer, args.train.lr, warmup, total_steps)
+    warmup_steps = resolve_warmup_steps(
+        args.train.warmup,
+        getattr(args.train, "warmup_epochs", None),
+        steps_per_epoch,
+    )
+    scheduler = cosine_lr(optimizer, args.train.lr, warmup_steps, total_steps)
     if args.model.skip_scheduler:
-        scheduler = const_lr(optimizer, args.train.lr, warmup, total_steps)
+        scheduler = const_lr(optimizer, args.train.lr, warmup_steps, total_steps)
     elif getattr(args.model, "cooldown_steps", 0):
         scheduler = const_lr_cooldown(
             optimizer,
             args.train.lr,
-            warmup,
+            warmup_steps,
             total_steps,
             getattr(args.model, "cooldown_steps"),
             getattr(args.model, "cooldown_power", 1.0),

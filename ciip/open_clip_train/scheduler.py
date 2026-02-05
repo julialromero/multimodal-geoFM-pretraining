@@ -1,6 +1,12 @@
 import numpy as np
 
 
+def resolve_warmup_steps(warmup_steps, warmup_epochs, steps_per_epoch):
+    if warmup_epochs is None:
+        return max(int(warmup_steps), 0)
+    return max(int(warmup_epochs * steps_per_epoch), 0)
+
+
 def assign_learning_rate(optimizer, new_lr):
     for param_group in optimizer.param_groups:
         scale = param_group.get("lr_scale", 1.0)

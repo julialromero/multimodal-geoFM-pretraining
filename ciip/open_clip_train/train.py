@@ -220,6 +220,18 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
     dataloader = data['train'].dataloader
     num_batches_per_epoch = dataloader.num_batches // args.train.accum_freq
     sample_digits = math.ceil(math.log(dataloader.num_samples + 1, 10))
+    rank0 = args.datamodule.rank == 0
+    logged_accum_boundary = False
+    logged_first_backward = False
+
+    if rank0:
+        logging.debug(
+            "Rank0: train_one_epoch start epoch=%s batches=%s accum_freq=%s workers=%s",
+            epoch,
+            dataloader.num_batches,
+            args.train.accum_freq,
+            args.model.workers,
+        )
 
     if args.train.accum_freq > 1:
         accum_s1, accum_s2, accum_features = [], [], {}
@@ -327,8 +339,20 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
     data_time_m = AverageMeter()
     end = time.time()
     for i, batch in enumerate(dataloader):
+        if rank0 and i == 0:
+            logging.debug("Rank0: fetched batch 0 from dataloader")
         i_accum = i // args.train.accum_freq
         step = num_batches_per_epoch * epoch + i_accum
+        if hasattr(loss, "set_gather_context"):
+            loss.set_gather_context(
+                {
+                    "epoch": epoch,
+                    "batch": i,
+                    "accum": i_accum,
+                    "micro": None,
+                    "step": step,
+                }
+            )
 
         if not args.model.skip_scheduler:
             scheduler(step)
@@ -350,7 +374,11 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
 
         if args.train.accum_freq == 1:
             with autocast():
+                if rank0 and i == 0:
+                    logging.debug("Rank0: forward start batch 0")
                 model_out = model(s1, s2)
+                if rank0 and i == 0:
+                    logging.debug("Rank0: forward done batch 0, computing loss")
 
                 logit_scale = model_out["logit_scale"]
                 if args.distill:
@@ -358,6 +386,8 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                         dist_model_out = dist_model(s1, s2)
                     model_out.update({f'dist_{k}': v for k, v in dist_model_out.items()})
                 losses = loss(**model_out, output_dict=True)
+                if rank0 and i == 0:
+                    logging.debug("Rank0: loss computed batch 0")
 
                 total_loss = sum(losses.values())
                 losses["loss"] = total_loss
@@ -371,7 +401,11 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
             # First, cache the features without any gradient tracking.
             with torch.no_grad():
                 with autocast():
+                    if rank0 and i == 0:
+                        logging.debug("Rank0: forward(no_grad) start batch 0")
                     model_out = model(s1, s2)
+                    if rank0 and i == 0:
+                        logging.debug("Rank0: forward(no_grad) done batch 0")
 
                     for f in ("logit_scale", "logit_bias"):
                         model_out.pop(f, None)
@@ -393,6 +427,9 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
             if ((i + 1) % args.train.accum_freq) > 0:
                 # FIXME this makes data time logging unreliable when accumulating
                 continue
+            if rank0 and not logged_accum_boundary:
+                logging.debug("Rank0: reached accum boundary at batch %s", i)
+                logged_accum_boundary = True
 
             # Now, ready to take gradients for the last accum_freq batches.
             # Re-do the forward pass for those batches, and use the cached features from the other batches as negatives.
@@ -408,8 +445,12 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 sync_context = model.no_sync() if not is_last_backward_pass else nullcontext()
                 with sync_context:
                     with autocast():
+                        if rank0 and not logged_first_backward and j == 0:
+                            logging.debug("Rank0: forward(backward) start at accum boundary")
                         
                         model_out = model(s1, s2)
+                        if rank0 and not logged_first_backward and j == 0:
+                            logging.debug("Rank0: forward(backward) done, computing loss")
 
                         inputs_no_accum = {}
                         inputs_no_accum["logit_scale"] = logit_scale = model_out.pop("logit_scale")
@@ -439,7 +480,20 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                         if "curv" in model_out:
                             curv_scalar = float(model_out["curv"].detach().item())
 
+                        if hasattr(loss, "set_gather_context"):
+                            loss.set_gather_context(
+                                {
+                                    "epoch": epoch,
+                                    "batch": i,
+                                    "accum": i_accum,
+                                    "micro": j,
+                                    "step": step,
+                                }
+                            )
                         losses = loss(**inputs, **inputs_no_accum, output_dict=True)
+                        if rank0 and not logged_first_backward and j == 0:
+                            logging.debug("Rank0: loss computed at accum boundary")
+                            logged_first_backward = True
                         # logging.info(f"Losses for batch {i_accum}, inner pass {j + 1}/{args.train.accum_freq}: {losses}")
                         
                         raw_total_loss = sum(losses.values())

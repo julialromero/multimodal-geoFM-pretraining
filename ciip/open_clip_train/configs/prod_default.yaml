@@ -2,15 +2,17 @@
 # example: dir: /path/to/dir
 # please use the exact name of the arg attribute as the name of the variable
 io:
-  checkpoint_path: checkpoints
-  save_frequency: 5
+  checkpoint_path: #/projects/bekj/jromero5/models/2026-01-28_22-51-25/2026_01_28-22_51_54-model_transformer-lr_0.000125-b_2-j_1-p_amp_bfloat16/checkpoints
+  save_frequency: 20
   save_logs: True
-  logs: /home/juro4948/ciip/logs #base path for logs 
-  mem_snapshots: /home/juro4948/ciip/mem_snapshots/
+  logs: 
+  # /work/nvme/bekj/jromero5/ciip/logs/1node-4gpus/2026-01-28_22-51-25 #/home/juro4948/ciip/logs #base path for logs 
+  mem_snapshots: #/home/juro4948/ciip/mem_snapshots/
   log_every_n_steps: 5
   wandb: False
   comet_ml: True
   resume: 
+  # /projects/bekj/jromero5/models/2026-01-28_22-51-25/2026_01_28-22_51_54-model_transformer-lr_0.000125-b_2-j_1-p_amp_bfloat16/checkpoints/epoch_38.pt
   # /local/ms-data/SSL4EO/model/2026_01_14-18_01_06-model_resnet50-lr_0.002-b_2-j_6-p_amp_bfloat16/checkpoints/epoch_75.pt
   #/home/juro4948/ciip/logs/1_8_2026/checkpoints/epoch_100.pt
   # /local/ms-data/SSL4EO/model/2025_12_28-20_16_37-model_resnet50-lr_0.001-b_2-j_6-p_amp_bfloat16/checkpoints/epoch_110.pt
@@ -44,7 +46,7 @@ model:
     load: False
     s1_weights: "MOCO" # Only support for resnet50. S1: MOCO
     s2_weights: "MOCO" # Only support for resnet50. S2: MOCO, DINO
-  embed_dim: 1024 # transformer: 512 #1024
+  embed_dim: 512 #1024 # transformer: 512 #1024
   # pre_projection_dim: 2048
   s1_layers: 12 #[3, 4, 6, 3] # transformer:12
   s2_layers: 12 #[3, 4, 6, 3] # transformer:12
@@ -54,7 +56,7 @@ model:
   s1_patch_size: 16 # TODO: test 32
   s2_patch_size: 16
   patch_masking: True
-  patch_mask_ratio: 0.5
+  patch_mask_ratio: 0.7
   patch_mask_overlap: 0.3
   s1_resolution: 224
   s2_resolution: 224
@@ -73,7 +75,7 @@ model:
   skip_scheduler: False
   # distill_model:
   # distributed: 
-  workers: 6 # workers per GPU
+  workers: 16 # workers per GPU
 
 
 #TODO: loss params
@@ -94,8 +96,8 @@ loss:
   matryoshka_enabled: False
   matryoshka_weight: 1.0
   matryoshka_dims: [8, 16, 64, 128, 256, 512] #, 1024]
-  matryoshka_weights: [0.125, 0.125, 0.125, 0.125, 0.125, 0.125] #, 0.125] #, 0.125]
-  matryoshka_normalize: True
+  matryoshka_weights: [0.166, 0.166, 0.166, 0.166, 0.166, 0.166] #, 0.125] #, 0.125]
+  matryoshka_normalize: True # L2‑normalizes each sliced embedding
  
   hyperbolic: False
   curvature_init: 0.1
@@ -103,7 +105,7 @@ loss:
   entail_weight: 0.0
 
 datamodule:
-  batch_size: 2 #2 #6 # batch size per GPU
+  batch_size: 4 #2 #6 # batch size per GPU # 4 x 2 x 64 x 45 = 
   world_size:
   rank: 
   horovod: False
@@ -124,27 +126,28 @@ dataset:
   # train_data is true for training and false for validation
   train_data: True
   dimension: 224
-  root: /local/ms-data/SSL4EOv1.1/train #/local/ms-data/SSL4EO/ #TODO: documentation about proper directory to run from
+  root: /work/nvme/bekj/jromero5/SSL4EOv1.1/train #/local/ms-data/SSL4EO/ #TODO: documentation about proper directory to run from
   s2_tier: S2L2A # TOA data from Sentinel-2 tier 1C; s2a for BOA corrections
   use_transforms: False
   # transforms are automatically used and defined in data.py get_transforms() and SSL4EO dataset
   
 train:
-  name: "1_19_2026" #12_27_2025 #12_14_2025_joint_ciip_s1s2_text
+  name: "2_02_2026" #12_27_2025 #12_14_2025_joint_ciip_s1s2_text
   # fraction of data to use for validation
   # device: cuda
   use_val: False
   val_frac: 0.0
   epochs: 300
-  lr: 0.002
+  lr: 0.000125
   curvature_lr: 0.2
-  wd: 0.02 #0.2
-  warmup: 5000
+  wd: 0.01 #0.2
+  warmup: 0
+  warmup_epochs: 15
   beta1: 0.9
-  beta2: 0.98
+  beta2: 0.999
   eps: 1.0e-8
   val_frequency: 1
-  accum_freq: 45
+  accum_freq: 12
   save_logs: True
   
   delete_previous_checkpoint: False
