@@ -537,7 +537,6 @@ def build_ciip_architecture(model_cfg, loss_cfg=None):
         s2_weights=model_cfg.pretrain.s2_weights,
         patch_masking=getattr(model_cfg, "patch_masking", False),
         patch_mask_ratio=getattr(model_cfg, "patch_mask_ratio", 0.0),
-        patch_mask_overlap=getattr(model_cfg, "patch_mask_overlap", 0.0),
         init_logit_scale=init_logit_scale,
         init_logit_bias=init_logit_bias,
         **({
