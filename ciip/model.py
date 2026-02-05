@@ -351,7 +351,10 @@ class VisionTransformer(nn.Module):
                 keep_mask = self._fix_keep_count(keep_mask, num_keep)
             x = x + self.positional_embedding[1:].to(x.dtype)
             x = self.ln_pre(x)
-            x = x[keep_mask].view(x.shape[0], num_keep, x.shape[-1])
+            keep_idx = keep_mask.nonzero(as_tuple=False)
+            keep_idx = keep_idx.view(x.shape[0], num_keep, 2)[..., 1]
+            gather_idx = keep_idx.unsqueeze(-1).expand(-1, -1, x.shape[-1])
+            x = torch.gather(x, dim=1, index=gather_idx)
         else:
             x = torch.cat(
                 [
