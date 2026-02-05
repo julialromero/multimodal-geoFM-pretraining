@@ -55,7 +55,6 @@ model:
   s2_patch_size: 16
   patch_masking: True
   patch_mask_ratio: 0.5
-  patch_mask_overlap: 0.3
   s1_resolution: 224
   s2_resolution: 224
   s1_bands: [1, 2]

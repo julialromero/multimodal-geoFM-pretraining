@@ -85,7 +85,6 @@ class CIIP(nn.Module):
                  s2_weights: str = "MOCO",
                  patch_masking: bool = False,
                  patch_mask_ratio: float = 0.0,
-                 patch_mask_overlap: float = 0.0,
                  init_logit_scale: float = np.log(1 / 0.07),
                  init_logit_bias: Optional[float] = None,
                  ):
@@ -123,7 +122,6 @@ class CIIP(nn.Module):
                 in_channels=s1_bands,
                 patch_masking=patch_masking,
                 patch_mask_ratio=patch_mask_ratio,
-                patch_mask_overlap=patch_mask_overlap,
             )
         elif framework == "resnet18":
             self.encoder_s1 = resnet18(
@@ -187,7 +185,6 @@ class CIIP(nn.Module):
                 in_channels=s2_bands,
                 patch_masking=patch_masking,
                 patch_mask_ratio=patch_mask_ratio,
-                patch_mask_overlap=patch_mask_overlap,
             )
         elif framework == "resnet18":
             self.encoder_s2 = resnet18(
@@ -410,22 +407,8 @@ class CIIP(nn.Module):
             and isinstance(self.encoder_s2, VisionTransformer)
             and getattr(self.encoder_s1, "patch_masking", False)
         ):
-            target_overlap = getattr(self.encoder_s1, "patch_mask_overlap", None)
-            if target_overlap is not None and target_overlap <= 0:
-                target_overlap = None
             keep_s1 = self.encoder_s1.sample_patch_keep_mask(s1.shape[0], s1.device)
-            if (
-                target_overlap is not None
-                and self.encoder_s1._num_patches() == self.encoder_s2._num_patches()
-            ):
-                keep_s2 = self.encoder_s2.sample_patch_keep_mask(
-                    s2.shape[0],
-                    s2.device,
-                    reference_keep=keep_s1,
-                    target_overlap=target_overlap,
-                )
-            else:
-                keep_s2 = self.encoder_s2.sample_patch_keep_mask(s2.shape[0], s2.device)
+            keep_s2 = self.encoder_s2.sample_patch_keep_mask(s2.shape[0], s2.device)
 
         s1_features = self.encode_s1(s1, normalize=True, keep_mask=keep_s1) # normalize after projection
         s2_features = self.encode_s2(s2, normalize=True, keep_mask=keep_s2)
@@ -714,22 +697,8 @@ class LorentzCIIP(CIIP):
             and isinstance(self.encoder_s2, VisionTransformer)
             and getattr(self.encoder_s1, "patch_masking", False)
         ):
-            target_overlap = getattr(self.encoder_s1, "patch_mask_overlap", None)
-            if target_overlap is not None and target_overlap <= 0:
-                target_overlap = None
             keep_s1 = self.encoder_s1.sample_patch_keep_mask(s1.shape[0], s1.device)
-            if (
-                target_overlap is not None
-                and self.encoder_s1._num_patches() == self.encoder_s2._num_patches()
-            ):
-                keep_s2 = self.encoder_s2.sample_patch_keep_mask(
-                    s2.shape[0],
-                    s2.device,
-                    reference_keep=keep_s1,
-                    target_overlap=target_overlap,
-                )
-            else:
-                keep_s2 = self.encoder_s2.sample_patch_keep_mask(s2.shape[0], s2.device)
+            keep_s2 = self.encoder_s2.sample_patch_keep_mask(s2.shape[0], s2.device)
 
         # shape: (batch_size, embed_dim)
         s2_feats = self.encode_s2(s2, lorentz=True, keep_mask=keep_s2)
