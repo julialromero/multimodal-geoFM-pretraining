@@ -314,11 +314,22 @@ class VisionTransformer(nn.Module):
         total = self._num_patches()
         num_keep = int(round(total * (1.0 - self.patch_mask_ratio)))
         num_keep = max(1, min(num_keep, total))
-        scores = torch.rand(batch_size, total, device=device)
-        keep_idx = torch.topk(scores, k=num_keep, dim=1).indices
+        keep_idx = self._sample_keep_indices(batch_size, device, num_keep)
         keep_mask = torch.zeros(batch_size, total, dtype=torch.bool, device=device)
         keep_mask.scatter_(1, keep_idx, True)
         return keep_mask
+
+    def _sample_keep_indices(
+        self,
+        batch_size: int,
+        device: torch.device,
+        num_keep: int,
+    ) -> torch.Tensor:
+        total = self._num_patches()
+        scores = torch.rand(batch_size, total, device=device)
+        keep_idx = torch.topk(scores, k=num_keep, dim=1).indices
+        keep_idx, _ = keep_idx.sort(dim=1)
+        return keep_idx
 
     def _fix_keep_count(self, keep_mask: torch.Tensor, num_keep: int) -> torch.Tensor:
         fixed = keep_mask.clone()
@@ -345,14 +356,14 @@ class VisionTransformer(nn.Module):
             num_keep = int(round(self._num_patches() * (1.0 - self.patch_mask_ratio)))
             num_keep = max(1, min(num_keep, self._num_patches()))
             if keep_mask is None:
-                keep_mask = self.sample_patch_keep_mask(x.shape[0], x.device)
+                keep_idx = self._sample_keep_indices(x.shape[0], x.device, num_keep)
             else:
                 keep_mask = keep_mask.to(device=x.device, dtype=torch.bool)
                 keep_mask = self._fix_keep_count(keep_mask, num_keep)
+                keep_idx = torch.topk(keep_mask.to(torch.int), k=num_keep, dim=1).indices
+                keep_idx, _ = keep_idx.sort(dim=1)
             x = x + self.positional_embedding[1:].to(x.dtype)
             x = self.ln_pre(x)
-            keep_idx = keep_mask.nonzero(as_tuple=False)
-            keep_idx = keep_idx.view(x.shape[0], num_keep, 2)[..., 1]
             gather_idx = keep_idx.unsqueeze(-1).expand(-1, -1, x.shape[-1])
             x = torch.gather(x, dim=1, index=gather_idx)
         else:
