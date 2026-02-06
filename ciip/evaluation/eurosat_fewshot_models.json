@@ -7,7 +7,7 @@
       "model_type": "backbone_only",
       "model_weights": "llama3_ms_clip_base",
       "model_in_channels": 10,
-      "model_transform": "ssl4eonorm"
+      "model_transform": "ssl4eobandwisenorm"
     },
     {
       "model_type": "backbone_only",
@@ -17,7 +17,8 @@
     {
       "model_type": "backbone_only",
       "model_weights": "remoteclip",
-      "model_in_channels": 3
+      "model_in_channels": 3,
+      "model_transform": "ssl4eobandwisenorm"
     },
     {
       "model_type": "ciip_checkpoint",
@@ -54,7 +55,8 @@
     {
       "model_type": "backbone_only",
       "model_weights": "scalemae_large_rgb",
-      "model_in_channels": 3
+      "model_in_channels": 3,
+      "normalization_method": "ssl4eobandwisenorm"
     },
     {
       "model_type": "torchgeo_resnet50",
@@ -79,7 +81,8 @@
     {
       "croma_weights": "/home/juro4948/ciip/comparison/CROMA-main/CROMA_base.pt",
       "model_in_channels": 12,
-      "model_type": "croma"
+      "model_type": "croma",
+      "normalization_method": "ssl4eobandwisenorm"
     }
   ]
 }
