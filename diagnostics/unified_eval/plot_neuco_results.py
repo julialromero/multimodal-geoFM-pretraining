@@ -71,6 +71,7 @@ RUN_LABELS: Dict[str, str] = {
     '1_28-ViT-DAI': "ViT DAI CIIP (BS=12k) (scaled)",
     "2026_01_29_matryoshka_vit": "Matryoshka ViT CIIP (BS=12k) (scaled)",
     "1_28-ViT-DAI___projected": "ViT DAI CIIP PROJECTED (BS=12k) (scaled)",
+    "2026_02_01_vit_ciip_dai_bandwise": "ViT DAI CIIP BANDWISE (BS=12k) (band-norm)",
 
 }
 # RUN_LABELS: Dict[str, str] = {}
@@ -91,6 +92,7 @@ MODEL_ALIASES: Dict[str, str] = {
     "1_28-ViT-DAI" : "ViT DAI CIIP (BS=12k) (scaled)",
     "2026_01_29_matryoshka_vit": "Matryoshka ViT CIIP (BS=12k) (scaled)",
     "ViT DAI CIIP PROJECTED (BS=12k) (scaled)": "ViT DAI CIIP PROJECTED (BS=12k) (scaled)",
+     "ViT DAI CIIP BANDWISE (BS=12k) (band-norm)": "ViT DAI CIIP BANDWISE (BS=12k) (band-norm)",
 }
 
 # python /home/juro4948/ciip/diagnostics/unified_eval/plot_neuco_results.py   \

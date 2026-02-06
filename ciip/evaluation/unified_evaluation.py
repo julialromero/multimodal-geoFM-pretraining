@@ -52,6 +52,28 @@ import os
 import torchvision.transforms as T
 from torchvision.models import resnet152, ResNet152_Weights
 
+
+def _looks_like_vit_checkpoint(checkpoint_path: Optional[Path]) -> bool:
+    if checkpoint_path is None:
+        return False
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    except Exception:
+        return False
+    if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+        state_dict = checkpoint["state_dict"]
+    else:
+        state_dict = checkpoint if isinstance(checkpoint, dict) else {}
+    for key in state_dict.keys():
+        if (
+            "transformer" in key
+            or "positional_embedding" in key
+            or "class_embedding" in key
+            or "ln_post" in key
+        ):
+            return True
+    return False
+
 ## EUROSAT STANDARDIZATION VALUES
 EUROSATMEAN = {
     'B01': 1354.40546513,
@@ -684,8 +706,13 @@ def _build_eurosat_loaders(
     target_size = int(config.eurosat_image_size)
     eval_resize = max(target_size, int(round(target_size * 256 / 224)))
 
+    use_imagenet_rgb = (config.model_weights or "").lower() == "remoteclip"
     normalization_method = config.normalization_method.lower()
-    if normalization_method == NORMALIZATION_METHOD_BANDWISE:
+    if use_imagenet_rgb:
+        norm_layer = transforms.Compose(
+            [Divideby10000Normalize(), transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)]
+        )
+    elif normalization_method == NORMALIZATION_METHOD_BANDWISE:
         norm_layer = transforms.Normalize(mean=mean, std=std)
     elif normalization_method == NORMALIZATION_METHOD_SSL4EO:
         norm_layer = SSL4EONormalize()
@@ -884,8 +911,13 @@ def _build_bigearthnet_loaders(
     if selector is not None:
         train_steps.append(selector)
         eval_steps.append(selector)
+    use_imagenet_rgb = (config.model_weights or "").lower() == "remoteclip"
     normalization_method = config.normalization_method.lower()
-    if normalization_method == NORMALIZATION_METHOD_BANDWISE:
+    if use_imagenet_rgb:
+        band_norm_layer = transforms.Compose(
+            [Divideby10000Normalize(), transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)]
+        )
+    elif normalization_method == NORMALIZATION_METHOD_BANDWISE:
         band_norm_layer = transforms.Normalize(mean=band_mean, std=band_std)
     elif normalization_method == NORMALIZATION_METHOD_SSL4EO:
         band_norm_layer = SSL4EONormalize()
@@ -966,8 +998,13 @@ def _build_neuco_loader(
 
     else:
         transform_steps.append(InputResizer(224))
+        use_imagenet_rgb = (config.model_weights or "").lower() == "remoteclip"
         normalization_method = config.normalization_method.lower()
-        if normalization_method == NORMALIZATION_METHOD_BANDWISE:
+        if use_imagenet_rgb:
+            print("Using ImageNet normalization for RemoteCLIP NeuCo inputs")
+            transform_steps.append(Divideby10000Normalize())
+            transform_steps.append(transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD))
+        elif normalization_method == NORMALIZATION_METHOD_BANDWISE:
             print("Using NeuCo bandwise normalization for NeuCo inputs")
             transform_steps.append(NeuCoNormalize())
         elif normalization_method == NORMALIZATION_METHOD_SSL4EO:
@@ -1134,6 +1171,11 @@ def _run_linear_probe(
         val_feats = _maybe_slice(getattr(val, feature_key))
         test_feats = _maybe_slice(getattr(test, feature_key))
 
+        print(
+            f"Linear probe ({label}) using '{feature_key}' embeddings: dim={train_feats.shape[1]} "
+            f"(batch_norm={batch_norm}, slice_dim={slice_dim})"
+        )
+
         if batch_norm:
             mean = train_feats.mean(axis=0, keepdims=True)
             std = train_feats.std(axis=0, keepdims=True) + 1e-10
@@ -1241,14 +1283,12 @@ def _run_linear_probe(
             return
         probe_specs.extend(
             [
-                (feature_override, feature_override, False),
                 (feature_override, f"{feature_override}_batchnorm", True),
             ]
         )
     elif _available_feature("backbone"):
         probe_specs.extend(
             [
-                ("backbone", "backbone", False),
                 ("backbone", "backbone_batchnorm", True),
             ]
         )
@@ -2155,6 +2195,7 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
         croma_weights=config.croma_weights,
         croma_image_resolution=config.croma_image_resolution,
         ciip_framework=config.ciip_framework,
+        enable_s1=config.evaluation_modality.lower() == "s1",
     )
     print(f'Model loaded')
     # print(adapter)
@@ -2386,6 +2427,8 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
                 embedding_dim_backbone = "512"
             elif 'llama' in config.model_weights.lower() if config.model_weights else False:
                 embedding_dim_backbone = "512"
+            elif 'remoteclip' in config.model_weights.lower() if config.model_weights else False:
+                embedding_dim_backbone = "768"
             elif 'resnet50' in config.model_weights.lower() if config.model_weights else False:
                 embedding_dim_backbone = "2048"
             elif 'vitsmall' in config.model_weights.lower() if config.model_weights else False:
@@ -2400,6 +2443,17 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
                 )
 
             print(f"NeuCo embedding dimension for {modality}: {embedding_dim_backbone}")
+            backbone_tensor = getattr(neuco_bundle, "backbone", None) if neuco_bundle is not None else None
+            if backbone_tensor is not None:
+                print(
+                    "NeuCo benchmark using backbone embeddings dim: "
+                    f"{backbone_tensor.shape[1]} (embedding_dim arg: {embedding_dim_backbone})"
+                )
+            else:
+                print(
+                    "NeuCo benchmark embedding_dim arg: "
+                    f"{embedding_dim_backbone} (backbone tensor unavailable)"
+                )
 
             if config.matryoshka_dims:
                 for dim in config.matryoshka_dims:
@@ -2617,6 +2671,7 @@ if __name__ == "__main__":
             "resnet152_imagenet_rgb",
             "vitsmall16_s2_all_moco",
             "llama3_ms_clip_base",
+            "remoteclip",
         ],
         help="Pretrained weight selection for the requested model type.",
     )
@@ -2693,6 +2748,9 @@ if __name__ == "__main__":
     # '2025_11_12-12_28_55-model_resnet50-lr_0.001-b_2-j_6-p_amp': 'curv_init_0.1', epochs ..., increased lr for curvature param
 
     # if model_path arg is empty, set default
+    if args.model_weights == "remoteclip" and args.model_in_channels is None:
+        args.model_in_channels = 3
+
     if args.model_in_channels:# and args.neuco_modalities:
         if args.model_in_channels == 12:
             print('Setting modalities to s2l2a')
@@ -2705,6 +2763,9 @@ if __name__ == "__main__":
         if args.model_in_channels == 10 and (args.model_weights == "llama3_ms_clip_base"):
             print('Setting modalities to s2l2a for MS-CLIP (10ch)')
             args.ssl4eo_s2_tier = 's2l2a'
+        if args.model_in_channels == 3 or args.model_weights == "remoteclip":
+            print('Setting modalities to rgb for RGB model')
+            args.ssl4eo_s2_tier = 'rgb'
         
 
         
@@ -2757,6 +2818,14 @@ if __name__ == "__main__":
     elif args.model_type == 'ciip_checkpoint':
         output_dir = f"/home/juro4948/ciip/diagnostics/unified_eval/{args.model_type}/"
         output_dir = output_dir + args.model_path.strip('/') + f"/epoch_{args.ciip_epoch}/"
+        is_vit_run = (
+            args.ciip_framework == "transformer"
+            or ("vit" in (args.model_path or "").lower())
+        )
+        if not is_vit_run and args.ciip_framework is None:
+            is_vit_run = _looks_like_vit_checkpoint(args.checkpoint)
+        if is_vit_run:
+            output_dir = output_dir.rstrip("/") + "_meanpool/"
     else:
         raise ValueError("Invalid model type")
     args.output_dir = Path(output_dir)

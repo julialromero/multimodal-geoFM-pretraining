@@ -375,7 +375,8 @@ class VisionTransformer(nn.Module):
         if self.patch_masking and self.training:
             x = x.mean(dim=1)
         else:
-            x = x[:, 0, :]
+            # Drop CLS and mean-pool patch tokens when not masking.
+            x = x[:, 1:, :].mean(dim=1)
 
         if self.proj is not None:
             x = x @ self.proj

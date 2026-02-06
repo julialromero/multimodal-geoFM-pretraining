@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import json
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
@@ -11,6 +13,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from visualizations.ssl4eo.embedding_collapse_diagnostics import compute_singular_values
 
 import skdim.id as id
 import torchvision
@@ -65,6 +68,8 @@ from torchgeo.models import (
 # EUROSAT_ROOT = Path("/local/ms-data/EuroSAT/")
 # NEUCO_ROOT = Path("/local/ms-data/SSL4EO-S12-downstream/data")
 OUTPUT_DIR = Path("/home/juro4948/ciip/diagnostics/global_id_table1")
+PANGAEA_CONFIG_ROOT = Path("/local/ms-data/pangaea-bench/configs")
+PANGAEA_WEIGHTS_ROOT = Path("/local/ms-data/pangaea-bench/pretrained_models")
 
 # EUROSAT_IMAGE_SIZE = 224  # CROMA expects 120, we’ll handle that per-model
 # EUROSAT_MODALITY = "s2"   # used only by your loader helper
@@ -94,6 +99,7 @@ S2_WAVELENGTHS_UM_OPTICAL_12: List[float] = [
 
 from ciip.open_clip_train import data
 from ciip.open_clip_train.data import SSL4EODataset
+import yaml
 def build_s2_ssl4eo_loader(
     in_chans: int,
     batch_size: int = 64,
@@ -309,6 +315,112 @@ def _load_croma_module() -> ModuleType:
     _CROMA_MODULE = module
     return module
 
+def _load_pangaea_encoder_cfg(encoder_name: str) -> Dict:
+    cfg_path = PANGAEA_CONFIG_ROOT / "encoder" / f"{encoder_name}.yaml"
+    if not cfg_path.exists():
+        raise FileNotFoundError(f"Missing encoder config for {encoder_name}: {cfg_path}")
+    return yaml.safe_load(cfg_path.read_text())
+
+def _build_remoteclip_model() -> nn.Module:
+    if str(PANGAEA_CONFIG_ROOT.parent) not in sys.path:
+        sys.path.append(str(PANGAEA_CONFIG_ROOT.parent))
+    from pangaea.encoders.remoteclip_encoder import RemoteCLIP_Encoder
+
+    cfg = _load_pangaea_encoder_cfg("remoteclip")
+    encoder_weights = Path(cfg["encoder_weights"])
+    if not encoder_weights.is_absolute():
+        encoder_weights = PANGAEA_CONFIG_ROOT.parent / encoder_weights
+
+    model = RemoteCLIP_Encoder(
+        encoder_weights=str(encoder_weights),
+        input_bands=cfg["input_bands"],
+        input_size=cfg["input_size"],
+        embed_dim=cfg["embed_dim"],
+        patch_size=cfg["patch_size"],
+        width=cfg["width"],
+        head_width=cfg["head_width"],
+        layers=cfg["layers"],
+        mlp_ratio=cfg["mlp_ratio"],
+        output_layers=cfg["output_layers"],
+        output_dim=cfg["output_dim"],
+        download_url=cfg.get("download_url", ""),
+    )
+    model.load_encoder_weights(logging.getLogger("remoteclip"))
+    model.eval()
+    return model
+
+def _load_llama3_ms_clip_model() -> nn.Module:
+    try:
+        import open_clip  # type: ignore
+    except ImportError as exc:
+        raise ImportError(
+            "open_clip is required to load the llama3_ms_clip_base preset."
+        ) from exc
+
+    weights_path = Path("/home/juro4948/ciip/ciip/Llama3_MS_CLIP_weights.pt")
+    if not weights_path.exists():
+        raise FileNotFoundError(f"MS-CLIP weights not found at {weights_path}")
+
+    model_cfg = open_clip.get_model_config("ViT-B-16")
+    model, _, _ = open_clip.create_model_and_transforms(
+        "ViT-B-16",
+        pretrained=None,
+        text_cfg=model_cfg.get("text_cfg"),
+    )
+
+    desired_in_chans = 10
+    conv_key = "visual.conv1.weight"
+    old_conv = model.visual.conv1
+    model.visual.conv1 = nn.Conv2d(
+        in_channels=desired_in_chans,
+        out_channels=old_conv.out_channels,
+        kernel_size=old_conv.kernel_size,
+        stride=old_conv.stride,
+        bias=False,
+    )
+
+    raw_state = torch.load(weights_path, map_location="cpu")
+    if isinstance(raw_state, dict) and "state_dict" in raw_state:
+        raw_state = raw_state["state_dict"]
+
+    prefixes = (
+        "clip_base_model.model.",
+        "image_encoder.model.",
+        "text_encoder.model.",
+    )
+
+    target_state = model.state_dict()
+    filtered = {}
+    for key, tensor in raw_state.items():
+        trimmed = key
+        for prefix in prefixes:
+            if trimmed.startswith(prefix):
+                trimmed = trimmed[len(prefix):]
+                break
+        if trimmed in target_state and target_state[trimmed].shape == tensor.shape:
+            filtered[trimmed] = tensor
+
+    if conv_key in raw_state:
+        w_ckpt = raw_state[conv_key]
+        if w_ckpt.shape[1] != desired_in_chans:
+            if w_ckpt.shape[1] < desired_in_chans:
+                pad = w_ckpt.new_zeros(
+                    w_ckpt.shape[0],
+                    desired_in_chans - w_ckpt.shape[1],
+                    *w_ckpt.shape[2:],
+                )
+                w_ckpt = torch.cat([w_ckpt, pad], dim=1)
+            else:
+                w_ckpt = w_ckpt[:, :desired_in_chans, :, :]
+        filtered[conv_key] = w_ckpt
+
+    model.load_state_dict(filtered, strict=False)
+    if hasattr(model, "visual") and hasattr(model.visual, "proj"):
+        model.visual.proj = None
+    if hasattr(model, "visual") and hasattr(model.visual, "pool_type"):
+        model.visual.pool_type = "avg"
+    model.eval()
+    return model
 
 
 # ---------------------------------------------------------------------------
@@ -415,30 +527,130 @@ def _append_json_entry(path: Path, entry: Dict[str, object]) -> None:
         payload = []
 
     should_lowercase = not (_is_ciip_entry(entry) or _is_ciip_payload(payload))
+    if should_lowercase:
+        entry = _lowercase_strings(entry)
+
+    def _entry_match(existing: Dict[str, object], incoming: Dict[str, object]) -> bool:
+        existing_dataset = existing.get("dataset")
+        incoming_dataset = incoming.get("dataset")
+        if isinstance(existing_dataset, str) and isinstance(incoming_dataset, str):
+            if existing_dataset.lower() != incoming_dataset.lower():
+                return False
+        elif existing_dataset != incoming_dataset:
+            return False
+
+        existing_dim = existing.get("embedding_dim")
+        incoming_dim = incoming.get("embedding_dim")
+        if existing_dim is None or incoming_dim is None:
+            return False
+        try:
+            return int(existing_dim) == int(incoming_dim)
+        except (TypeError, ValueError):
+            return False
+
+    def _merge_id_results(
+        existing_results: Dict[str, object],
+        incoming_results: Dict[str, object],
+    ) -> None:
+        for dim_key, incoming_dim in incoming_results.items():
+            if not isinstance(incoming_dim, dict):
+                continue
+            existing_dim = existing_results.get(dim_key)
+            if not isinstance(existing_dim, dict):
+                existing_results[dim_key] = incoming_dim
+                continue
+            for dataset_key, incoming_metrics in incoming_dim.items():
+                if not isinstance(incoming_metrics, dict):
+                    existing_dim[dataset_key] = incoming_metrics
+                    continue
+                existing_metrics = existing_dim.get(dataset_key)
+                if isinstance(existing_metrics, dict):
+                    existing_metrics.update(incoming_metrics)
+                else:
+                    existing_dim[dataset_key] = incoming_metrics
+
+    def _merge_entry(existing: Dict[str, object], incoming: Dict[str, object]) -> None:
+        def _safe_int(value: object) -> Optional[int]:
+            if isinstance(value, bool):
+                return None
+            if isinstance(value, int):
+                return int(value)
+            if isinstance(value, float):
+                return int(value)
+            if isinstance(value, str):
+                try:
+                    return int(value)
+                except ValueError:
+                    try:
+                        return int(float(value))
+                    except ValueError:
+                        return None
+            return None
+
+        incoming_metrics = incoming.get("metrics")
+        if isinstance(incoming_metrics, dict):
+            existing_metrics = existing.get("metrics")
+            if isinstance(existing_metrics, dict):
+                existing_metrics.update(incoming_metrics)
+            else:
+                existing["metrics"] = incoming_metrics
+
+        incoming_id_results = incoming.get("id_results")
+        if isinstance(incoming_id_results, dict):
+            existing_id_results = existing.get("id_results")
+            if isinstance(existing_id_results, dict):
+                _merge_id_results(existing_id_results, incoming_id_results)
+            else:
+                existing["id_results"] = incoming_id_results
+
+        incoming_dims = incoming.get("dims_for_eval")
+        if isinstance(incoming_dims, list):
+            existing_dims = existing.get("dims_for_eval")
+            if isinstance(existing_dims, list):
+                existing_dim_values = {value for value in (_safe_int(d) for d in existing_dims) if value is not None}
+                incoming_dim_values = {value for value in (_safe_int(d) for d in incoming_dims) if value is not None}
+                merged_dims = sorted(existing_dim_values | incoming_dim_values)
+                existing["dims_for_eval"] = merged_dims if merged_dims else existing_dims
+            else:
+                existing["dims_for_eval"] = incoming_dims
+
+        if "model_spec" not in existing and "model_spec" in incoming:
+            existing["model_spec"] = incoming["model_spec"]
+
+    def _write_payload(payload_obj: object) -> None:
+        if should_lowercase:
+            payload_obj = _lowercase_strings(payload_obj)
+        path.write_text(json.dumps(payload_obj, indent=2))
 
     if isinstance(payload, list):
+        for existing in payload:
+            if isinstance(existing, dict) and _entry_match(existing, entry):
+                _merge_entry(existing, entry)
+                _write_payload(payload)
+                return
         payload.append(entry)
-        if should_lowercase:
-            payload = _lowercase_strings(payload)
-        path.write_text(json.dumps(payload, indent=2))
-        return
-    if isinstance(payload, dict):
-        if "entries" in payload and isinstance(payload["entries"], list):
-            payload["entries"].append(entry)
-            if should_lowercase:
-                payload = _lowercase_strings(payload)
-            path.write_text(json.dumps(payload, indent=2))
-        else:
-            combined = [payload, entry]
-            if should_lowercase:
-                combined = _lowercase_strings(combined)
-            path.write_text(json.dumps(combined, indent=2))
+        _write_payload(payload)
         return
 
-    if should_lowercase:
-        path.write_text(json.dumps(_lowercase_strings([entry]), indent=2))
-    else:
-        path.write_text(json.dumps([entry], indent=2))
+    if isinstance(payload, dict):
+        if _entry_match(payload, entry):
+            _merge_entry(payload, entry)
+            _write_payload(payload)
+            return
+        if "entries" in payload and isinstance(payload["entries"], list):
+            for existing in payload["entries"]:
+                if isinstance(existing, dict) and _entry_match(existing, entry):
+                    _merge_entry(existing, entry)
+                    _write_payload(payload)
+                    return
+            payload["entries"].append(entry)
+            _write_payload(payload)
+        else:
+            combined = [payload, entry]
+            _write_payload(combined)
+        return
+
+    _write_payload([entry])
 
 
 def _ciip_feature_fn(model: nn.Module, x: torch.Tensor) -> torch.Tensor:
@@ -548,7 +760,6 @@ def _resnet_gap_feature_fn(model: nn.Module, x: torch.Tensor) -> torch.Tensor:
 
         x = model.avgpool(x)        # (B, C, 1, 1)
         feats = torch.flatten(x, 1)  # (B, C)
-        # raise RuntimeError("Model has no backbone or forward_features method.")
 
     # Handle various output layouts:
     if isinstance(feats, dict):
@@ -588,6 +799,62 @@ def _vit_patch_mean_feature_fn(model: nn.Module, x: torch.Tensor) -> torch.Tenso
             raise RuntimeError(f"Unexpected ViT feature shape: {feats.shape}")
     else:
         raise RuntimeError("Model has no forward_features method.")
+
+def _unwrap_model(model: nn.Module) -> nn.Module:
+    return model.module if hasattr(model, "module") else model
+
+def _remoteclip_feature_fn(model: nn.Module, x: torch.Tensor) -> torch.Tensor:
+    core = _unwrap_model(model)
+    if x.ndim == 4:
+        optical = x.unsqueeze(2)
+    elif x.ndim == 5:
+        optical = x
+    else:
+        raise RuntimeError(f"Unexpected RemoteCLIP input shape: {x.shape}")
+    outputs = core({"optical": optical})
+    if isinstance(outputs, (list, tuple)) and outputs:
+        feats = outputs[-1]
+    else:
+        feats = outputs
+    if feats.ndim == 4:
+        feats = feats.mean(dim=(2, 3))
+    elif feats.ndim == 3:
+        if feats.shape[1] > 1:
+            feats = feats[:, 1:, :].mean(dim=1)
+        else:
+            feats = feats.mean(dim=1)
+    elif feats.ndim != 2:
+        raise RuntimeError(f"Unexpected RemoteCLIP feature shape: {feats.shape}")
+    return feats
+
+def _open_clip_vit_feature_fn(model: nn.Module, x: torch.Tensor) -> torch.Tensor:
+    core = _unwrap_model(model)
+    visual = getattr(core, "visual", core)
+    proj = getattr(visual, "proj", None)
+    pool_type = getattr(visual, "pool_type", None)
+    if proj is not None:
+        visual.proj = None
+    if pool_type is not None:
+        visual.pool_type = "avg"
+    try:
+        if hasattr(visual, "forward_features"):
+            feats = visual.forward_features(x)
+        else:
+            feats = visual(x)
+    finally:
+        if proj is not None:
+            visual.proj = proj
+        if pool_type is not None:
+            visual.pool_type = pool_type
+    if isinstance(feats, (tuple, list)):
+        feats = feats[0]
+    if feats.ndim == 3:
+        feats = feats[:, 1:, :].mean(dim=1)
+    elif feats.ndim > 2:
+        feats = feats.mean(dim=tuple(range(2, feats.ndim)))
+    if feats.ndim != 2:
+        raise RuntimeError(f"Unexpected MS-CLIP feature shape: {feats.shape}")
+    return feats
 
 class CromaNormalize(nn.Module):
     def __init__(self, use_8_bit: bool = False):
@@ -674,227 +941,297 @@ class S2ScaleTransform(nn.Module):
         x = x.float() / self.scale
         return torch.clamp(x, 0.0, 1.0)
 
+
+class SelectRGB(nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim == 4:
+            if x.shape[1] >= 4:
+                return x[:, [3, 2, 1], ...]
+        elif x.ndim == 3:
+            if x.shape[0] >= 4:
+                return x[[3, 2, 1], ...]
+        return x
+
+
+class SelectS2Channels10(nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim >= 4:
+            channel_dim = 1
+        elif x.ndim == 3:
+            channel_dim = 0
+        else:
+            return x
+
+        current = x.shape[channel_dim]
+        if current == 10:
+            return x
+
+        if current == 13:
+            keep = [1, 2, 3, 4, 5, 6, 7, 8, 11, 12]
+        elif current == 12:
+            keep = [1, 2, 3, 4, 5, 6, 7, 8, 10, 11]
+        else:
+            keep = list(range(min(current, 10)))
+
+        idx = torch.tensor(keep, device=x.device)
+        return torch.index_select(x, channel_dim, idx)
+
 # Registry of models to evaluate
 def build_model_specs() -> List[ModelSpec]:
     specs: List[ModelSpec] = []
 
-    # # 1. Random Conv Filters (RCF) – 13-band, 512-dim features
-    # specs.append(
-    #     ModelSpec(
-    #         name="RCF_13ch",
-    #         in_chans=13,
-    #         rgb_mode=False,
-    #         builder=lambda: RandomConvFeatures(in_chans=13, out_dim=512),
-    #         transform=T.Compose([
-    #                 T.CenterCrop((224, 224)),
-    #                 S2ScaleTransform(scale=10000.0),
-    #             ]),
-    #         feature_fn=lambda m, x: m(x),
-    #     )
-    # )
+    # 1. Random Conv Filters (RCF) – 13-band, 512-dim features
+    specs.append(
+        ModelSpec(
+            name="RCF_13ch",
+            in_chans=13,
+            rgb_mode=False,
+            builder=lambda: RandomConvFeatures(in_chans=13, out_dim=512),
+            transform=T.Compose([
+                    T.CenterCrop((224, 224)),
+                    S2ScaleTransform(scale=10000.0),
+                ]),
+            feature_fn=lambda m, x: m(x),
+        )
+    )
 
-    # # 2. CROMA optical encoder – 12 optical bands, 120x120, [0,1]
-    # module = _load_croma_module()
-    # PretrainedCROMA = getattr(module, "PretrainedCROMA")
-    # specs.append(
-    #     ModelSpec(
-    #         name="CROMA_optical",
-    #         in_chans=12,
-    #         rgb_mode=False,
-    #         builder=lambda: PretrainedCROMA(
-    #             pretrained_path='/home/juro4948/ciip/comparison/CROMA-main/CROMA_base.pt',
-    #             size="base",
-    #             modality="optical",
-    #             image_resolution=120,
-    #         ),
-    #         # croma_base(
-    #         #     weights=CROMABase_Weights.CROMA_VIT, modalities=['optical'],  # TODO: confirm exact enum
-    #         # ),
-    #         transform = nn.Sequential(
-    #             T.Resize((120, 120)),
-    #             CromaNormalize(use_8_bit=False),  # or True if you want the 8-bit variant
-    #         ),
-    #         feature_fn=_croma_optical_gap_feature_fn,
-    #     )
-    # )
+    # 2. CROMA optical encoder – 12 optical bands, 120x120, [0,1]
+    module = _load_croma_module()
+    PretrainedCROMA = getattr(module, "PretrainedCROMA")
+    specs.append(
+        ModelSpec(
+            name="CROMA_optical",
+            in_chans=12,
+            rgb_mode=False,
+            builder=lambda: PretrainedCROMA(
+                pretrained_path='/home/juro4948/ciip/comparison/CROMA-main/CROMA_base.pt',
+                size="base",
+                modality="optical",
+                image_resolution=120,
+            ),
+            # croma_base(
+            #     weights=CROMABase_Weights.CROMA_VIT, modalities=['optical'],  # TODO: confirm exact enum
+            # ),
+            transform = nn.Sequential(
+                T.Resize((120, 120)),
+                CromaNormalize(use_8_bit=False),  # or True if you want the 8-bit variant
+            ),
+            feature_fn=_croma_optical_gap_feature_fn,
+        )
+    )
 
     
 
-    # # 3. DOFA base – 13 bands, use pre-trained base weights
-    # specs.append(
-    #     ModelSpec(
-    #         name="DOFA_base_S2_13ch",
-    #         in_chans=13,
-    #         rgb_mode=False,
-    #         builder=lambda: dofa_base_patch16_224(
-    #             weights=DOFABase16_Weights.DOFA_MAE,
-    #         ),
-    #         transform = T.Compose([
-    #             T.CenterCrop((224, 224)),
-    #             S2ScaleTransform(scale=10000.0),
-    #             # no extra normalization in the ID pipeline
-    #         ]),
-    #         feature_fn=_dofa_feature_fn,
-    #     )
-    # )
+    # 3. DOFA base – 13 bands, use pre-trained base weights
+    specs.append(
+        ModelSpec(
+            name="DOFA_base_S2_13ch",
+            in_chans=13,
+            rgb_mode=False,
+            builder=lambda: dofa_base_patch16_224(
+                weights=DOFABase16_Weights.DOFA_MAE,
+            ),
+            transform = T.Compose([
+                T.CenterCrop((224, 224)),
+                S2ScaleTransform(scale=10000.0),
+                # no extra normalization in the ID pipeline
+            ]),
+            feature_fn=_dofa_feature_fn,
+        )
+    )
 
     # # # 4. ScaleMAE Large (RGB)
-    # IMAGENET_MEAN =  [0.485, 0.456, 0.406]
-    # IMAGENET_STD  = [0.229, 0.224, 0.225]
-    # specs.append(
-    #     ModelSpec(
-    #         name="ScaleMAE_large_RGB",
-    #         in_chans=3,
-    #         rgb_mode=True,
-    #         builder=lambda: scalemae_large_patch16(
-    #             weights=ScaleMAELarge16_Weights.FMOW_RGB
-    #         ),
-    #         transform = T.Compose([
-    #             T.CenterCrop((224, 224)),
-    #             T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
-    #             ]),
-    #         feature_fn=_scalemae_feature_fn,
-    #     )
-    # )
+    IMAGENET_MEAN =  [0.485, 0.456, 0.406]
+    IMAGENET_STD  = [0.229, 0.224, 0.225]
+    specs.append(
+        ModelSpec(
+            name="ScaleMAE_large_RGB",
+            in_chans=3,
+            rgb_mode=True,
+            builder=lambda: scalemae_large_patch16(
+                weights=ScaleMAELarge16_Weights.FMOW_RGB
+            ),
+            transform = T.Compose([
+                T.CenterCrop((224, 224)),
+                T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+                ]),
+            feature_fn=_scalemae_feature_fn,
+        )
+    )
 
-    # # 5–8. ResNet baselines (MoCo S2 ALL / RGB + ImageNet)
-    # specs.append(
-    #     ModelSpec(
-    #         name="ResNet18_S2_ALL_MOCO",
-    #         in_chans=13,
-    #         rgb_mode=False,
-    #         builder=lambda: resnet18(weights=ResNet18_Weights.SENTINEL2_ALL_MOCO),
-    #         transform = T.Compose([
-    #             T.CenterCrop((224, 224)),
-    #             S2ScaleTransform(scale=10000.0),
-    #             # no explicit normalization in the ID experiment
-    #         ]),
-    #         feature_fn=_resnet_gap_feature_fn
-    #     )
-    # )
-    # specs.append(
-    #     ModelSpec(
-    #         name="ResNet50_S2_ALL_MOCO",
-    #         in_chans=13,
-    #         rgb_mode=False,
-    #         builder=lambda: resnet50(weights=ResNet50_Weights.SENTINEL2_ALL_MOCO),
-    #         transform = T.Compose([
-    #             T.CenterCrop((224, 224)),
-    #             S2ScaleTransform(scale=10000.0),
-    #             # no explicit normalization in the ID experiment
-    #         ]),
-    #         feature_fn=_resnet_gap_feature_fn,
-    #     )
-    # )
-    # specs.append(
-    #     ModelSpec(
-    #         name="ResNet50_S2_ALL_DINO",
-    #         in_chans=13,
-    #         rgb_mode=False,
-    #         builder=lambda: resnet50(weights=ResNet50_Weights.SENTINEL2_ALL_DINO),
-    #         transform = T.Compose([
-    #             T.CenterCrop((224, 224)),
-    #             S2ScaleTransform(scale=10000.0),
-    #             # no explicit normalization in the ID experiment
-    #         ]),
-    #         feature_fn=_resnet_gap_feature_fn,
-    #     )
-    # )
-    # specs.append(
-    #     ModelSpec(
-    #         name="ResNet18_S2_RGB_MOCO",
-    #         in_chans=3,
-    #         rgb_mode=True,
-    #         builder=lambda: resnet18(weights=ResNet18_Weights.SENTINEL2_RGB_MOCO),
-    #         transform = T.Compose([
-    #             T.CenterCrop((224, 224)),
-    #             T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
-    #         ]),
-    #         feature_fn=_resnet_gap_feature_fn,
-    #     )
-    # )
-    # specs.append(
-    #     ModelSpec(
-    #         name="ResNet50_S2_RGB_MOCO",
-    #         in_chans=3,
-    #         rgb_mode=True,
-    #         builder=lambda: resnet50(weights=ResNet50_Weights.SENTINEL2_RGB_MOCO),
-    #         transform = T.Compose([
-    #             T.CenterCrop((224, 224)),
-    #             T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
-    #         ]),
-    #         feature_fn=_resnet_gap_feature_fn,
-    #     )
-    # )
-
-    # # 9. ResNet152 ImageNet-1K (RGB only)
-    # specs.append(
-    #     ModelSpec(
-    #         name="ResNet152_ImageNet_RGB",
-    #         in_chans=3,
-    #         rgb_mode=True,
-    #         builder=lambda: resnet152(weights=ResNet152_Weights.IMAGENET1K_V1),
-    #         transform = T.Compose([
-    #             T.CenterCrop((224, 224)),
-    #             T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
-    #         ]),
-    #         feature_fn=_resnet_gap_feature_fn,
-    #     )
-    # )
-
-    # # 10. ViT-Small Sentinel-2 13-band MoCo
-    # specs.append(
-    #     ModelSpec(
-    #         name="ViTSmall16_S2_ALL_MOCO",
-    #         in_chans=13,
-    #         rgb_mode=False,
-    #         builder=lambda: vit_small_patch16_224(
-    #             weights=ViTSmall16_Weights.SENTINEL2_ALL_MOCO
-    #         ),
-    #         transform = T.Compose([
-    #             T.CenterCrop((224, 224)),
-    #             S2ScaleTransform(scale=10000.0),
-    #             # no additional normalization in the ID pipeline
-    #         ]),
-    #         feature_fn=_vit_patch_mean_feature_fn,
-    #     )
-    # )
+    # 5–8. ResNet baselines (MoCo S2 ALL / RGB + ImageNet)
+    specs.append(
+        ModelSpec(
+            name="ResNet18_S2_ALL_MOCO",
+            in_chans=13,
+            rgb_mode=False,
+            builder=lambda: resnet18(weights=ResNet18_Weights.SENTINEL2_ALL_MOCO),
+            transform = T.Compose([
+                T.CenterCrop((224, 224)),
+                S2ScaleTransform(scale=10000.0),
+                # no explicit normalization in the ID experiment
+            ]),
+            feature_fn=_resnet_gap_feature_fn
+        )
+    )
+    specs.append(
+        ModelSpec(
+            name="ResNet50_S2_ALL_MOCO",
+            in_chans=13,
+            rgb_mode=False,
+            builder=lambda: resnet50(weights=ResNet50_Weights.SENTINEL2_ALL_MOCO),
+            transform = T.Compose([
+                T.CenterCrop((224, 224)),
+                S2ScaleTransform(scale=10000.0),
+                # no explicit normalization in the ID experiment
+            ]),
+            feature_fn=_resnet_gap_feature_fn,
+        )
+    )
+    specs.append(
+        ModelSpec(
+            name="ResNet50_S2_ALL_DINO",
+            in_chans=13,
+            rgb_mode=False,
+            builder=lambda: resnet50(weights=ResNet50_Weights.SENTINEL2_ALL_DINO),
+            transform = T.Compose([
+                T.CenterCrop((224, 224)),
+                S2ScaleTransform(scale=10000.0),
+                # no explicit normalization in the ID experiment
+            ]),
+            feature_fn=_resnet_gap_feature_fn,
+        )
+    )
+    specs.append(
+        ModelSpec(
+            name="ResNet18_S2_RGB_MOCO",
+            in_chans=3,
+            rgb_mode=True,
+            builder=lambda: resnet18(weights=ResNet18_Weights.SENTINEL2_RGB_MOCO),
+            transform = T.Compose([
+                T.CenterCrop((224, 224)),
+                T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+            ]),
+            feature_fn=_resnet_gap_feature_fn,
+        )
+    )
+    specs.append(
+        ModelSpec(
+            name="ResNet50_S2_RGB_MOCO",
+            in_chans=3,
+            rgb_mode=True,
+            builder=lambda: resnet50(weights=ResNet50_Weights.SENTINEL2_RGB_MOCO),
+            transform = T.Compose([
+                T.CenterCrop((224, 224)),
+                T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+            ]),
+            feature_fn=_resnet_gap_feature_fn,
+        )
+    )
 
 
-    # specs.append(
-    #     ModelSpec(
-    #         name="text CIIP, Epoch70",
-    #         in_chans=12,
-    #         rgb_mode=False,
-    #         checkpoint_path="/local/ms-data/SSL4EO/model/2025_12_2-text-s2/checkpoints/epoch_70.pt",
-    #         builder=lambda: build_model_from_checkpoint('/local/ms-data/SSL4EO/model/2025_12_2-text-s2/checkpoints/epoch_70.pt')[0], # first returned is model, second is is_loretnz
-    #         feature_fn=_ciip_feature_fn,
-    #         transform=T.Compose([
-    #             T.CenterCrop((224, 224)),
-    #             # S2ScaleTransform(scale=10000.0),
-    #             ssl4eo_s2a_norm_transform,
-    #             # no additional normalization in the ID pipeline
-    #         ]) #get_transform('s2a', is_train=False)
-    #     )
-    # )
 
-    # specs.append(
-    #     ModelSpec(
-    #         name="ViT-DAI CIIP, Epoch300",
-    #         in_chans=12,
-    #         rgb_mode=False,
-    #         return_all_timestamps_ssl4eo=True,
-    #         checkpoint_path="/local/ms-data/SSL4EO/model/1_28-ViT-DAI/checkpoints/epoch_300.pt",
-    #         builder=lambda: build_model_from_checkpoint('/local/ms-data/SSL4EO/model/1_28-ViT-DAI/checkpoints/epoch_300.pt')[0], # first returned is model, second is is_loretnz
-    #         feature_fn=_ciip_feature_fn,
-    #         transform=T.Compose([
-    #             T.CenterCrop((224, 224)),
-    #             S2ScaleTransform(scale=10000.0)
-    #             # ssl4eo_s2a_norm_transform,
-    #             # no additional normalization in the ID pipeline
-    #         ]) #get_transform('s2a', is_train=False)
-    #     )
-    # )
+    specs.append(
+        ModelSpec(
+            name="text CIIP, Epoch70",
+            in_chans=12,
+            rgb_mode=False,
+            checkpoint_path="/local/ms-data/SSL4EO/model/2025_12_2-text-s2/checkpoints/epoch_70.pt",
+            builder=lambda: build_model_from_checkpoint('/local/ms-data/SSL4EO/model/2025_12_2-text-s2/checkpoints/epoch_70.pt')[0], # first returned is model, second is is_loretnz
+            feature_fn=_ciip_feature_fn,
+            transform=T.Compose([
+                T.CenterCrop((224, 224)),
+                # S2ScaleTransform(scale=10000.0),
+                ssl4eo_s2a_norm_transform,
+                # no additional normalization in the ID pipeline
+            ]) #get_transform('s2a', is_train=False)
+        )
+    )
+
+    specs.append(
+        ModelSpec(
+            name="llama3_ms_clip_base",
+            in_chans=10,
+            rgb_mode=False,
+            builder=_load_llama3_ms_clip_model,
+            transform=T.Compose([
+                T.CenterCrop((224, 224)),
+                # S2ScaleTransform(scale=10000.0),
+                raise ValueError("LLaMA-3 MS-CLIP model expects 10-channel input; ensure your dataset is configured to provide this."),
+                SelectS2Channels10(),
+            ]),
+            feature_fn=_open_clip_vit_feature_fn,
+        )
+    )
+
+    specs.append(
+        ModelSpec(
+            name="remoteclip",
+            in_chans=3,
+            rgb_mode=True,
+            builder=_build_remoteclip_model,
+            transform=T.Compose([
+                T.CenterCrop((224, 224)),
+                SelectRGB(),
+                T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+            ]),
+            feature_fn=_remoteclip_feature_fn,
+        )
+    )
+
+        # 9. ResNet152 ImageNet-1K (RGB only)
+    specs.append(
+        ModelSpec(
+            name="ResNet152_ImageNet_RGB",
+            in_chans=3,
+            rgb_mode=True,
+            builder=lambda: resnet152(weights=ResNet152_Weights.IMAGENET1K_V1),
+            transform = T.Compose([
+                T.CenterCrop((224, 224)),
+                T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+            ]),
+            feature_fn=_resnet_gap_feature_fn,
+        )
+    )
+
+
+    # 10. ViT-Small Sentinel-2 13-band MoCo
+    specs.append(
+        ModelSpec(
+            name="ViTSmall16_S2_ALL_MOCO",
+            in_chans=13,
+            rgb_mode=False,
+            builder=lambda: vit_small_patch16_224(
+                weights=ViTSmall16_Weights.SENTINEL2_ALL_MOCO
+            ),
+            transform = T.Compose([
+                T.CenterCrop((224, 224)),
+                S2ScaleTransform(scale=10000.0),
+                # no additional normalization in the ID pipeline
+            ]),
+            feature_fn=_vit_patch_mean_feature_fn,
+        )
+    )
+
+
+
+    specs.append(
+        ModelSpec(
+            name="ViT-DAI CIIP, Epoch300",
+            in_chans=12,
+            rgb_mode=False,
+            return_all_timestamps_ssl4eo=True,
+            checkpoint_path="/local/ms-data/SSL4EO/model/1_28-ViT-DAI/checkpoints/epoch_300.pt",
+            builder=lambda: build_model_from_checkpoint('/local/ms-data/SSL4EO/model/1_28-ViT-DAI/checkpoints/epoch_300.pt')[0], # first returned is model, second is is_loretnz
+            feature_fn=_ciip_feature_fn,
+            transform=T.Compose([
+                T.CenterCrop((224, 224)),
+                S2ScaleTransform(scale=10000.0)
+                # ssl4eo_s2a_norm_transform,
+                # no additional normalization in the ID pipeline
+            ]) #get_transform('s2a', is_train=False)
+        )
+    )
 
     specs.append(
         ModelSpec(
@@ -1089,6 +1426,13 @@ def extract_embeddings_model(
     Z = torch.cat(feats_list, dim=0).numpy()
     return Z  # (N, D)
 
+def compute_effective_rank(Z: np.ndarray) -> float:
+    singular_values = compute_singular_values(torch.from_numpy(Z))
+    if singular_values.size == 0:
+        return float("nan")
+    p = singular_values / (singular_values.sum() + 1e-12)
+    H = -(p * np.log(p + 1e-12)).sum()
+    return float(np.exp(H))
 
 def compute_global_id(Z: np.ndarray) -> float:
     """
@@ -1119,15 +1463,13 @@ def compute_tle(Z: np.ndarray) -> float:
 
 
 def compute_id_metrics(Z: np.ndarray) -> Dict[str, float]:
-    gid = compute_global_id(Z)
-    mle_lid = id.MLE(neighborhood_based=True).fit_transform(Z, n_neighbors=20)
-    mom_lid = id.MOM().fit_transform(Z, n_neighbors=20)
-    tle_lid = compute_tle(Z)
+    # gid = compute_global_id(Z)
+    # mle_lid = id.MLE(neighborhood_based=True).fit_transform(Z, n_neighbors=20)
+    # mom_lid = id.MOM().fit_transform(Z, n_neighbors=20)
+    # tle_lid = compute_tle(Z)
+    erank = compute_effective_rank(Z)
     return {
-        "fisher_s": float(gid),
-        "mle": float(mle_lid),
-        "mom": float(mom_lid),
-        "tle": float(tle_lid),
+        "effective_rank": float(erank),
     }
 # ---------------------------------------------------------------------------
 # Main
@@ -1139,10 +1481,7 @@ def main() -> None:
 
     specs = build_model_specs()
 
-    results: Dict[str, float] = {}
-    mle_results: Dict[str, float] = {}
-    mom_results: Dict[str, float] = {}
-    tle_results: Dict[str, float] = {}
+    er_results: Dict[str, float] = {}
 
     for spec in specs:
         print(f"\n=== Model: {spec.name} ===")
@@ -1240,19 +1579,13 @@ def main() -> None:
                     full_metrics = metrics
                 print(
                     f"  dim {dim} -> "
-                    f"FisherS {metrics['fisher_s']:.4f}, "
-                    f"MLE {metrics['mle']:.4f}, "
-                    f"MoM {metrics['mom']:.4f}, "
-                    f"TLE {metrics['tle']:.4f}"
+                    f"ERank {metrics['effective_rank']:.4f}"
                 )
 
             if full_metrics is None:
                 raise RuntimeError("Failed to compute metrics for full embedding dim.")
 
-            results[spec.name] = full_metrics["fisher_s"]
-            mle_results[spec.name] = full_metrics["mle"]
-            mom_results[spec.name] = full_metrics["mom"]
-            tle_results[spec.name] = full_metrics["tle"]
+            er_results[spec.name] = full_metrics["effective_rank"]
 
             entry = {
                 "dataset": dataset_name,
@@ -1268,38 +1601,14 @@ def main() -> None:
             print(f"  [SKIP] Failed to compute ID for '{spec.name}': {e}")
 
     # Summary
-    print("\n=== Summary of Global IDs (FisherS) ===")
-    for name, gid in results.items():
-        print(f"{name:30s}: {gid:.4f}")
-
-    print("\n=== Summary of Global IDs (MLE) ===")
-    for name, gid in mle_results.items():
-        print(f"{name:30s}: {gid:.4f}")
-
-    print("\n=== Summary of Global IDs (MoM) ===")
-    for name, gid in mom_results.items():
-        print(f"{name:30s}: {gid:.4f}")
-
-    print("\n=== Summary of Global IDs (TLE) ===")
-    for name, gid in tle_results.items():
+    print("\n=== Summary of Effective Rank ===")
+    for name, gid in er_results.items():
         print(f"{name:30s}: {gid:.4f}")
 
     # save all to same txt file
     with open(OUTPUT_DIR / "global_id_results.txt", "w") as f:
-        f.write("=== Global IDs (FisherS) ===\n")
-        for name, gid in results.items():
-            f.write(f"{name:30s}: {gid:.4f}\n")
-
-        f.write("\n=== Global IDs (MLE) ===\n")
-        for name, gid in mle_results.items():
-            f.write(f"{name:30s}: {gid:.4f}\n")
-
-        f.write("\n=== Global IDs (MoM) ===\n")
-        for name, gid in mom_results.items():
-            f.write(f"{name:30s}: {gid:.4f}\n")
-
-        f.write("\n=== Global IDs (TLE) ===\n")
-        for name, gid in tle_results.items():
+        f.write("=== Effective Rank ===\n")
+        for name, gid in er_results.items():
             f.write(f"{name:30s}: {gid:.4f}\n")
 
     print(f"\nResults saved to {OUTPUT_DIR / 'global_id_results.txt'}")

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import re
 import csv
@@ -248,6 +249,30 @@ class SelectRGB(nn.Module):
         return x
 
 
+class SelectS2Channels10(nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim >= 4:
+            channel_dim = 1
+        elif x.ndim == 3:
+            channel_dim = 0
+        else:
+            return x
+
+        current = x.shape[channel_dim]
+        if current == 10:
+            return x
+
+        if current == 13:
+            keep = [1, 2, 3, 4, 5, 6, 7, 8, 11, 12]
+        elif current == 12:
+            keep = [1, 2, 3, 4, 5, 6, 7, 8, 10, 11]
+        else:
+            keep = list(range(min(current, 10)))
+
+        idx = torch.tensor(keep, device=x.device)
+        return torch.index_select(x, channel_dim, idx)
+
+
 class RandomConvFeatures(nn.Module):
     """Random Convolutional Filters baseline (13-channel, 512-dim GAP)."""
 
@@ -303,8 +328,119 @@ def _build_s2_transform_for_preset() -> Callable[[torch.Tensor], torch.Tensor]:
     ])
 
 
+def _build_remoteclip_model() -> nn.Module:
+    if str(PANGAEA_CONFIG_ROOT.parent) not in sys.path:
+        sys.path.append(str(PANGAEA_CONFIG_ROOT.parent))
+    from pangaea.encoders.remoteclip_encoder import RemoteCLIP_Encoder
+
+    cfg = _load_pangaea_encoder_cfg("remoteclip")
+    encoder_weights = Path(cfg["encoder_weights"])
+    if not encoder_weights.is_absolute():
+        encoder_weights = PANGAEA_CONFIG_ROOT.parent / encoder_weights
+
+    model = RemoteCLIP_Encoder(
+        encoder_weights=str(encoder_weights),
+        input_bands=cfg["input_bands"],
+        input_size=cfg["input_size"],
+        embed_dim=cfg["embed_dim"],
+        patch_size=cfg["patch_size"],
+        width=cfg["width"],
+        head_width=cfg["head_width"],
+        layers=cfg["layers"],
+        mlp_ratio=cfg["mlp_ratio"],
+        output_layers=cfg["output_layers"],
+        output_dim=cfg["output_dim"],
+        download_url=cfg.get("download_url", ""),
+    )
+    model.load_encoder_weights(logging.getLogger("remoteclip"))
+    model.eval()
+    return model
+
+def _load_llama3_ms_clip_model() -> nn.Module:
+    try:
+        import open_clip  # type: ignore
+    except ImportError as exc:
+        raise ImportError(
+            "open_clip is required to load the llama3_ms_clip_base preset."
+        ) from exc
+
+    weights_path = Path("/home/juro4948/ciip/ciip/Llama3_MS_CLIP_weights.pt")
+    if not weights_path.exists():
+        raise FileNotFoundError(f"MS-CLIP weights not found at {weights_path}")
+
+    model_cfg = open_clip.get_model_config("ViT-B-16")
+    model, _, _ = open_clip.create_model_and_transforms(
+        "ViT-B-16",
+        pretrained=None,
+        text_cfg=model_cfg.get("text_cfg"),
+    )
+
+    desired_in_chans = 10
+    conv_key = "visual.conv1.weight"
+    old_conv = model.visual.conv1
+    model.visual.conv1 = nn.Conv2d(
+        in_channels=desired_in_chans,
+        out_channels=old_conv.out_channels,
+        kernel_size=old_conv.kernel_size,
+        stride=old_conv.stride,
+        bias=False,
+    )
+
+    raw_state = torch.load(weights_path, map_location="cpu")
+    if isinstance(raw_state, dict) and "state_dict" in raw_state:
+        raw_state = raw_state["state_dict"]
+
+    prefixes = (
+        "clip_base_model.model.",
+        "image_encoder.model.",
+        "text_encoder.model.",
+    )
+
+    target_state = model.state_dict()
+    filtered = {}
+    for key, tensor in raw_state.items():
+        trimmed = key
+        for prefix in prefixes:
+            if trimmed.startswith(prefix):
+                trimmed = trimmed[len(prefix):]
+                break
+        if trimmed in target_state and target_state[trimmed].shape == tensor.shape:
+            filtered[trimmed] = tensor
+
+    if conv_key in raw_state:
+        w_ckpt = raw_state[conv_key]
+        if w_ckpt.shape[1] != desired_in_chans:
+            if w_ckpt.shape[1] < desired_in_chans:
+                pad = w_ckpt.new_zeros(
+                    w_ckpt.shape[0],
+                    desired_in_chans - w_ckpt.shape[1],
+                    *w_ckpt.shape[2:],
+                )
+                w_ckpt = torch.cat([w_ckpt, pad], dim=1)
+            else:
+                w_ckpt = w_ckpt[:, :desired_in_chans, :, :]
+        filtered[conv_key] = w_ckpt
+
+    model.load_state_dict(filtered, strict=False)
+    if hasattr(model, "visual") and hasattr(model.visual, "proj"):
+        model.visual.proj = None
+    if hasattr(model, "visual") and hasattr(model.visual, "pool_type"):
+        model.visual.pool_type = "avg"
+    model.eval()
+    return model
+
+
 def build_non_ciip_spec(preset: str, preprocess: str) -> ModelSpec:
     preset_key = preset.lower()
+    if preset_key == "resnet18_s2_all_moco":
+        from torchgeo.models import resnet18, ResNet18_Weights
+        return ModelSpec(
+            name="resnet18_s2_all_moco",
+            in_chans=13,
+            builder=lambda: resnet18(weights=ResNet18_Weights.SENTINEL2_ALL_MOCO),
+            feature_fn=_resnet_gap_feature_fn,
+            transform=_build_s2_transform_for_preset(),
+        )
     if preset_key == "resnet50_s2_all_moco":
         from torchgeo.models import resnet50, ResNet50_Weights
         return ModelSpec(
@@ -367,6 +503,46 @@ def build_non_ciip_spec(preset: str, preprocess: str) -> ModelSpec:
             ]),
             s2_tier="rgb",
         )
+    if preset_key == "remoteclip":
+        return ModelSpec(
+            name="remoteclip",
+            in_chans=3,
+            builder=_build_remoteclip_model,
+            feature_fn=_remoteclip_feature_fn,
+            transform=T.Compose([
+                T.CenterCrop((224, 224)),
+                SelectRGB(),
+                T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+                # S2ScaleClampTransform(scale=10000.0),
+            ]),
+            s2_tier="s2l2a",
+        )
+    if preset_key == "resnet18_s2_rgb_moco":
+        from torchgeo.models import resnet18, ResNet18_Weights
+        return ModelSpec(
+            name="resnet18_s2_rgb_moco",
+            in_chans=3,
+            builder=lambda: resnet18(weights=ResNet18_Weights.SENTINEL2_RGB_MOCO),
+            feature_fn=_resnet_gap_feature_fn,
+            transform=T.Compose([
+                T.CenterCrop((224, 224)),
+                T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+            ]),
+            s2_tier="rgb",
+        )
+    if preset_key == "resnet50_s2_rgb_moco":
+        from torchgeo.models import resnet50, ResNet50_Weights
+        return ModelSpec(
+            name="resnet50_s2_rgb_moco",
+            in_chans=3,
+            builder=lambda: resnet50(weights=ResNet50_Weights.SENTINEL2_RGB_MOCO),
+            feature_fn=_resnet_gap_feature_fn,
+            transform=T.Compose([
+                T.CenterCrop((224, 224)),
+                T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+            ]),
+            s2_tier="rgb",
+        )
     if preset_key == "croma":
         module = _load_croma_module()
         PretrainedCROMA = getattr(module, "PretrainedCROMA")
@@ -384,6 +560,19 @@ def build_non_ciip_spec(preset: str, preprocess: str) -> ModelSpec:
                 T.Resize((120, 120)),
                 CromaNormalize(use_8_bit=False),
             ),
+            s2_tier="s2l2a",
+        )
+    if preset_key == "llama3_ms_clip_base":
+        return ModelSpec(
+            name="llama3_ms_clip_base",
+            in_chans=10,
+            builder=_load_llama3_ms_clip_model,
+            feature_fn=_open_clip_vit_feature_fn,
+            transform=T.Compose([
+                T.CenterCrop((224, 224)),
+                S2ScaleClampTransform(scale=10000.0),
+                SelectS2Channels10(),
+            ]),
             s2_tier="s2l2a",
         )
     if preset_key == "rcf_13ch":
@@ -629,6 +818,12 @@ def _unwrap_model(model: nn.Module) -> nn.Module:
 def ciip_s2_feature_fn(model: nn.Module, x: torch.Tensor) -> torch.Tensor:
     core = _unwrap_model(model)
     feats = core.encoder_s2(x)
+    # print if there is a proj lyaer
+    if hasattr(core, "proj_s2") and core.proj_s2 is not None:
+        raise RuntimeError("CIIP model has a proj_s2 layer, which is not supported in feature extraction.")
+    # print if there is an fc layer
+    if hasattr(core, "fc") and core.fc is not None:
+        raise RuntimeError("CIIP model has a fc layer, which is not supported in feature extraction.")
     if feats.ndim == 3:
         feats = feats.mean(dim=1)
     elif feats.ndim != 2:
@@ -683,6 +878,61 @@ def _vit_patch_mean_feature_fn(model: nn.Module, x: torch.Tensor) -> torch.Tenso
         feats = feats[:, 1:, :].mean(dim=1)
     elif feats.ndim != 2:
         raise RuntimeError(f"Unexpected ViT feature shape: {feats.shape}")
+    return feats
+
+
+def _remoteclip_feature_fn(model: nn.Module, x: torch.Tensor) -> torch.Tensor:
+    core = _unwrap_model(model)
+    if x.ndim == 4:
+        optical = x.unsqueeze(2)
+    elif x.ndim == 5:
+        optical = x
+    else:
+        raise RuntimeError(f"Unexpected RemoteCLIP input shape: {x.shape}")
+    outputs = core({"optical": optical})
+    if isinstance(outputs, (list, tuple)) and outputs:
+        feats = outputs[-1]
+    else:
+        feats = outputs
+    if feats.ndim == 4:
+        feats = feats.mean(dim=(2, 3))
+    elif feats.ndim == 3:
+        if feats.shape[1] > 1:
+            feats = feats[:, 1:, :].mean(dim=1)
+        else:
+            feats = feats.mean(dim=1)
+    elif feats.ndim != 2:
+        raise RuntimeError(f"Unexpected RemoteCLIP feature shape: {feats.shape}")
+    return feats
+
+
+def _open_clip_vit_feature_fn(model: nn.Module, x: torch.Tensor) -> torch.Tensor:
+    core = _unwrap_model(model)
+    visual = getattr(core, "visual", core)
+    proj = getattr(visual, "proj", None)
+    pool_type = getattr(visual, "pool_type", None)
+    if proj is not None:
+        visual.proj = None
+    if pool_type is not None:
+        visual.pool_type = "avg"
+    try:
+        if hasattr(visual, "forward_features"):
+            feats = visual.forward_features(x)
+        else:
+            feats = visual(x)
+    finally:
+        if proj is not None:
+            visual.proj = proj
+        if pool_type is not None:
+            visual.pool_type = pool_type
+    if isinstance(feats, (tuple, list)):
+        feats = feats[0]
+    if feats.ndim == 3:
+        feats = feats[:, 1:, :].mean(dim=1)
+    elif feats.ndim > 2:
+        feats = feats.mean(dim=tuple(range(2, feats.ndim)))
+    if feats.ndim != 2:
+        raise RuntimeError(f"Unexpected MS-CLIP feature shape: {feats.shape}")
     return feats
 
 
@@ -2120,13 +2370,18 @@ def parse_args():
     parser.add_argument(
         "--model-preset",
         choices=(
+            "resnet18_s2_all_moco",
             "resnet50_s2_all_moco",
+            "resnet18_s2_rgb_moco",
+            "resnet50_s2_rgb_moco",
             "dino",
             "scalemae_large_rgb",
             "dofa_base_s2_13ch",
             "croma",
             "vitsmall16_s2_all_moco",
             "resnet152_imagenet_rgb",
+            "llama3_ms_clip_base",
+            "remoteclip",
             "rcf_13ch",
         ),
         default=None,

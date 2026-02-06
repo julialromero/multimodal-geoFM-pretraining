@@ -104,8 +104,9 @@ ALLOWED_MODELS: List[str] = [
     "ViT DAI CIIP (BS=12k) (scaled)",
     # "ViT DAI CIIP PROJECTED (BS=12k) (scaled)",
     "Matryoshka ViT CIIP (BS=12k) (scaled)",
-    "Text-S2 alignment (BS=8k) (band-norm)"
+    "Text-S2 alignment (BS=8k) (band-norm)",
     # 'Masked ViT CIIP (BS=12k, scaled)'
+    "ViT DAI CIIP BANDWISE (BS=12k) (band-norm)"
 ]
 
 PREFERRED_MODEL_ORDER: List[str] = [
@@ -135,8 +136,9 @@ PREFERRED_MODEL_ORDER: List[str] = [
     "ViT DAI CIIP (BS=12k) (scaled)",
     # "ViT DAI CIIP PROJECTED (BS=12k) (scaled)",
     "Matryoshka ViT CIIP (BS=12k) (scaled)",
-    "Text-S2 alignment (BS=8k) (band-norm)"
+    "Text-S2 alignment (BS=8k) (band-norm)",
     # 'Masked ViT CIIP (BS=12k, scaled)'
+    "ViT DAI CIIP BANDWISE (BS=12k) (band-norm)"
 ]
 
 
@@ -226,7 +228,8 @@ RUN_LABELS: Dict[str, str] = {
     "2026_01_29_matryoshka_vit": "Matryoshka ViT CIIP (BS=12k) (scaled)",
     "2026_01_12-14_13_43-model_resnet50-lr_0.002-b_6-j_6-p_amp_bfloat16": "Vanilla CIIP (BS=8k) (scaled)",
     "2026_01_14-18_01_06-model_resnet50-lr_0.002-b_2-j_6-p_amp_bfloat16": "Vanilla CIIP (BS=20k) (scaled)",
-    "2026_01_20-08_11_45-model_transformer-lr_0.002-b_2-j_6-p_amp_bfloat16": 'Masked ViT CIIP (BS=12k, scaled)'
+    "2026_01_20-08_11_45-model_transformer-lr_0.002-b_2-j_6-p_amp_bfloat16": 'Masked ViT CIIP (BS=12k, scaled)',
+    "2026_02_01_vit_ciip_dai_bandwise": "ViT DAI CIIP BANDWISE (BS=12k) (band-norm)",
 }
 GIF_FRAME_DURATION_SECONDS = 3  # increase to slow down playback
 
