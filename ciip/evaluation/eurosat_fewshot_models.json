@@ -18,7 +18,6 @@
       "model_type": "backbone_only",
       "model_weights": "remoteclip",
       "model_in_channels": 3,
-      "model_transform": "ssl4eobandwisenorm"
     },
     {
       "model_type": "ciip_checkpoint",
@@ -55,8 +54,7 @@
     {
       "model_type": "backbone_only",
       "model_weights": "scalemae_large_rgb",
-      "model_in_channels": 3,
-      "normalization_method": "ssl4eobandwisenorm"
+      "model_in_channels": 3
     },
     {
       "model_type": "torchgeo_resnet50",
