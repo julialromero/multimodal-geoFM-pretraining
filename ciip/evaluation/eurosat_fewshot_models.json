@@ -1,0 +1,85 @@
+{
+  "defaults": {
+    "normalization_method": "divideby10000"
+  },
+  "models": [
+    {
+      "model_type": "backbone_only",
+      "model_weights": "llama3_ms_clip_base",
+      "model_in_channels": 10,
+      "model_transform": "ssl4eonorm"
+    },
+    {
+      "model_type": "backbone_only",
+      "model_weights": "rcf_13ch",
+      "model_in_channels": 13
+    },
+    {
+      "model_type": "backbone_only",
+      "model_weights": "remoteclip",
+      "model_in_channels": 3
+    },
+    {
+      "model_type": "ciip_checkpoint",
+      "model_path": "2026_02_01_vit_ciip_dai_bandwise",
+      "ciip_epoch": 300,
+      "ciip_framework": "transformer",
+      "model_in_channels": 12,
+      "normalization_method": "ssl4eobandwisenorm"
+    },
+    {
+      "model_type": "ciip_checkpoint",
+      "model_path": "1_28-ViT-DAI",
+      "ciip_epoch": 300,
+      "ciip_framework": "transformer",
+      "model_in_channels": 12,
+      "normalization_method": "divideby10000"
+    },
+    {
+      "model_type": "ciip_checkpoint",
+      "model_path": "2026_01_29_matryoshka_vit",
+      "ciip_epoch": 300,
+      "ciip_framework": "transformer",
+      "model_in_channels": 12,
+      "normalization_method": "divideby10000"
+    },
+    {
+      "model_type": "ciip_checkpoint",
+      "model_path": "2025_12_2-text-s2",
+      "ciip_epoch": 70,
+      "ciip_framework": "resnet50",
+      "model_in_channels": 12,
+      "normalization_method": "ssl4eobandwisenorm"
+    },
+    {
+      "model_type": "backbone_only",
+      "model_weights": "scalemae_large_rgb",
+      "model_in_channels": 3
+    },
+    {
+      "model_type": "torchgeo_resnet50",
+      "model_weights": "dino",
+      "model_in_channels": 13
+    },
+    {
+      "model_type": "torchgeo_resnet50",
+      "model_weights": "moco",
+      "model_in_channels": 13
+    },
+    {
+      "model_type": "backbone_only",
+      "model_weights": "dofa_base_s2_13ch",
+      "model_in_channels": 13
+    },
+    {
+      "model_type": "backbone_only",
+      "model_weights": "vitsmall16_s2_all_moco",
+      "model_in_channels": 13
+    },
+    {
+      "croma_weights": "/home/juro4948/ciip/comparison/CROMA-main/CROMA_base.pt",
+      "model_in_channels": 12,
+      "model_type": "croma"
+    }
+  ]
+}
