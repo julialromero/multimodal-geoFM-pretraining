@@ -52,6 +52,28 @@ import os
 import torchvision.transforms as T
 from torchvision.models import resnet152, ResNet152_Weights
 
+
+def _looks_like_vit_checkpoint(checkpoint_path: Optional[Path]) -> bool:
+    if checkpoint_path is None:
+        return False
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    except Exception:
+        return False
+    if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+        state_dict = checkpoint["state_dict"]
+    else:
+        state_dict = checkpoint if isinstance(checkpoint, dict) else {}
+    for key in state_dict.keys():
+        if (
+            "transformer" in key
+            or "positional_embedding" in key
+            or "class_embedding" in key
+            or "ln_post" in key
+        ):
+            return True
+    return False
+
 ## EUROSAT STANDARDIZATION VALUES
 EUROSATMEAN = {
     'B01': 1354.40546513,
@@ -319,10 +341,6 @@ def _use_adapter_modality(adapter: EvaluationAdapter, modality: str):
 from ciip.evaluation.export_neuco_embeddings import (  # type: ignore
     E2SChallengeDataset,
     InputResizer,
-    SSL4EONormalize,
-    NeuCoNormalize,
-    Divideby10000Normalize,
-    CromaNormalize,
     TemporalMean,
     collate_fn,
     create_submission_from_dict,
@@ -359,26 +377,37 @@ from visualizations.ssl4eo.hyperbolic_visualization import (  # type: ignore
 )
 from visualizations.ssl4eo.hyperbolic_retrieval import compute_cross_modal_retrieval
 from ciip.evaluation.id_metrics import (
-    IMAGENET_MEAN,
-    IMAGENET_STD,
-    SSL4EO_MODEL_TRANSFORMS,
-    S2ScaleTransform,
     compute_global_id_metrics,
     prepare_embeddings_for_id,
     save_id_metrics,
+)
+from ciip.evaluation.normalization_utils import (
+    CromaNormalize,
+    DEFAULT_NORMALIZATION_METHOD,
+    Divideby10000Normalize,
+    IMAGENET_MEAN,
+    IMAGENET_STD,
+    NORMALIZATION_METHOD_BANDWISE,
+    NORMALIZATION_METHOD_DIVIDE,
+    NORMALIZATION_METHOD_IMAGENET,
+    NORMALIZATION_METHOD_SSL4EO,
+    NORMALIZATION_METHODS,
+    SSL4EO_MODEL_TRANSFORMS,
+    SSL4EONormalize,
+    NeuCoNormalize,
+    S2ScaleTransform,
+    build_normalization_transform,
+    resolve_normalization_method,
     select_ssl4eo_transform,
+)
+from ciip.evaluation.output_utils import (
+    build_model_tag,
+    ensure_dir,
+    write_run_manifest,
 )
 from ciip.open_clip_train.data import SSL4EODataset
 
-NORMALIZATION_METHOD_DIVIDE = "divideby10000"
-NORMALIZATION_METHOD_BANDWISE = "bandwisenorm"
-NORMALIZATION_METHOD_SSL4EO = "ssl4eonorm"
-NORMALIZATION_METHODS = (
-    NORMALIZATION_METHOD_DIVIDE,
-    NORMALIZATION_METHOD_BANDWISE,
-    NORMALIZATION_METHOD_SSL4EO,
-)
-DEFAULT_NORMALIZATION_METHOD = NORMALIZATION_METHOD_DIVIDE
+ 
 
 
 @dataclass
@@ -684,13 +713,15 @@ def _build_eurosat_loaders(
     target_size = int(config.eurosat_image_size)
     eval_resize = max(target_size, int(round(target_size * 256 / 224)))
 
-    normalization_method = config.normalization_method.lower()
-    if normalization_method == NORMALIZATION_METHOD_BANDWISE:
-        norm_layer = transforms.Normalize(mean=mean, std=std)
-    elif normalization_method == NORMALIZATION_METHOD_SSL4EO:
-        norm_layer = SSL4EONormalize()
-    else:
-        norm_layer = Divideby10000Normalize()
+    normalization_method = resolve_normalization_method(
+        config.model_in_channels, config.normalization_method
+    )
+    if (config.model_weights or "").lower() == "remoteclip":
+        normalization_method = NORMALIZATION_METHOD_IMAGENET
+    norm_layer = build_normalization_transform(
+        normalization_method,
+        bandwise_stats=(mean, std),
+    )
     print(f"EuroSAT using normalization method: {norm_layer}")
     data_transforms = {
         "train": transforms.Compose(
@@ -884,13 +915,17 @@ def _build_bigearthnet_loaders(
     if selector is not None:
         train_steps.append(selector)
         eval_steps.append(selector)
-    normalization_method = config.normalization_method.lower()
+    normalization_method = resolve_normalization_method(
+        config.model_in_channels, config.normalization_method
+    )
+    if (config.model_weights or "").lower() == "remoteclip":
+        normalization_method = NORMALIZATION_METHOD_IMAGENET
     if normalization_method == NORMALIZATION_METHOD_BANDWISE:
         band_norm_layer = transforms.Normalize(mean=band_mean, std=band_std)
     elif normalization_method == NORMALIZATION_METHOD_SSL4EO:
         band_norm_layer = SSL4EONormalize()
     else:
-        band_norm_layer = Divideby10000Normalize()
+        band_norm_layer = build_normalization_transform(normalization_method)
     print(f"band norm method: {band_norm_layer}")
     train_steps.extend(
         [
@@ -966,7 +1001,12 @@ def _build_neuco_loader(
 
     else:
         transform_steps.append(InputResizer(224))
-        normalization_method = config.normalization_method.lower()
+        normalization_method = resolve_normalization_method(
+            config.model_in_channels, config.normalization_method
+        )
+        if (config.model_weights or "").lower() == "remoteclip":
+            normalization_method = NORMALIZATION_METHOD_IMAGENET
+
         if normalization_method == NORMALIZATION_METHOD_BANDWISE:
             print("Using NeuCo bandwise normalization for NeuCo inputs")
             transform_steps.append(NeuCoNormalize())
@@ -974,8 +1014,11 @@ def _build_neuco_loader(
             print("Using SSL4EO normalization for NeuCo inputs")
             transform_steps.append(SSL4EONormalize())
         else:
-            print("Using divide-by-10000 normalization for NeuCo inputs")
-            transform_steps.append(Divideby10000Normalize())
+            if normalization_method == NORMALIZATION_METHOD_IMAGENET:
+                print("Using ImageNet normalization for NeuCo inputs")
+            else:
+                print("Using divide-by-10000 normalization for NeuCo inputs")
+            transform_steps.append(build_normalization_transform(normalization_method))
 
     # transform_steps.append(TemporalMean())  # skip temporal averaging; keep per-season inputs
     # if config.neuco_resize is not None:
@@ -1025,11 +1068,13 @@ def _build_ssl4eo_dataset(config: ModelEvalConfig) -> torch.utils.data.Dataset:
     s2_transform = select_ssl4eo_transform(config.model_weights)
     if s2_transform is None:
         print(f"Using default SSL4EO transform for tier {config.ssl4eo_s2_tier}")
-        norm_layer = (
-            SSL4EONormalize()
-            if config.normalization_method.lower() == NORMALIZATION_METHOD_BANDWISE
-            else Divideby10000Normalize()
+        normalization_method = resolve_normalization_method(
+            config.model_in_channels, config.normalization_method
         )
+        if normalization_method in {NORMALIZATION_METHOD_BANDWISE, NORMALIZATION_METHOD_SSL4EO}:
+            norm_layer = SSL4EONormalize()
+        else:
+            norm_layer = build_normalization_transform(normalization_method)
         s2_transform = transforms.Compose([
                 transforms.CenterCrop(224),
                 norm_layer,
@@ -1133,6 +1178,11 @@ def _run_linear_probe(
         train_feats = _maybe_slice(getattr(train, feature_key))
         val_feats = _maybe_slice(getattr(val, feature_key))
         test_feats = _maybe_slice(getattr(test, feature_key))
+
+        print(
+            f"Linear probe ({label}) using '{feature_key}' embeddings: dim={train_feats.shape[1]} "
+            f"(batch_norm={batch_norm}, slice_dim={slice_dim})"
+        )
 
         if batch_norm:
             mean = train_feats.mean(axis=0, keepdims=True)
@@ -1241,14 +1291,12 @@ def _run_linear_probe(
             return
         probe_specs.extend(
             [
-                (feature_override, feature_override, False),
                 (feature_override, f"{feature_override}_batchnorm", True),
             ]
         )
     elif _available_feature("backbone"):
         probe_specs.extend(
             [
-                ("backbone", "backbone", False),
                 ("backbone", "backbone_batchnorm", True),
             ]
         )
@@ -2155,6 +2203,7 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
         croma_weights=config.croma_weights,
         croma_image_resolution=config.croma_image_resolution,
         ciip_framework=config.ciip_framework,
+        enable_s1=config.evaluation_modality.lower() == "s1",
     )
     print(f'Model loaded')
     # print(adapter)
@@ -2172,8 +2221,7 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
         print(f"Lorentz curvature: {config.curvature}")
 
 
-    output_root = Path(config.output_dir)
-    os.makedirs(output_root, exist_ok=True)
+    output_root = ensure_dir(Path(config.output_dir))
     
     target_modality = config.evaluation_modality.lower()
     if target_modality not in {"s1", "s2"}:
@@ -2194,11 +2242,28 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
     ):
         model_channels = max(model_channels, 13)
 
-    output_dir = config.output_dir
-    os.makedirs(output_dir, exist_ok=True)
-    output_dir = Path(output_dir)
+    output_dir = ensure_dir(Path(config.output_dir))
+    write_run_manifest(
+        output_dir,
+        task_name="unified_evaluation",
+        config={
+            "model_type": config.model_type,
+            "model_weights": config.model_weights,
+            "model_path": config.model_path,
+            "ciip_framework": config.ciip_framework,
+            "model_in_channels": config.model_in_channels,
+            "normalization_method": config.normalization_method,
+            "eurosat_root": config.eurosat_root,
+            "neuco_root": config.neuco_root,
+            "ssl4eo_root": config.ssl4eo_root,
+            "enable_ssl4eo": config.enable_ssl4eo,
+            "evaluation_modality": config.evaluation_modality,
+        },
+    )
 
-    normalization_method = config.normalization_method.lower()
+    normalization_method = resolve_normalization_method(
+        config.model_in_channels, config.normalization_method
+    )
     if normalization_method not in NORMALIZATION_METHODS:
         raise ValueError(
             "normalization_method must be one of "
@@ -2386,6 +2451,8 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
                 embedding_dim_backbone = "512"
             elif 'llama' in config.model_weights.lower() if config.model_weights else False:
                 embedding_dim_backbone = "512"
+            elif 'remoteclip' in config.model_weights.lower() if config.model_weights else False:
+                embedding_dim_backbone = "768"
             elif 'resnet50' in config.model_weights.lower() if config.model_weights else False:
                 embedding_dim_backbone = "2048"
             elif 'vitsmall' in config.model_weights.lower() if config.model_weights else False:
@@ -2400,6 +2467,17 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
                 )
 
             print(f"NeuCo embedding dimension for {modality}: {embedding_dim_backbone}")
+            backbone_tensor = getattr(neuco_bundle, "backbone", None) if neuco_bundle is not None else None
+            if backbone_tensor is not None:
+                print(
+                    "NeuCo benchmark using backbone embeddings dim: "
+                    f"{backbone_tensor.shape[1]} (embedding_dim arg: {embedding_dim_backbone})"
+                )
+            else:
+                print(
+                    "NeuCo benchmark embedding_dim arg: "
+                    f"{embedding_dim_backbone} (backbone tensor unavailable)"
+                )
 
             if config.matryoshka_dims:
                 for dim in config.matryoshka_dims:
@@ -2617,6 +2695,7 @@ if __name__ == "__main__":
             "resnet152_imagenet_rgb",
             "vitsmall16_s2_all_moco",
             "llama3_ms_clip_base",
+            "remoteclip",
         ],
         help="Pretrained weight selection for the requested model type.",
     )
@@ -2693,6 +2772,9 @@ if __name__ == "__main__":
     # '2025_11_12-12_28_55-model_resnet50-lr_0.001-b_2-j_6-p_amp': 'curv_init_0.1', epochs ..., increased lr for curvature param
 
     # if model_path arg is empty, set default
+    if args.model_weights == "remoteclip" and args.model_in_channels is None:
+        args.model_in_channels = 3
+
     if args.model_in_channels:# and args.neuco_modalities:
         if args.model_in_channels == 12:
             print('Setting modalities to s2l2a')
@@ -2705,6 +2787,9 @@ if __name__ == "__main__":
         if args.model_in_channels == 10 and (args.model_weights == "llama3_ms_clip_base"):
             print('Setting modalities to s2l2a for MS-CLIP (10ch)')
             args.ssl4eo_s2_tier = 's2l2a'
+        if args.model_in_channels == 3 or args.model_weights == "remoteclip":
+            print('Setting modalities to rgb for RGB model')
+            args.ssl4eo_s2_tier = 'rgb'
         
 
         
@@ -2748,18 +2833,23 @@ if __name__ == "__main__":
 
 
     
-    if args.model_type == 'croma':
-        output_dir = f"/home/juro4948/ciip/diagnostics/unified_eval/{args.model_type}/"
-    elif args.model_type == 'torchgeo_resnet50':
-        output_dir = f"/home/juro4948/ciip/diagnostics/unified_eval/{args.model_weights}/"
-    elif args.model_type == 'backbone_only':
-        output_dir = f"/home/juro4948/ciip/diagnostics/unified_eval/{args.model_weights or 'backbone_only'}/"
-    elif args.model_type == 'ciip_checkpoint':
-        output_dir = f"/home/juro4948/ciip/diagnostics/unified_eval/{args.model_type}/"
-        output_dir = output_dir + args.model_path.strip('/') + f"/epoch_{args.ciip_epoch}/"
-    else:
-        raise ValueError("Invalid model type")
-    args.output_dir = Path(output_dir)
+    model_tag = build_model_tag(
+        model_type=args.model_type,
+        model_weights=args.model_weights,
+        model_path=args.model_path,
+        ciip_epoch=args.ciip_epoch,
+    )
+    output_dir = Path("/home/juro4948/ciip/diagnostics/unified_eval") / model_tag
+    if args.model_type == "ciip_checkpoint":
+        is_vit_run = (
+            args.ciip_framework == "transformer"
+            or ("vit" in (args.model_path or "").lower())
+        )
+        if not is_vit_run and args.ciip_framework is None:
+            is_vit_run = _looks_like_vit_checkpoint(args.checkpoint)
+        if is_vit_run:
+            output_dir = Path(f"{output_dir}_meanpool")
+    args.output_dir = output_dir
 
      #dino_13bands/") #curv_init_1_epoch10/ curv_init_1
     args.ssl4eo_root=Path("/local/ms-data/SSL4EOv1.1/train")

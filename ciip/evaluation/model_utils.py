@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+import sys
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Dict, Optional, Tuple
@@ -11,6 +12,7 @@ from typing import Any, Dict, Optional, Tuple
 import torch
 import torch.nn.functional as F
 from torch import nn
+import yaml
 
 from torchgeo.models import (
     DOFABase16_Weights,
@@ -31,6 +33,7 @@ from ciip.model_ciip import CIIP, LorentzCIIP
 from torchvision.models import resnet152, ResNet152_Weights
 
 _CROMA_MODULE: Optional[ModuleType] = None
+PANGAEA_CONFIG_ROOT = Path("/local/ms-data/pangaea-bench/configs")
 
 
 class RandomConvFeatures(nn.Module):
@@ -81,6 +84,42 @@ def _load_croma_module() -> ModuleType:
     spec.loader.exec_module(module)
     _CROMA_MODULE = module
     return module
+
+
+def _load_pangaea_encoder_cfg(encoder_name: str) -> Dict[str, Any]:
+    cfg_path = PANGAEA_CONFIG_ROOT / "encoder" / f"{encoder_name}.yaml"
+    if not cfg_path.exists():
+        raise FileNotFoundError(f"Missing encoder config for {encoder_name}: {cfg_path}")
+    return yaml.safe_load(cfg_path.read_text())
+
+
+def _build_remoteclip_model() -> nn.Module:
+    if str(PANGAEA_CONFIG_ROOT.parent) not in sys.path:
+        sys.path.append(str(PANGAEA_CONFIG_ROOT.parent))
+    from pangaea.encoders.remoteclip_encoder import RemoteCLIP_Encoder
+
+    cfg = _load_pangaea_encoder_cfg("remoteclip")
+    encoder_weights = Path(cfg["encoder_weights"])
+    if not encoder_weights.is_absolute():
+        encoder_weights = PANGAEA_CONFIG_ROOT.parent / encoder_weights
+
+    model = RemoteCLIP_Encoder(
+        encoder_weights=str(encoder_weights),
+        input_bands=cfg["input_bands"],
+        input_size=cfg["input_size"],
+        embed_dim=cfg["embed_dim"],
+        patch_size=cfg["patch_size"],
+        width=cfg["width"],
+        head_width=cfg["head_width"],
+        layers=cfg["layers"],
+        mlp_ratio=cfg["mlp_ratio"],
+        output_layers=cfg["output_layers"],
+        output_dim=cfg["output_dim"],
+        download_url=cfg.get("download_url", ""),
+    )
+    model.load_encoder_weights(logging.getLogger("remoteclip"))
+    model.eval()
+    return model
 
 
 class EvaluationAdapter(nn.Module):
@@ -200,17 +239,54 @@ class CiipEvaluationAdapter(EvaluationAdapter):
             dtype = self.dtype_s2
 
         replaced_modules = []
+        replaced_proj = None
         for attr in ("fc", "proj"):
             module = getattr(encoder, attr, None)
             if isinstance(module, nn.Module):
                 replaced_modules.append((attr, module))
                 setattr(encoder, attr, nn.Identity())
+            elif attr == "proj" and module is not None:
+                # ViT proj is a Parameter; drop it to expose pre-projection features.
+                replaced_proj = module
+                setattr(encoder, attr, None)
         try:
-
-            features = encoder(images.type(dtype))
+            inputs = images.type(dtype)
+            if (
+                hasattr(encoder, "transformer")
+                and hasattr(encoder, "class_embedding")
+                and hasattr(encoder, "positional_embedding")
+                and hasattr(encoder, "ln_pre")
+                and hasattr(encoder, "ln_post")
+                and hasattr(encoder, "conv1")
+            ):
+                x = encoder.conv1(inputs)
+                x = x.reshape(x.shape[0], x.shape[1], -1)
+                x = x.permute(0, 2, 1)
+                x = torch.cat(
+                    [
+                        encoder.class_embedding.to(x.dtype)
+                        + torch.zeros(
+                            x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device
+                        ),
+                        x,
+                    ],
+                    dim=1,
+                )
+                x = x + encoder.positional_embedding.to(x.dtype)
+                x = encoder.ln_pre(x)
+                x = x.permute(1, 0, 2)
+                x = encoder.transformer(x)
+                x = x.permute(1, 0, 2)
+                x = encoder.ln_post(x)
+                x = x[:, 1:, :]
+                features = x.mean(dim=1)
+            else:
+                features = encoder(inputs)
         finally:
             for attr, module in replaced_modules:
                 setattr(encoder, attr, module)
+            if replaced_proj is not None:
+                setattr(encoder, "proj", replaced_proj)
 
         if isinstance(features, (tuple, list)):
             features = features[0]
@@ -250,6 +326,7 @@ class TorchGeoResNetAdapter(EvaluationAdapter):
             in_chans: int = 13,
             in_chans_s1: int = 2,
             dtype_s1: torch.dtype = torch.float32,
+            enable_s1: bool = True,
         ) -> None:
         super().__init__()
         backbone = resnet50(weights=None, in_chans=in_chans)
@@ -287,7 +364,7 @@ class TorchGeoResNetAdapter(EvaluationAdapter):
         self.encoder_s1: Optional[nn.Module] = None
         self.projection_head_s1: Optional[nn.Module] = None
         self.dtype_s1: torch.dtype = dtype_s1
-        if s1_weights is not None:
+        if enable_s1 and s1_weights is not None:
             print('Setting up S1 encoder')
             s1_backbone = resnet50(weights=None, in_chans=in_chans_s1)
             s1_state = s1_weights.get_state_dict(progress=True)
@@ -544,6 +621,57 @@ class OpenClipVisionAdapter(EvaluationAdapter):
         if projected.ndim == 3:
             projected = projected[:, 0]
         return projected
+
+
+class RemoteClipEvaluationAdapter(EvaluationAdapter):
+    """Adapter for RemoteCLIP encoder (RGB B4/B3/B2, mean-pooled patch tokens)."""
+
+    supports_ssl4eo = True
+    supports_multimodal_dict = True
+
+    def __init__(self, remoteclip_model: nn.Module) -> None:
+        super().__init__()
+        self.base_model = remoteclip_model.eval()
+        self.encoder_s2 = remoteclip_model
+        self.encoder_s1 = None
+
+        try:
+            self.dtype_s2 = next(self.encoder_s2.parameters()).dtype
+        except StopIteration:
+            self.dtype_s2 = torch.float32
+        self.dtype_s1 = self.dtype_s2
+
+    def prepare_inputs(self, batch: Any, *, device: torch.device, modality: str = "s2") -> Dict[str, torch.Tensor]:
+        if isinstance(batch, dict):
+            tensor = batch.get("image") if "image" in batch else batch.get("data") or batch.get("optical")
+        else:
+            tensor = batch
+        if isinstance(tensor, torch.Tensor) and tensor.ndim == 3:
+            tensor = tensor.unsqueeze(0)
+        tensor = tensor.to(device)
+        if isinstance(tensor, torch.Tensor) and tensor.ndim == 4:
+            tensor = tensor.unsqueeze(2)  # (B, C, 1, H, W)
+        return {"optical": tensor}
+
+    def compute_backbone(self, images: Dict[str, torch.Tensor], modality: str = "s2") -> torch.Tensor:
+        outputs = self.encoder_s2(images)
+        if isinstance(outputs, (tuple, list)) and outputs:
+            feats = outputs[-1]
+        else:
+            feats = outputs
+        if feats.ndim == 4:
+            feats = feats.mean(dim=(2, 3))
+        elif feats.ndim == 3:
+            if feats.shape[1] > 1:
+                feats = feats[:, 1:, :].mean(dim=1)
+            else:
+                feats = feats.mean(dim=1)
+        elif feats.ndim != 2:
+            raise RuntimeError(f"Unexpected RemoteCLIP feature shape: {feats.shape}")
+        return feats
+
+    def compute_projected(self, images: Dict[str, torch.Tensor], modality: str = "s2") -> Optional[torch.Tensor]:
+        return None
 
 
 class CromaEvaluationAdapter(EvaluationAdapter):
@@ -902,6 +1030,7 @@ def build_model_from_checkpoint(
     }
     embed_dim, pre_dim = _infer_projection_dims(cleaned)
     print(f'Inferred embed_dim: {embed_dim}, pre_dim: {pre_dim}')
+    logging.info("Embedding dims: pre-projection=%d, projected=%d", pre_dim, embed_dim)
     is_lorentz = any(key.startswith("curv") or "lorentz" in key for key in cleaned)
 
     print(f'Is Lorentz model: {is_lorentz}')
@@ -1006,7 +1135,6 @@ def _build_llama3_ms_clip_adapter() -> EvaluationAdapter:
         )
 
         #print the sate dict keys
-        print(f'Raw state dict keys: {list(raw_state.keys())}')
         # print dim of clip_base_model.model.visual.conv1.weight
         print(f'Raw conv1 weight shape: {raw_state["clip_base_model.model.visual.conv1.weight"].shape}')
         
@@ -1057,6 +1185,10 @@ def _build_llama3_ms_clip_adapter() -> EvaluationAdapter:
         #     text_cfg=model_cfg.get("text_cfg"),
         # )
 
+    if hasattr(model, "visual") and hasattr(model.visual, "proj"):
+        model.visual.proj = None
+    if hasattr(model, "visual") and hasattr(model.visual, "pool_type"):
+        model.visual.pool_type = "avg"
     model.eval()
     return OpenClipVisionAdapter(model)
 
@@ -1088,6 +1220,8 @@ def _build_backbone_adapter(model_weights: Optional[str]) -> EvaluationAdapter:
         model = vit_small_patch16_224(weights=ViTSmall16_Weights.SENTINEL2_ALL_MOCO)
     elif normalized == "llama3_ms_clip_base":
         return _build_llama3_ms_clip_adapter()
+    elif normalized == "remoteclip":
+        return RemoteClipEvaluationAdapter(_build_remoteclip_model())
     else:
         raise ValueError(f"Unsupported backbone-only weights '{model_weights}'.")
 
@@ -1104,6 +1238,7 @@ def build_evaluation_adapter(
     croma_weights: Optional[Path] = None,
     croma_image_resolution: int = 120,
     ciip_framework: Optional[str] = None,
+    enable_s1: bool = True,
 ) -> EvaluationAdapter:
     """Create an evaluation adapter based on the requested model type."""
 
@@ -1115,7 +1250,7 @@ def build_evaluation_adapter(
 
     if model_type == "torchgeo_resnet50":
         weights = _resolve_resnet_weights(model_weights)
-        return TorchGeoResNetAdapter(weights=weights, in_chans=in_chans)
+        return TorchGeoResNetAdapter(weights=weights, in_chans=in_chans, enable_s1=enable_s1)
 
     if model_type == "backbone_only":
         return _build_backbone_adapter(model_weights)
@@ -1140,6 +1275,7 @@ __all__ = [
     "TorchGeoResNetAdapter",
     "BackboneOnlyAdapter",
     "OpenClipVisionAdapter",
+    "RemoteClipEvaluationAdapter",
     "CromaEvaluationAdapter",
     "build_model_from_checkpoint",
     "build_evaluation_adapter",

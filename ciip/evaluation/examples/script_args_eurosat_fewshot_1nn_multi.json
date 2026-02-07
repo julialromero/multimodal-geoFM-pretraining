@@ -1,0 +1,17 @@
+{
+  "models_json": null,
+  "output_dir": "diagnostics/fewshot_eval",
+  "eurosat_root": "/local/ms-data/EuroSAT/",
+  "eurosat_image_size": 224,
+  "normalization_method": "divideby10000",
+  "feature": "backbone",
+  "n_way": 5,
+  "k_shot": 1,
+  "knn_k": 1,
+  "queries_per_class": 15,
+  "episodes": 600,
+  "seed": 0,
+  "model_root": "/local/ms-data/SSL4EO/model/",
+  "croma_image_resolution": 120,
+  "summary_json": null
+}

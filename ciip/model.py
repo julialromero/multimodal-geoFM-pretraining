@@ -281,8 +281,6 @@ class VisionTransformer(nn.Module):
         in_channels: int = 3,
         patch_masking: bool = False,
         patch_mask_ratio: float = 0.0,
-        patch_mask_overlap: float = 0.0,
-        patch_mask_block: bool = True,
     ):
         super().__init__()
         self.input_resolution = input_resolution
@@ -290,8 +288,6 @@ class VisionTransformer(nn.Module):
         self.conv1 = nn.Conv2d(in_channels=in_channels, out_channels=width, kernel_size=patch_size, stride=patch_size, bias=False)
         self.patch_masking = patch_masking
         self.patch_mask_ratio = patch_mask_ratio
-        self.patch_mask_overlap = patch_mask_overlap
-        self.patch_mask_block = patch_mask_block
 
         scale = width ** -0.5
         self.class_embedding = nn.Parameter(scale * torch.randn(width))
@@ -310,78 +306,19 @@ class VisionTransformer(nn.Module):
         grid = self._patch_grid_size()
         return grid * grid
 
-    def _block_keep_mask(self, batch_size: int, device: torch.device) -> torch.Tensor:
-        grid = self._patch_grid_size()
-        total = grid * grid
-        num_mask = int(round(total * self.patch_mask_ratio))
-        num_mask = max(0, min(num_mask, total))
-        mask = torch.ones(batch_size, grid, grid, dtype=torch.bool, device=device)
-        if num_mask == 0:
-            return mask.view(batch_size, total)
-        if num_mask >= total:
-            return torch.zeros(batch_size, total, dtype=torch.bool, device=device)
-        block_h = max(1, int(round(num_mask ** 0.5)))
-        block_w = max(1, int(np.ceil(num_mask / block_h)))
-        block_h = min(block_h, grid)
-        block_w = min(block_w, grid)
-        for idx in range(batch_size):
-            top = torch.randint(0, grid - block_h + 1, (1,), device=device).item()
-            left = torch.randint(0, grid - block_w + 1, (1,), device=device).item()
-            mask[idx, top:top + block_h, left:left + block_w] = False
-        keep_mask = mask.view(batch_size, total)
-        num_keep = total - num_mask
-        keep_mask = self._fix_keep_count(keep_mask, num_keep)
-        return keep_mask
-
     def sample_patch_keep_mask(
         self,
         batch_size: int,
         device: torch.device,
-        reference_keep: torch.Tensor = None,
-        target_overlap: float = None,
-        max_attempts: int = 20,
     ) -> torch.Tensor:
         total = self._num_patches()
         num_keep = int(round(total * (1.0 - self.patch_mask_ratio)))
         num_keep = max(1, min(num_keep, total))
-        if self.patch_mask_block:
-            if reference_keep is None or target_overlap is None:
-                return self._block_keep_mask(batch_size, device)
-            best = None
-            best_delta = None
-            for _ in range(max_attempts):
-                candidate = self._block_keep_mask(batch_size, device)
-                overlap = (candidate & reference_keep).float().sum(dim=1)
-                denom = reference_keep.float().sum(dim=1).clamp(min=1.0)
-                ratio = overlap / denom
-                delta = (ratio - target_overlap).abs()
-                score = delta.mean().item()
-                if best is None or score < best_delta:
-                    best = candidate
-                    best_delta = score
-            return self._fix_keep_count(best, num_keep)
+        scores = torch.rand(batch_size, total, device=device)
+        keep_idx = torch.topk(scores, k=num_keep, dim=1).indices
         keep_mask = torch.zeros(batch_size, total, dtype=torch.bool, device=device)
-        if reference_keep is None or target_overlap is None:
-            for idx in range(batch_size):
-                keep_idx = torch.randperm(total, device=device)[:num_keep]
-                keep_mask[idx, keep_idx] = True
-            return keep_mask
-
-        overlap_keep = int(round(num_keep * target_overlap))
-        overlap_keep = max(0, min(overlap_keep, num_keep))
-        for idx in range(batch_size):
-            ref_keep_idx = torch.nonzero(reference_keep[idx], as_tuple=False).view(-1)
-            ref_drop_idx = torch.nonzero(~reference_keep[idx], as_tuple=False).view(-1)
-            if ref_keep_idx.numel() == 0:
-                ref_keep_idx = torch.arange(total, device=device)
-            if ref_drop_idx.numel() == 0:
-                ref_drop_idx = torch.arange(total, device=device)
-            num_from_ref = min(overlap_keep, ref_keep_idx.numel())
-            num_from_drop = num_keep - num_from_ref
-            keep_from_ref = ref_keep_idx[torch.randperm(ref_keep_idx.numel(), device=device)[:num_from_ref]]
-            keep_from_drop = ref_drop_idx[torch.randperm(ref_drop_idx.numel(), device=device)[:num_from_drop]]
-            keep_mask[idx, torch.cat([keep_from_ref, keep_from_drop], dim=0)] = True
-        return self._fix_keep_count(keep_mask, num_keep)
+        keep_mask.scatter_(1, keep_idx, True)
+        return keep_mask
 
     def _fix_keep_count(self, keep_mask: torch.Tensor, num_keep: int) -> torch.Tensor:
         fixed = keep_mask.clone()
@@ -405,18 +342,17 @@ class VisionTransformer(nn.Module):
         x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
         x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
         if self.patch_masking and self.training:
+            num_keep = int(round(self._num_patches() * (1.0 - self.patch_mask_ratio)))
+            num_keep = max(1, min(num_keep, self._num_patches()))
             if keep_mask is None:
                 keep_mask = self.sample_patch_keep_mask(x.shape[0], x.device)
             else:
-                num_keep = int(round(self._num_patches() * (1.0 - self.patch_mask_ratio)))
-                num_keep = max(1, min(num_keep, self._num_patches()))
+                keep_mask = keep_mask.to(device=x.device, dtype=torch.bool)
                 keep_mask = self._fix_keep_count(keep_mask, num_keep)
             x = x + self.positional_embedding[1:].to(x.dtype)
             x = self.ln_pre(x)
-            scores = torch.rand(x.shape[0], x.shape[1], device=x.device)
-            scores = scores.masked_fill(~keep_mask, -1.0)
-            num_keep = int(keep_mask.sum(dim=1).max().item())
-            keep_idx = torch.topk(scores, k=num_keep, dim=1).indices
+            keep_idx = keep_mask.nonzero(as_tuple=False)
+            keep_idx = keep_idx.view(x.shape[0], num_keep, 2)[..., 1]
             gather_idx = keep_idx.unsqueeze(-1).expand(-1, -1, x.shape[-1])
             x = torch.gather(x, dim=1, index=gather_idx)
         else:
@@ -439,7 +375,8 @@ class VisionTransformer(nn.Module):
         if self.patch_masking and self.training:
             x = x.mean(dim=1)
         else:
-            x = x[:, 0, :]
+            # Drop CLS and mean-pool patch tokens when not masking.
+            x = x[:, 1:, :].mean(dim=1)
 
         if self.proj is not None:
             x = x @ self.proj

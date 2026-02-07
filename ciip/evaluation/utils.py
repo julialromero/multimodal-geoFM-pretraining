@@ -259,30 +259,29 @@ def plot_results(results, k_values, metric="accuracy", output_file="few_shot_res
 
 def output_results_to_csv(results, k_values, metric="accuracy", output_dir="."):
     """
-    Write the results to a CSV file with model names as rows and k values as columns.
-    Each cell contains the metric value (accuracy or F1 score).
-    The filename includes the timestamp.
+    Write the results to a JSON file with model names as keys.
+    Each model entry contains per-k metric summaries and metadata.
     """
-    # Get the current timestamp
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    os.makedirs(output_dir, exist_ok=True)  # Ensure the directory exists
-    output_file = os.path.join(output_dir, f"results_{metric}_{timestamp}.csv")
+    os.makedirs(output_dir, exist_ok=True)
+    output_file = os.path.join(output_dir, f"results_{metric}_{timestamp}.json")
 
-    with open(output_file, mode='w', newline='') as file:
-        writer = csv.writer(file)
+    payload = {
+        "metric": metric,
+        "k_values": list(k_values),
+        "models": {},
+    }
+    for model_name, model_results in results.items():
+        payload["models"][model_name] = {
+            str(k): {
+                f"{metric}_mean": model_results[k][f"{metric}_mean"],
+                f"{metric}_std": model_results[k][f"{metric}_std"],
+            }
+            for k in k_values
+        }
 
-        # Write header row: "Model Name" followed by k values
-        header = ["Model Name"] + [f"k={k}" for k in k_values] + [f"Std k={k}" for k in k_values]
-        writer.writerow(header)
-
-        # Write rows: model name followed by metric values for each k
-        for model_name, model_results in results.items():
-            row = [model_name]  # Start the row with the model name
-            for k in k_values:
-                row.append(model_results[k][f'{metric}_mean'])  # Add the metric value for each k
-            for k in k_values:
-                row.append(model_results[k][f'{metric}_std'])
-            writer.writerow(row)
+    with open(output_file, mode="w", encoding="utf-8") as file:
+        json.dump(payload, file, indent=2)
 
     print(f"Results saved to {output_file}")
 
