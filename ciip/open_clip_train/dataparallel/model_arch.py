@@ -466,7 +466,7 @@ def _as_layers(value):
         return int(resolved[0])
     return resolved
 
-def build_ciip_architecture(model_cfg, loss_cfg=None):
+def build_ciip_architecture(model_cfg, loss_cfg=None, recon_cfg=None):
     loss_cfg = loss_cfg or {}
     init_logit_scale, init_logit_bias = _resolve_logit_settings(model_cfg)
 
@@ -537,6 +537,7 @@ def build_ciip_architecture(model_cfg, loss_cfg=None):
         s2_weights=model_cfg.pretrain.s2_weights,
         patch_masking=getattr(model_cfg, "patch_masking", False),
         patch_mask_ratio=getattr(model_cfg, "patch_mask_ratio", 0.0),
+        recon_cfg=recon_cfg,
         init_logit_scale=init_logit_scale,
         init_logit_bias=init_logit_bias,
         **({

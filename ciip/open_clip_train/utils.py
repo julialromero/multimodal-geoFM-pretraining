@@ -255,6 +255,7 @@ def create_model(args, device, **model_kwargs):
             s2_weights=args.model.pretrain.s2_weights,
             patch_masking=getattr(args.model, "patch_masking", False),
             patch_mask_ratio=getattr(args.model, "patch_mask_ratio", 0.0),
+            recon_cfg=getattr(args, "recon", None),
             init_logit_scale=init_logit_scale,
             init_logit_bias=init_logit_bias,
             curv_init=args.loss.curvature_init,
@@ -280,6 +281,7 @@ def create_model(args, device, **model_kwargs):
             s2_weights=args.model.pretrain.s2_weights,
             patch_masking=getattr(args.model, "patch_masking", False),
             patch_mask_ratio=getattr(args.model, "patch_mask_ratio", 0.0),
+            recon_cfg=getattr(args, "recon", None),
             init_logit_scale=init_logit_scale,
             init_logit_bias=init_logit_bias)
     # , 
