@@ -1,5 +1,5 @@
 from collections import OrderedDict
-from typing import Tuple, Union, Optional
+from typing import Dict, Tuple, Union, Optional
 
 import numpy as np
 import torch
@@ -8,6 +8,8 @@ from torch import nn
 import math
 
 from torchgeo.models import resnet18, ResNet18_Weights, ResNet50_Weights, resnet50
+from .mae_decoder import MAEDecoder
+from .masking import prepare_reconstruction_targets
 from .model import ModifiedResNet, VisionTransformer  # , ResNet50 #, S1Transformer, S2Transformer
 # VisionTransformer
 import logging
@@ -85,6 +87,7 @@ class CIIP(nn.Module):
                  s2_weights: str = "MOCO",
                  patch_masking: bool = False,
                  patch_mask_ratio: float = 0.0,
+                 recon_cfg: Optional[object] = None,
                  init_logit_scale: float = np.log(1 / 0.07),
                  init_logit_bias: Optional[float] = None,
                  ):
@@ -277,10 +280,43 @@ class CIIP(nn.Module):
         else:
             self.logit_bias = None
 
+        self.recon_cfg = recon_cfg
+        self.recon_enabled = recon_cfg is not None and patch_masking
+        self.decoder_s1 = None
+        self.decoder_s2 = None
+        if self.recon_enabled:
+            self._init_reconstruction_decoders()
+
         self.initialize_parameters()
 
         print("Final - S1 Encoder Parameters: ", self.count_parameters_encoder1())
         print("Final - S2 Encoder Parameters: ", self.count_parameters_encoder2())
+
+    def _init_reconstruction_decoders(self) -> None:
+        decoder_dim = getattr(self.recon_cfg, "decoder_dim", None) if self.recon_cfg is not None else None
+        decoder_layers = getattr(self.recon_cfg, "decoder_layers", 2) if self.recon_cfg is not None else 2
+        decoder_heads = getattr(self.recon_cfg, "decoder_heads", None) if self.recon_cfg is not None else None
+
+        def _build_decoder(encoder: VisionTransformer) -> MAEDecoder:
+            nonlocal decoder_dim, decoder_heads
+            dec_dim = decoder_dim or min(512, encoder.width)
+            heads = decoder_heads or max(1, dec_dim // 64)
+            patch_size = encoder.conv1.kernel_size[0]
+            patch_dim = patch_size * patch_size * encoder.conv1.in_channels
+            num_patches = encoder._num_patches()
+            return MAEDecoder(
+                encoder_dim=encoder.width,
+                decoder_dim=dec_dim,
+                num_layers=decoder_layers,
+                num_heads=heads,
+                num_patches=num_patches,
+                patch_dim=patch_dim,
+            )
+
+        if isinstance(self.encoder_s1, VisionTransformer):
+            self.decoder_s1 = _build_decoder(self.encoder_s1)
+        if isinstance(self.encoder_s2, VisionTransformer):
+            self.decoder_s2 = _build_decoder(self.encoder_s2)
 
     def initialize_parameters(self):
         # nn.init.normal_(self.token_embedding.weight, std=0.02)
@@ -349,32 +385,70 @@ class CIIP(nn.Module):
         return self.encoder_s2.conv1.weight.dtype
 
   
-    def encode_s1(self, s1, normalize, post_head: bool = True, keep_mask: torch.Tensor = None):
+    def encode_s1(
+        self,
+        s1,
+        normalize,
+        post_head: bool = True,
+        keep_mask: torch.Tensor = None,
+        return_token_info: bool = False,
+    ):
         if not post_head and normalize:
             raise ValueError("Cannot normalize before projection head. Set post_head=True when normalize=True.")
         # print("encoding s1 with shape: {}".format(s1.shape))
-        if keep_mask is not None and isinstance(self.encoder_s1, VisionTransformer):
-            features = self.encoder_s1(s1.type(self.dtype_s1), keep_mask=keep_mask)
+        token_info = None
+        if isinstance(self.encoder_s1, VisionTransformer):
+            output = self.encoder_s1(
+                s1.type(self.dtype_s1),
+                keep_mask=keep_mask,
+                return_token_info=return_token_info,
+            )
+            if return_token_info:
+                features, token_info = output
+            else:
+                features = output
         else:
             features = self.encoder_s1(s1.type(self.dtype_s1))
         if post_head:
             proj_layer = getattr(self.encoder_s1, "proj", None)
             if isinstance(proj_layer, nn.Module):
                 features = proj_layer(features)
-        return F.normalize(features, dim=-1) if normalize else features
+        features = F.normalize(features, dim=-1) if normalize else features
+        if return_token_info:
+            return features, token_info
+        return features
 
-    def encode_s2(self, s2, normalize, post_head: bool = True, keep_mask: torch.Tensor = None):
+    def encode_s2(
+        self,
+        s2,
+        normalize,
+        post_head: bool = True,
+        keep_mask: torch.Tensor = None,
+        return_token_info: bool = False,
+    ):
         if not post_head and normalize:
             raise ValueError("Cannot normalize before projection head. Set post_head=True when normalize=True.")
-        if keep_mask is not None and isinstance(self.encoder_s2, VisionTransformer):
-            features = self.encoder_s2(s2.type(self.dtype_s2), keep_mask=keep_mask)
+        token_info = None
+        if isinstance(self.encoder_s2, VisionTransformer):
+            output = self.encoder_s2(
+                s2.type(self.dtype_s2),
+                keep_mask=keep_mask,
+                return_token_info=return_token_info,
+            )
+            if return_token_info:
+                features, token_info = output
+            else:
+                features = output
         else:
             features = self.encoder_s2(s2.type(self.dtype_s2))
         if post_head:
             proj_layer = getattr(self.encoder_s2, "proj", None)
             if isinstance(proj_layer, nn.Module):
                 features = proj_layer(features)
-        return F.normalize(features, dim=-1) if normalize else features
+        features = F.normalize(features, dim=-1) if normalize else features
+        if return_token_info:
+            return features, token_info
+        return features
     
     # def encode_text(self, text):
     #     x = self.token_embedding(text).type(self.dtype)  # [batch_size, n_ctx, d_model]
@@ -410,8 +484,37 @@ class CIIP(nn.Module):
             keep_s1 = self.encoder_s1.sample_patch_keep_mask(s1.shape[0], s1.device)
             keep_s2 = self.encoder_s2.sample_patch_keep_mask(s2.shape[0], s2.device)
 
-        s1_features = self.encode_s1(s1, normalize=True, keep_mask=keep_s1) # normalize after projection
-        s2_features = self.encode_s2(s2, normalize=True, keep_mask=keep_s2)
+        recon_losses: Dict[str, torch.Tensor] = {}
+        if self.recon_enabled and self.training:
+            s1_features, s1_tokens = self.encode_s1(
+                s1,
+                normalize=True,
+                keep_mask=keep_s1,
+                return_token_info=True,
+            )
+            s2_features, s2_tokens = self.encode_s2(
+                s2,
+                normalize=True,
+                keep_mask=keep_s2,
+                return_token_info=True,
+            )
+            if s1_tokens is not None and self.decoder_s1 is not None:
+                recon_losses["s1"] = self._compute_recon_loss(
+                    s1,
+                    s1_tokens,
+                    self.decoder_s1,
+                    clip_range=(-25.0, 0.0),
+                )
+            if s2_tokens is not None and self.decoder_s2 is not None:
+                recon_losses["s2"] = self._compute_recon_loss(
+                    s2,
+                    s2_tokens,
+                    self.decoder_s2,
+                    clip_range=None,
+                )
+        else:
+            s1_features = self.encode_s1(s1, normalize=True, keep_mask=keep_s1) # normalize after projection
+            s2_features = self.encode_s2(s2, normalize=True, keep_mask=keep_s2)
 
         # # cosine similarity as logits
         logit_scale = self.logit_scale.exp()
@@ -428,7 +531,33 @@ class CIIP(nn.Module):
         if self.logit_bias is not None:
             out_dict['logit_bias'] = self.logit_bias
 
+        if recon_losses:
+            recon_loss = sum(recon_losses.values())
+            out_dict["recon_loss"] = recon_loss
+            for key, value in recon_losses.items():
+                out_dict[f"recon_loss_{key}"] = value
+
         return out_dict
+
+    def _compute_recon_loss(
+        self,
+        images: torch.Tensor,
+        token_info: Dict[str, torch.Tensor],
+        decoder: MAEDecoder,
+        clip_range: Optional[Tuple[float, float]],
+    ) -> torch.Tensor:
+        patch_dim = decoder.pred.out_features
+        patch_size = int(round(math.sqrt(patch_dim / images.shape[1])))
+        targets = prepare_reconstruction_targets(
+            images,
+            patch_size=patch_size,
+            clip_range=clip_range,
+        )
+        preds = decoder(token_info["patch_tokens"], token_info["ids_restore"])
+        mask = token_info["mask"]
+        loss = (preds - targets).pow(2).mean(dim=-1)
+        loss = (loss * mask).sum() / mask.sum().clamp(min=1)
+        return loss
 
     # def get_logits(self, s1, s2, lorentz: bool = False):
     #     s1_features = self.encode_s1(s1, normalize=True)
@@ -592,6 +721,7 @@ class LorentzCIIP(CIIP):
         normalize: bool = False,
         post_head: bool = True,
         keep_mask: torch.Tensor = None,
+        return_token_info: bool = False,
     ):
         """
         Args:
@@ -604,12 +734,17 @@ class LorentzCIIP(CIIP):
             raise ValueError("Cannot project to Lorentzian space before projection head. Set post_head=True when lorentz=True.")
 
         # Get Euclidean features from the encoder (without L2 normalization).
-        s2_feats = super().encode_s2(
+        output = super().encode_s2(
             s2,
             normalize=False,
             post_head=post_head,
             keep_mask=keep_mask,
+            return_token_info=return_token_info,
         ) # get post-head un-norm euclidean feats
+        if return_token_info:
+            s2_feats, token_info = output
+        else:
+            s2_feats = output
 
         # These features are space components of embeddings in the tangent
         # space of the Hyperboloid origin (which is Euclidean). Apply projection.
@@ -618,6 +753,8 @@ class LorentzCIIP(CIIP):
             with torch.autocast(s2_feats.device.type, dtype=torch.float32):
                 s2_feats = L.exp_map0(s2_feats, self.curv.exp())
 
+        if return_token_info:
+            return s2_feats, token_info
         return s2_feats
 
     def encode_s1(
@@ -627,6 +764,7 @@ class LorentzCIIP(CIIP):
         normalize: bool = False,
         post_head: bool = True,
         keep_mask: torch.Tensor = None,
+        return_token_info: bool = False,
     ):
         # if normalize:
         #     print("Warning: normalize=True is ignored in LorentzCIIP.encode_s2")
@@ -635,18 +773,25 @@ class LorentzCIIP(CIIP):
             
         # Get Euclidean features from the encoder (without L2 normalization).
 
-        s1_feats = super().encode_s1(
+        output = super().encode_s1(
             s1,
             normalize=False,
             post_head=post_head,
             keep_mask=keep_mask,
+            return_token_info=return_token_info,
         )
+        if return_token_info:
+            s1_feats, token_info = output
+        else:
+            s1_feats = output
 
         if lorentz:
             s1_feats = s1_feats * self.s1_alpha.exp()
             with torch.autocast(s1_feats.device.type, dtype=torch.float32):
                 s1_feats = L.exp_map0(s1_feats, self.curv.exp())
 
+        if return_token_info:
+            return s1_feats, token_info
         return s1_feats
 
 
@@ -700,9 +845,38 @@ class LorentzCIIP(CIIP):
             keep_s1 = self.encoder_s1.sample_patch_keep_mask(s1.shape[0], s1.device)
             keep_s2 = self.encoder_s2.sample_patch_keep_mask(s2.shape[0], s2.device)
 
-        # shape: (batch_size, embed_dim)
-        s2_feats = self.encode_s2(s2, lorentz=True, keep_mask=keep_s2)
-        s1_feats = self.encode_s1(s1, lorentz=True, keep_mask=keep_s1)
+        recon_losses: Dict[str, torch.Tensor] = {}
+        if self.recon_enabled and self.training:
+            s2_feats, s2_tokens = self.encode_s2(
+                s2,
+                lorentz=True,
+                keep_mask=keep_s2,
+                return_token_info=True,
+            )
+            s1_feats, s1_tokens = self.encode_s1(
+                s1,
+                lorentz=True,
+                keep_mask=keep_s1,
+                return_token_info=True,
+            )
+            if s1_tokens is not None and self.decoder_s1 is not None:
+                recon_losses["s1"] = self._compute_recon_loss(
+                    s1,
+                    s1_tokens,
+                    self.decoder_s1,
+                    clip_range=(-25.0, 0.0),
+                )
+            if s2_tokens is not None and self.decoder_s2 is not None:
+                recon_losses["s2"] = self._compute_recon_loss(
+                    s2,
+                    s2_tokens,
+                    self.decoder_s2,
+                    clip_range=None,
+                )
+        else:
+            # shape: (batch_size, embed_dim)
+            s2_feats = self.encode_s2(s2, lorentz=True, keep_mask=keep_s2)
+            s1_feats = self.encode_s1(s1, lorentz=True, keep_mask=keep_s1)
 
         logit_scale = self.logit_scale.exp()
 
@@ -716,6 +890,12 @@ class LorentzCIIP(CIIP):
 
         if self.logit_bias is not None:
             out_dict['logit_bias'] = self.logit_bias
+
+        if recon_losses:
+            recon_loss = sum(recon_losses.values())
+            out_dict["recon_loss"] = recon_loss
+            for key, value in recon_losses.items():
+                out_dict[f"recon_loss_{key}"] = value
 
         return out_dict
 

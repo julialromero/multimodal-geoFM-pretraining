@@ -340,6 +340,14 @@ def main(args: DictConfig, start_epoch=0):
             dist_model = torch.nn.parallel.DistributedDataParallel(dist_model, device_ids=[device], **ddp_args)
     loss = create_loss(args)
 
+    recon_cfg = getattr(args, "recon", None)
+    if recon_cfg is not None:
+        if not getattr(args.model, "patch_masking", False):
+            logging.warning(
+                "Reconstruction config provided but patch_masking is disabled; recon loss will be inactive."
+            )
+        logging.info("Reconstruction config: %s", recon_cfg)
+
     # create optimizer and scaler
     optimizer = None
     scaler = None
