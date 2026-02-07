@@ -278,7 +278,7 @@ class CIIP(nn.Module):
         if init_logit_bias is not None:
             self.logit_bias = nn.Parameter(torch.ones(lshape) * init_logit_bias)
         else:
-        self.logit_bias = None
+            self.logit_bias = None
 
         self.recon_cfg = recon_cfg
         self.recon_enabled = recon_cfg is not None and patch_masking
