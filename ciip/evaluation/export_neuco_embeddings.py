@@ -41,39 +41,18 @@ from zarr.storage import ZipStore
 import xarray as xr
 
 from ciip.eval_utils import create_ciip_model
+from ciip.evaluation.normalization_utils import (
+    CromaNormalize,
+    Divideby10000Normalize,
+    SSL4EONormalize,
+    NeuCoNormalize,
+)
 
 # ------------------------
 # Config & normalisation
 # ------------------------
 
-S2L1C_MEAN = [2607.345, 2393.068, 2320.225, 2373.963, 2562.536, 3110.071, 3392.832, 3321.154, 3583.77, 1838.712, 1021.753, 3205.112, 2545.798]
-S2L1C_STD = [786.523, 849.702, 875.318, 1143.578, 1126.248, 1161.98, 1273.505, 1246.79, 1342.755, 576.795, 45.626, 1340.347, 1145.036]
-
-S2L2A_MEAN = [1793.243, 1924.863, 2184.553, 2340.936, 2671.402, 3240.082, 3468.412, 3563.244, 3627.704, 3711.071, 3416.714, 2849.625]
-S2L2A_STD = [1160.144, 1201.092, 1219.943, 1397.225, 1400.035, 1373.136, 1429.17, 1485.025, 1447.836, 1652.703, 1471.002, 1365.307]
-
-S2L2A_RGB_MEAN = [2340.936, 2184.553, 1924.863]
-S2L2A_RGB_STD = [1397.225, 1219.943, 1201.092]
-
-S1GRD_MEAN = [-12.577, -20.265]
-S1GRD_STD = [5.179, 5.872]
-
-keep = [1, 2, 3, 4, 5, 6, 7, 8, 10, 11]
-MODALITY_STATS: Dict[str, Tuple[np.ndarray, np.ndarray]] = {
-    "s2l1c": (S2L1C_MEAN, S2L1C_STD),
-    "s2l2a": (S2L2A_MEAN, S2L2A_STD),
-    "s1": (S1GRD_MEAN, S1GRD_STD),
-    "s2l2a_rgb": (S2L2A_RGB_MEAN, S2L2A_RGB_STD),
-    "s2l2a_10": ([S2L2A_MEAN[i] for i in keep], [S2L2A_STD[i] for i in keep]),
-}
-
-
-NEUCO_MODALITY_STATS: Dict[str, Tuple[np.ndarray, np.ndarray]] = {
-    "s2l1c": (S2L1C_MEAN, S2L1C_STD),
-    "s2l2a": (S2L2A_MEAN, S2L2A_STD),
-    "s1": (S1GRD_MEAN, S1GRD_STD),
-    "s2l2a_rgb": (S2L2A_RGB_MEAN, S2L2A_RGB_STD),
-}
+ 
 
 # # ------------------------
 
@@ -573,112 +552,6 @@ class InputResizer(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.adaptive_pool(x)
-
-class SSL4EONormalize:
-    """
-    Normalizes image tensor for SSL4EO-S12: (img - mean) / std per channel.
-    """
-
-    def __init__(self):
-        super().__init__()
-
-    def _infer_modality(self, num_channels: int) -> str:
-        """Infer modality from number of channels."""
-        modality_map = {
-            13: 's2l1c',
-            12: 's2l2a',
-            3: 's2l2a_rgb',
-            2: 's1',
-            10: 's2l2a_10',
-        }
-        if num_channels not in modality_map:
-            raise ValueError(f"Cannot infer modality from number of channels: {num_channels}")
-        return modality_map[num_channels]
-
-    def __call__(self, img: torch.Tensor) -> torch.Tensor:
-        C = img.shape[-3]
-        modality = self._infer_modality(C)
-        mean, std = MODALITY_STATS[modality]
-        
-        mean_t = torch.tensor(mean).view(-1, 1, 1)
-        std_t = torch.tensor(std).view(-1, 1, 1)
-
-        img = img.float()
-        return (img - mean_t.to(img.device)) / std_t.to(img.device)
-
-
-class NeuCoNormalize:
-    """
-    Normalizes image tensor for NeuCo challenge data: (img - mean) / std per channel.
-    """
-
-    def __init__(self):
-        super().__init__()
-
-    def __call__(self, img: torch.Tensor) -> torch.Tensor:
-        C = img.shape[-3]
-        if C == 13:
-            modality = "s2l1c"
-        elif C == 12:
-            modality = "s2l2a"
-        elif C == 3:
-            modality = "s2l2a_rgb"
-        elif C == 2:
-            modality = "s1"
-        else:
-            raise ValueError(f"Cannot infer modality from number of channels: {C}")
-
-        mean, std = NEUCO_MODALITY_STATS[modality]
-        mean_t = torch.tensor(mean).view(-1, 1, 1)
-        std_t = torch.tensor(std).view(-1, 1, 1)
-        img = img.float()
-        return (img - mean_t.to(img.device)) / std_t.to(img.device)
-    
-class CromaNormalize(nn.Module):
-    def __init__(self, use_8_bit: bool = False):
-        super().__init__()
-        self.use_8_bit = use_8_bit
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # taken from SatMAE and SeCo
-        x = x.float()
-        squeeze_batch = False
-        if x.ndim == 3:
-            x = x.unsqueeze(0)
-            squeeze_batch = True
-        elif x.ndim != 4:
-            raise ValueError(f"Expected CxHxW or NxCxHxW input, got {x.shape}")
-
-        imgs = []
-        for channel in range(x.shape[1]):
-            min_value = x[:, channel, :, :].mean() - 2 * x[:, channel, :, :].std()
-            max_value = x[:, channel, :, :].mean() + 2 * x[:, channel, :, :].std()
-            denom = max_value - min_value
-            if denom == 0:
-                denom = torch.tensor(1.0, device=x.device, dtype=x.dtype)
-
-            if self.use_8_bit:
-                img = (x[:, channel, :, :] - min_value) / denom * 255.0
-                img = torch.clip(img, 0, 255).unsqueeze(dim=1).to(torch.uint8)
-                imgs.append(img)
-            else:
-                img = (x[:, channel, :, :] - min_value) / denom
-                img = torch.clip(img, 0, 1).unsqueeze(dim=1)
-                imgs.append(img)
-
-        output = torch.cat(imgs, dim=1)
-        if squeeze_batch:
-            output = output.squeeze(0)
-        return output
-        
-class Divideby10000Normalize:
-    """
-    Normalizes image tensor for DINO: scales to [0,1] range by dividing by 10000.
-    """
-
-    def __call__(self, img: torch.Tensor) -> torch.Tensor:
-        img = img.float() / 10000.0
-        return img #torch.clamp(img, 0.0, 1.0)
 
 class TemporalMean(nn.Module):
     """

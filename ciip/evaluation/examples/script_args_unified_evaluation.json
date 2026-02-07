@@ -1,0 +1,23 @@
+{
+  "model_type": "ciip_checkpoint",
+  "croma_image_resolution": 120,
+  "tsne_samples": 1500,
+  "pca_samples": 5000,
+  "ssl4eo_subset_size": 5,
+  "ssl4eo_subset_seed": 0,
+  "neuco_modalities": ["s2l2a"],
+  "ssl4eo_s2_tier": "s2l2a",
+  "neuco_seasons": 4,
+  "evaluation_modality": "s2",
+  "normalization_method": "divideby10000",
+  "disable_eurosat": false,
+  "disable_bigearthnet": false,
+  "matryoshka_dims": null,
+  "matryoshka_feature": "backbone",
+  "disable_neuco": false,
+  "disable_ssl4eo": false,
+  "ciip_epoch": 10,
+  "bigearthnet_root": "/local/ms-data/BigEarthNet/",
+  "bigearthnet_image_size": 224,
+  "stats_max_batches": 0
+}

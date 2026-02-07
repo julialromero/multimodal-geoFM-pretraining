@@ -7,9 +7,7 @@ band selection, normalization, and adapter behavior consistent.
 from __future__ import annotations
 
 import argparse
-import json
 import math
-import re
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -20,12 +18,23 @@ from torchgeo.datasets import EuroSAT
 from torchvision import transforms
 
 from ciip.eval_utils import CustomTransform
-from ciip.evaluation.export_neuco_embeddings import Divideby10000Normalize, SSL4EONormalize
-from ciip.evaluation.id_metrics import select_ssl4eo_transform
-from ciip.evaluation.model_utils import build_evaluation_adapter
-from ciip.evaluation.unified_evaluation import (
+from ciip.evaluation.normalization_utils import (
     DEFAULT_NORMALIZATION_METHOD,
     NORMALIZATION_METHODS,
+    NORMALIZATION_METHOD_SSL4EO,
+    SSL4EONormalize,
+    build_normalization_transform,
+    resolve_normalization_method,
+    select_ssl4eo_transform,
+)
+from ciip.evaluation.model_utils import build_evaluation_adapter
+from ciip.evaluation.output_utils import (
+    build_model_tag,
+    ensure_dir,
+    write_json,
+    write_run_manifest,
+)
+from ciip.evaluation.unified_evaluation import (
     ModelEvalConfig,
     _infer_model_in_channels,
     _resolve_eurosat_bands,
@@ -157,25 +166,7 @@ def _resolve_checkpoint(args: argparse.Namespace) -> Path | None:
 
 
 def _build_output_dir(args: argparse.Namespace) -> Path:
-    base = Path(args.output_dir)
-    base.mkdir(parents=True, exist_ok=True)
-    return base
-
-
-def _sanitize_tag(value: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9._-]+", "_", value.strip()).strip("_")
-
-
-def _model_tag(args: argparse.Namespace) -> str:
-    parts: List[str] = [args.model_type]
-    if args.model_weights:
-        parts.append(args.model_weights)
-    if args.model_path:
-        parts.append(args.model_path)
-    if args.model_type == "ciip_checkpoint" and args.ciip_epoch is not None:
-        parts.append(f"epoch{args.ciip_epoch}")
-    tag = "_".join(parts)
-    return _sanitize_tag(tag) if tag else "model"
+    return ensure_dir(Path(args.output_dir))
 
 
 def _ssl4eo_band_stats(bands: Sequence[str]) -> Tuple[List[float], List[float], str]:
@@ -209,7 +200,9 @@ def _build_eurosat_loaders(
 ) -> Tuple[Dict[str, DataLoader], str]:
     target_size = int(config.eurosat_image_size)
     eval_resize = max(target_size, int(round(target_size * 256 / 224)))
-    normalization_method = config.normalization_method.lower()
+    normalization_method = resolve_normalization_method(
+        config.model_in_channels, config.normalization_method
+    )
 
     if model_transform is not None:
         norm_label = transform_label or f"ssl4eo_transform:{config.model_weights}"
@@ -219,7 +212,7 @@ def _build_eurosat_loaders(
     #     norm_layer = transforms.Normalize(mean=mean, std=std)
     #     base_label = "bandwisenorm" if normalization_method == "bandwisenorm" else _SSL4EO_BANDWISE_METHOD
     #     norm_label = f"{base_label}_ssl4eo_{tier}"
-    elif normalization_method == "ssl4eonorm":
+    elif normalization_method == NORMALIZATION_METHOD_SSL4EO:
         print("Using SSL4EO global normalization for EuroSAT.")
         # build normalize with stats matching inchannels
         # if len(bands) == 13:
@@ -240,7 +233,7 @@ def _build_eurosat_loaders(
         norm_label = normalization_method
     else:
         print(f"Using default Divideby10000 normalization for EuroSAT (normalization_method='{normalization_method}').")
-        norm_layer = Divideby10000Normalize()
+        norm_layer = build_normalization_transform(normalization_method)
         norm_label = normalization_method
 
     data_transforms = {
@@ -425,12 +418,35 @@ def run_from_args(args: argparse.Namespace) -> Path:
     }
     results.update(metrics)
 
-    model_tag = _model_tag(args)
-    out_path = (
-        cfg.output_dir
-        / f"eurosat_{args.n_way}way_{args.k_shot}shot_{args.knn_k}nn_{args.feature}_{model_tag}.json"
+    model_tag = build_model_tag(
+        model_type=args.model_type,
+        model_weights=args.model_weights,
+        model_path=args.model_path,
+        ciip_epoch=args.ciip_epoch,
     )
-    out_path.write_text(json.dumps(results, indent=2))
+    out_dir = ensure_dir(cfg.output_dir / "eurosat_fewshot" / model_tag)
+    write_run_manifest(
+        out_dir,
+        task_name="eurosat_fewshot_1nn",
+        config={
+            "model_type": args.model_type,
+            "model_weights": args.model_weights,
+            "model_path": args.model_path,
+            "ciip_epoch": args.ciip_epoch,
+            "model_in_channels": args.model_in_channels,
+            "feature": args.feature,
+            "n_way": args.n_way,
+            "k_shot": args.k_shot,
+            "knn_k": args.knn_k,
+            "queries_per_class": args.queries_per_class,
+            "episodes": args.episodes,
+            "seed": args.seed,
+            "normalization_method": args.normalization_method,
+            "eurosat_root": args.eurosat_root,
+            "eurosat_image_size": args.eurosat_image_size,
+        },
+    )
+    out_path = write_json(out_dir / "results.json", results)
 
     print(f"{args.knn_k}-NN {args.n_way}-way {args.k_shot}-shot accuracy: {metrics['accuracy_mean']:.4f}")
     print(f"95% CI: ±{metrics['accuracy_ci95']:.4f} (std={metrics['accuracy_std']:.4f})")
