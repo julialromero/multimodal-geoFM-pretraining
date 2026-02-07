@@ -111,35 +111,35 @@ MODELS: List[ModelSpec] = [
     #     encoder_weights="/local/ms-data/SSL4EO/model/1_28-ViT-DAI/checkpoints/epoch_300.pt",
     # ),
     
-    ModelSpec(
-        encoder="remoteclip",
-        model_type="backbone_only",
-        model_weights="remoteclip",
-    ),
-    # # @ codex add llama-ms-clip
+    # ModelSpec(
+    #     encoder="remoteclip",
+    #     model_type="backbone_only",
+    #     model_weights="remoteclip",
+    # ),
+    # # # @ codex add llama-ms-clip
     # ModelSpec(
     #     name="llama_ms_clip",
     #     encoder="llama_ms_clip",
     # ),
-    # ModelSpec(
-    #     name="resnet50_ssl4eo_moco",
-    #     encoder="resnet50_ssl4eo_moco",
-    # ),
-    # # add vit small moco
-    # ModelSpec(
-    #     name="vit_small_ssl4eo_moco",
-    #     encoder="vit_small_ssl4eo_moco",
-    # ),
+    ModelSpec(
+        name="resnet50_ssl4eo_moco",
+        encoder="resnet50_ssl4eo_moco",
+    ),
+    # add vit small moco
+    ModelSpec(
+        name="vit_small_ssl4eo_moco",
+        encoder="vit_small_ssl4eo_moco",
+    ),
 
 
-    # ModelSpec(
-    #     name="scalemae",
-    #     encoder="scalemae",
-    # ),
-    # ModelSpec(
-    #     name="croma_optical",
-    #     encoder="croma_optical",
-    # ),
+    ModelSpec(
+        name="scalemae",
+        encoder="scalemae",
+    ),
+    ModelSpec(
+        name="croma_optical",
+        encoder="croma_optical",
+    ),
     # ModelSpec(
     #     name="dofa",
     #     encoder="dofa",

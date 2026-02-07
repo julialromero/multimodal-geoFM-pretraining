@@ -272,10 +272,22 @@ def run_from_args(args: argparse.Namespace) -> Path:
     neuco_export_dir.mkdir(parents=True, exist_ok=True)
     suffix = "_s1" if active_modality.lower() == "s1" else ""
     csv_out_backbone = neuco_export_dir / f"neuco_{neuco_modality}{suffix}_backbone.csv"
+    print(
+        f"NeuCo embeddings CSV path: {csv_out_backbone} "
+        f"(reuse_embeddings={args.reuse_embeddings})"
+    )
 
     neuco_bundle = None
-    if not (args.reuse_embeddings and csv_out_backbone.exists()):
+    if args.reuse_embeddings and csv_out_backbone.exists():
+        print(f"Reusing cached embeddings from {csv_out_backbone}.")
+    else:
+        if csv_out_backbone.exists() and not args.reuse_embeddings:
+            print(
+                "Found existing NeuCo CSV, but --reuse-embeddings is not set. "
+                "Re-extracting embeddings..."
+            )
         neuco_loader = _build_neuco_loader(cfg, modalities=[neuco_modality])
+        print(f"Extracting NeuCo embeddings for modality {active_modality} using model {model_tag}...")
         expected_channels = _infer_model_in_channels(
             adapter, cfg.model_in_channels, modality=active_modality
         )

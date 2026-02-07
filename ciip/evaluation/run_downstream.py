@@ -17,7 +17,11 @@ TASK_SCRIPTS = {
     "neuco_fewshot_benchmark_multi": "neuco_fewshot_benchmark_multi.py",
     "neuco_fewshot_episodic": "neuco_fewshot_episodic.py",
     "unified_evaluation": "unified_evaluation.py",
-    "linearprobe_comparison": "linearprobe_comparison.py",
+}
+
+TASKS_REQUIRE_MODELS_JSON = {
+    "eurosat_fewshot_1nn_multi",
+    "neuco_fewshot_benchmark_multi",
 }
 
 
@@ -115,6 +119,13 @@ def main() -> None:
     if not script:
         raise ValueError(f"Unknown task '{task}'.")
     script_path = Path(__file__).resolve().parent / script
+
+    if task in TASKS_REQUIRE_MODELS_JSON and args.models_json:
+        params = _merge_dicts(defaults, script_args)
+        params["models_json"] = args.models_json
+        cmd = [args.python, str(script_path), *_iter_cli_args(params)]
+        _run_command(cmd, dry_run=args.dry_run)
+        return
 
     if not models:
         params = _merge_dicts(defaults, script_args)

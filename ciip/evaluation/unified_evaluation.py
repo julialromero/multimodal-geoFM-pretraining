@@ -397,7 +397,7 @@ from ciip.evaluation.normalization_utils import (
     NeuCoNormalize,
     S2ScaleTransform,
     build_normalization_transform,
-    resolve_normalization_method,
+    resolve_normalization_method_for_weights,
     select_ssl4eo_transform,
 )
 from ciip.evaluation.output_utils import (
@@ -713,11 +713,9 @@ def _build_eurosat_loaders(
     target_size = int(config.eurosat_image_size)
     eval_resize = max(target_size, int(round(target_size * 256 / 224)))
 
-    normalization_method = resolve_normalization_method(
-        config.model_in_channels, config.normalization_method
+    normalization_method = resolve_normalization_method_for_weights(
+        config.model_in_channels, config.normalization_method, config.model_weights
     )
-    if (config.model_weights or "").lower() == "remoteclip":
-        normalization_method = NORMALIZATION_METHOD_IMAGENET
     norm_layer = build_normalization_transform(
         normalization_method,
         bandwise_stats=(mean, std),
@@ -915,11 +913,9 @@ def _build_bigearthnet_loaders(
     if selector is not None:
         train_steps.append(selector)
         eval_steps.append(selector)
-    normalization_method = resolve_normalization_method(
-        config.model_in_channels, config.normalization_method
+    normalization_method = resolve_normalization_method_for_weights(
+        config.model_in_channels, config.normalization_method, config.model_weights
     )
-    if (config.model_weights or "").lower() == "remoteclip":
-        normalization_method = NORMALIZATION_METHOD_IMAGENET
     if normalization_method == NORMALIZATION_METHOD_BANDWISE:
         band_norm_layer = transforms.Normalize(mean=band_mean, std=band_std)
     elif normalization_method == NORMALIZATION_METHOD_SSL4EO:
@@ -990,22 +986,21 @@ def _build_neuco_loader(
     modalities: Sequence[str],
 ) -> DataLoader:
     transform_steps: List[object] = []
-    # if modality.lower() != "s1":
-    # if model is dino use 
-
-    # if model is dino use SSL4EONormalize
-    if config.model_type == 'croma':
-        print(f"Resizing neuco to 120 for CROMA model")
-        transform_steps.append(transforms.Resize((config.croma_image_resolution, config.croma_image_resolution)))
-        transform_steps.append(CromaNormalize(use_8_bit=False))
-
+    if config.model_type != "ciip_checkpoint":
+        model_transform = select_ssl4eo_transform(config.model_weights)
+        if model_transform is None:
+            model_transform = select_ssl4eo_transform(config.model_type)
+        if model_transform is None:
+            raise ValueError(
+                "No SSL4EO transform found for model_weights="
+                f"{config.model_weights!r} or model_type={config.model_type!r}"
+            )
+        transform_steps.append(model_transform)
     else:
         transform_steps.append(InputResizer(224))
-        normalization_method = resolve_normalization_method(
-            config.model_in_channels, config.normalization_method
+        normalization_method = resolve_normalization_method_for_weights(
+            config.model_in_channels, config.normalization_method, config.model_weights
         )
-        if (config.model_weights or "").lower() == "remoteclip":
-            normalization_method = NORMALIZATION_METHOD_IMAGENET
 
         if normalization_method == NORMALIZATION_METHOD_BANDWISE:
             print("Using NeuCo bandwise normalization for NeuCo inputs")
@@ -1068,8 +1063,8 @@ def _build_ssl4eo_dataset(config: ModelEvalConfig) -> torch.utils.data.Dataset:
     s2_transform = select_ssl4eo_transform(config.model_weights)
     if s2_transform is None:
         print(f"Using default SSL4EO transform for tier {config.ssl4eo_s2_tier}")
-        normalization_method = resolve_normalization_method(
-            config.model_in_channels, config.normalization_method
+        normalization_method = resolve_normalization_method_for_weights(
+            config.model_in_channels, config.normalization_method, config.model_weights
         )
         if normalization_method in {NORMALIZATION_METHOD_BANDWISE, NORMALIZATION_METHOD_SSL4EO}:
             norm_layer = SSL4EONormalize()
@@ -2261,9 +2256,10 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
         },
     )
 
-    normalization_method = resolve_normalization_method(
-        config.model_in_channels, config.normalization_method
+    normalization_method = resolve_normalization_method_for_weights(
+        config.model_in_channels, config.normalization_method, config.model_weights
     )
+    print(f'Normalization method: {normalization_method}')
     if normalization_method not in NORMALIZATION_METHODS:
         raise ValueError(
             "normalization_method must be one of "
@@ -2450,7 +2446,7 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
             elif 'resnet18' in config.model_weights.lower() if config.model_weights else False:
                 embedding_dim_backbone = "512"
             elif 'llama' in config.model_weights.lower() if config.model_weights else False:
-                embedding_dim_backbone = "512"
+                embedding_dim_backbone = "768"
             elif 'remoteclip' in config.model_weights.lower() if config.model_weights else False:
                 embedding_dim_backbone = "768"
             elif 'resnet50' in config.model_weights.lower() if config.model_weights else False:
@@ -2748,7 +2744,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--disable-neuco", action="store_true", help="Skip NeuCo benchmark evaluation.")
     parser.add_argument("--disable-ssl4eo", action="store_true", help="Skip SSL4EO diagnostics even if a root is provided.")
-    parser.add_argument("--ciip-epoch", type=int, default=10, help="Epoch number for CIIP checkpoint to evaluate.")
+    parser.add_argument("--ciip-epoch", type=int, default=300, help="Epoch number for CIIP checkpoint to evaluate.")
     parser.add_argument("--bigearthnet-root", type=Path, default=Path("/local/ms-data/BigEarthNet/"), help="Root directory for BigEarthNet data.")
     parser.add_argument("--bigearthnet-image-size", type=int, default=224, help="Input resolution for BigEarthNet evaluation.")
     parser.add_argument(

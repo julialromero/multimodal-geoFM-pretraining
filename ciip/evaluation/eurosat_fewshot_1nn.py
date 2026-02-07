@@ -24,7 +24,7 @@ from ciip.evaluation.normalization_utils import (
     NORMALIZATION_METHOD_SSL4EO,
     SSL4EONormalize,
     build_normalization_transform,
-    resolve_normalization_method,
+    resolve_normalization_method_for_weights,
     select_ssl4eo_transform,
 )
 from ciip.evaluation.model_utils import build_evaluation_adapter
@@ -200,8 +200,8 @@ def _build_eurosat_loaders(
 ) -> Tuple[Dict[str, DataLoader], str]:
     target_size = int(config.eurosat_image_size)
     eval_resize = max(target_size, int(round(target_size * 256 / 224)))
-    normalization_method = resolve_normalization_method(
-        config.model_in_channels, config.normalization_method
+    normalization_method = resolve_normalization_method_for_weights(
+        config.model_in_channels, config.normalization_method, config.model_weights
     )
 
     if model_transform is not None:
@@ -343,20 +343,20 @@ def run_from_args(args: argparse.Namespace) -> Path:
         model_channels = max(model_channels, 13)
 
     eurosat_bands = _resolve_eurosat_bands(model_channels)
-    print(f"Evaluating model with {model_channels} input channels, using EuroSAT bands: {eurosat_bands}")
+    # print(f"Evaluating model with {model_channels} input channels, using EuroSAT bands: {eurosat_bands}")
     model_transform = None
     transform_label = None
     if args.model_type != "ciip_checkpoint":
         model_transform = select_ssl4eo_transform(args.model_weights)
-        if model_transform is not None:
-            transform_label = f"ssl4eo_transform:{args.model_weights}"
-            print(f"Using non-CIIP transform: {model_transform}")
-        else:
-            model_transform = select_ssl4eo_transform(args.model_type)
-            transform_label = f"ssl4eo_transform:{args.model_type}"
-            print(f"Using non-CIIP transform: {model_transform}")
         if model_transform is None:
-            raise ValueError(f"No predefined transform found for model_weights='{args.model_weights}'.")
+            model_transform = select_ssl4eo_transform(args.model_type)
+        if model_transform is None:
+            raise ValueError(
+                f"No predefined SSL4EO transform found for model_weights='{args.model_weights}' "
+                f"or model_type='{args.model_type}'."
+            )
+        transform_label = f"ssl4eo_transform:{args.model_weights or args.model_type}"
+        print(f"Using SSL4EO transform: {model_transform}")
     eurosat_loaders, norm_label = _build_eurosat_loaders(
         cfg,
         bands=eurosat_bands,
@@ -424,7 +424,7 @@ def run_from_args(args: argparse.Namespace) -> Path:
         model_path=args.model_path,
         ciip_epoch=args.ciip_epoch,
     )
-    out_dir = ensure_dir(cfg.output_dir / "eurosat_fewshot" / model_tag)
+    out_dir = ensure_dir(cfg.output_dir / "eurosat_fewshot" / model_tag / f"k{args.k_shot}")
     write_run_manifest(
         out_dir,
         task_name="eurosat_fewshot_1nn",
@@ -485,7 +485,7 @@ def main() -> None:
     parser.add_argument("--checkpoint", type=str, help="Path to a CIIP checkpoint.")
     parser.add_argument("--model-root", type=str, default="/local/ms-data/SSL4EO/model/", help="Root for CIIP checkpoints.")
     parser.add_argument("--model-path", type=str, help="Experiment path identifier for the model.")
-    parser.add_argument("--ciip-epoch", type=int, default=10, help="Epoch number for CIIP checkpoint to evaluate.")
+    parser.add_argument("--ciip-epoch", type=int, default=500, help="Epoch number for CIIP checkpoint to evaluate.")
     parser.add_argument(
         "--ciip-framework",
         choices=["modified_resnet", "transformer", "resnet18", "resnet50"],
