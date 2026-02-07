@@ -1,5 +1,5 @@
 from collections import OrderedDict
-from typing import Tuple, Union
+from typing import Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from torch import nn
 from torchvision.models.resnet import ResNet, Bottleneck as TorchBottleneck
 
+from .masking import apply_keep_mask, get_2d_sincos_pos_embed, random_masking
 
 
 class Bottleneck(nn.Module):
@@ -285,13 +286,21 @@ class VisionTransformer(nn.Module):
         super().__init__()
         self.input_resolution = input_resolution
         self.output_dim = output_dim
+        self.width = width
         self.conv1 = nn.Conv2d(in_channels=in_channels, out_channels=width, kernel_size=patch_size, stride=patch_size, bias=False)
         self.patch_masking = patch_masking
         self.patch_mask_ratio = patch_mask_ratio
 
         scale = width ** -0.5
         self.class_embedding = nn.Parameter(scale * torch.randn(width))
-        self.positional_embedding = nn.Parameter(scale * torch.randn((input_resolution // patch_size) ** 2 + 1, width))
+        grid_size = self._patch_grid_size()
+        pos_embed = get_2d_sincos_pos_embed(
+            width,
+            grid_size,
+            device=self.class_embedding.device,
+            dtype=self.class_embedding.dtype,
+        )
+        self.register_buffer("patch_positional_embedding", pos_embed, persistent=False)
         self.ln_pre = LayerNorm(width)
 
         self.transformer = Transformer(width, layers, heads)
@@ -337,24 +346,33 @@ class VisionTransformer(nn.Module):
                 fixed[idx, add] = True
         return fixed
 
-    def forward(self, x: torch.Tensor, keep_mask: torch.Tensor = None):
+    def forward(
+        self,
+        x: torch.Tensor,
+        keep_mask: torch.Tensor = None,
+        return_token_info: bool = False,
+    ):
         x = self.conv1(x)  # shape = [*, width, grid, grid]
         x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
         x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
+        token_info = None
         if self.patch_masking and self.training:
             num_keep = int(round(self._num_patches() * (1.0 - self.patch_mask_ratio)))
             num_keep = max(1, min(num_keep, self._num_patches()))
+            x = x + self.patch_positional_embedding.to(x.dtype)
+            x = self.ln_pre(x)
             if keep_mask is None:
-                keep_mask = self.sample_patch_keep_mask(x.shape[0], x.device)
+                x, mask, ids_restore, ids_keep = random_masking(x, self.patch_mask_ratio)
             else:
                 keep_mask = keep_mask.to(device=x.device, dtype=torch.bool)
                 keep_mask = self._fix_keep_count(keep_mask, num_keep)
-            x = x + self.positional_embedding[1:].to(x.dtype)
-            x = self.ln_pre(x)
-            keep_idx = keep_mask.nonzero(as_tuple=False)
-            keep_idx = keep_idx.view(x.shape[0], num_keep, 2)[..., 1]
-            gather_idx = keep_idx.unsqueeze(-1).expand(-1, -1, x.shape[-1])
-            x = torch.gather(x, dim=1, index=gather_idx)
+                x, mask, ids_restore, ids_keep = apply_keep_mask(x, keep_mask)
+            if return_token_info:
+                token_info = {
+                    "mask": mask,
+                    "ids_restore": ids_restore,
+                    "ids_keep": ids_keep,
+                }
         else:
             x = torch.cat(
                 [
@@ -364,7 +382,9 @@ class VisionTransformer(nn.Module):
                 ],
                 dim=1,
             )  # shape = [*, grid ** 2 + 1, width]
-            x = x + self.positional_embedding.to(x.dtype)
+            class_pos = torch.zeros(1, x.shape[-1], device=x.device, dtype=x.dtype)
+            pos_embed = torch.cat([class_pos, self.patch_positional_embedding.to(x.dtype)], dim=0)
+            x = x + pos_embed
             x = self.ln_pre(x)
 
         x = x.permute(1, 0, 2)  # NLD -> LND
@@ -373,12 +393,17 @@ class VisionTransformer(nn.Module):
 
         x = self.ln_post(x)
         if self.patch_masking and self.training:
+            if return_token_info and token_info is not None:
+                token_info["patch_tokens"] = x
             x = x.mean(dim=1)
         else:
             x = x[:, 0, :]
 
         if self.proj is not None:
             x = x @ self.proj
+
+        if return_token_info:
+            return x, token_info
 
         return x
 

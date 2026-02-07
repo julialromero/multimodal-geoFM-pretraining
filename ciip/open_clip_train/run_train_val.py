@@ -67,7 +67,8 @@ def main(args: DictConfig, start_epoch=0):
     s1_weights=args.model.pretrain.s1_weights,
     s2_weights=args.model.pretrain.s2_weights,
     patch_masking=getattr(args.model, "patch_masking", False),
-    patch_mask_ratio=getattr(args.model, "patch_mask_ratio", 0.0))
+    patch_mask_ratio=getattr(args.model, "patch_mask_ratio", 0.0),
+    recon_cfg=getattr(args, "recon", None))
 
   model = model.to(args.train.device)
 

@@ -98,6 +98,14 @@ def main(args: DictConfig, start_epoch: int = 0):
 
     model, loss = create_model_and_loss(args, device)
 
+    recon_cfg = getattr(args, "recon", None)
+    if recon_cfg is not None:
+        if not getattr(args.model, "patch_masking", False):
+            logging.warning(
+                "Reconstruction config provided but patch_masking is disabled; recon loss will be inactive."
+            )
+        logging.info("Reconstruction config: %s", recon_cfg)
+
     exclude = lambda n, p: p.ndim < 2 or "bn" in n or "ln" in n or "bias" in n or "logit_scale" in n
     named_parameters = list(model.named_parameters())
     gain_or_bias_params = {"vision": [], "text": []}

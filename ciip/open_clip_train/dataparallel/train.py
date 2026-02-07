@@ -18,6 +18,20 @@ from ciip.open_clip_train.train import (
 )
 
 
+def _compute_recon_lambda(args, epoch: int, step: int) -> float:
+    recon_cfg = getattr(args, "recon", None)
+    if recon_cfg is None:
+        return 0.0
+    base_lambda = float(getattr(recon_cfg, "lambda", 0.0))
+    warmup_steps = getattr(recon_cfg, "warmup_steps", None)
+    warmup_epochs = getattr(recon_cfg, "warmup_epochs", 0)
+    if warmup_steps is not None and step < warmup_steps:
+        return 0.0
+    if warmup_steps is None and epoch < warmup_epochs:
+        return 0.0
+    return base_lambda
+
+
 def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist_model, args, tb_writer=None):
     """DataParallel-friendly training loop (no no_sync usage)."""
     device = torch.device(args.datamodule.device)
@@ -88,7 +102,13 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                         dist_model_out = dist_model(s1, s2)
                     model_out.update({f"dist_{k}": v for k, v in dist_model_out.items()})
                 losses = loss(**model_out, output_dict=True)
-                total_loss = sum(losses.values())
+                recon_loss = model_out.get("recon_loss")
+                recon_lambda = _compute_recon_lambda(args, epoch, step)
+                recon_scaled = recon_loss * recon_lambda if recon_loss is not None else 0.0
+                total_loss = sum(losses.values()) + recon_scaled
+                if recon_loss is not None:
+                    losses["recon_loss"] = recon_scaled
+                    losses["recon_loss_raw"] = recon_loss
                 losses["loss"] = total_loss
 
             if "curv" in model_out:
@@ -169,7 +189,13 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                             curv_scalar = float(model_out["curv"].detach().item())
 
                         losses = loss(**inputs, **inputs_no_accum, output_dict=True)
-                        raw_total_loss = sum(losses.values())
+                        recon_loss = model_out.get("recon_loss")
+                        recon_lambda = _compute_recon_lambda(args, epoch, step)
+                        recon_scaled = recon_loss * recon_lambda if recon_loss is not None else 0.0
+                        raw_total_loss = sum(losses.values()) + recon_scaled
+                        if recon_loss is not None:
+                            losses["recon_loss"] = recon_scaled
+                            losses["recon_loss_raw"] = recon_loss
                         losses["loss"] = raw_total_loss
 
                     scaled_loss = raw_total_loss / args.train.accum_freq
@@ -236,6 +262,9 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 curv_scalar = loss_param_state.get("curvature")
             if curv_scalar is not None:
                 metrics_log_parts.append(f"curv: {curv_scalar:#.5g}")
+            recon_lambda = _compute_recon_lambda(args, epoch, step)
+            if recon_lambda:
+                metrics_log_parts.append(f"recon_lambda: {recon_lambda:#.5g}")
             metrics_log = " ".join(metrics_log_parts)
             samples_per_second = (
                 args.train.accum_freq * args.datamodule.batch_size * args.datamodule.world_size / batch_time_m.val

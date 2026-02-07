@@ -185,6 +185,20 @@ def backward(total_loss, scaler):
     else:
         total_loss.backward()
 
+
+def _compute_recon_lambda(args, epoch: int, step: int) -> float:
+    recon_cfg = getattr(args, "recon", None)
+    if recon_cfg is None:
+        return 0.0
+    base_lambda = float(getattr(recon_cfg, "lambda", 0.0))
+    warmup_steps = getattr(recon_cfg, "warmup_steps", None)
+    warmup_epochs = getattr(recon_cfg, "warmup_epochs", 0)
+    if warmup_steps is not None and step < warmup_steps:
+        return 0.0
+    if warmup_steps is None and epoch < warmup_epochs:
+        return 0.0
+    return base_lambda
+
 TIME_FORMAT_STR: str = "%b_%d_%H_%M_%S"
 from datetime import datetime, timedelta
 def trace_handler(prof: torch.profiler.profile):
@@ -359,7 +373,13 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                     model_out.update({f'dist_{k}': v for k, v in dist_model_out.items()})
                 losses = loss(**model_out, output_dict=True)
 
-                total_loss = sum(losses.values())
+                recon_loss = model_out.get("recon_loss")
+                recon_lambda = _compute_recon_lambda(args, epoch, step)
+                recon_scaled = recon_loss * recon_lambda if recon_loss is not None else 0.0
+                total_loss = sum(losses.values()) + recon_scaled
+                if recon_loss is not None:
+                    losses["recon_loss"] = recon_scaled
+                    losses["recon_loss_raw"] = recon_loss
                 losses["loss"] = total_loss
 
             if "curv" in model_out:
@@ -440,9 +460,13 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                             curv_scalar = float(model_out["curv"].detach().item())
 
                         losses = loss(**inputs, **inputs_no_accum, output_dict=True)
-                        # logging.info(f"Losses for batch {i_accum}, inner pass {j + 1}/{args.train.accum_freq}: {losses}")
-                        
-                        raw_total_loss = sum(losses.values())
+                        recon_loss = model_out.get("recon_loss")
+                        recon_lambda = _compute_recon_lambda(args, epoch, step)
+                        recon_scaled = recon_loss * recon_lambda if recon_loss is not None else 0.0
+                        raw_total_loss = sum(losses.values()) + recon_scaled
+                        if recon_loss is not None:
+                            losses["recon_loss"] = recon_scaled
+                            losses["recon_loss_raw"] = recon_loss
                         losses["loss"] = raw_total_loss
 
                     scaled_loss = raw_total_loss / args.train.accum_freq
@@ -539,6 +563,9 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 "scale": logit_scale_scalar,
                 "lr": optimizer.param_groups[0]["lr"]
             }
+            recon_lambda = _compute_recon_lambda(args, epoch, step)
+            if recon_lambda:
+                log_data["recon_lambda"] = recon_lambda
             log_data.update({name:val.val for name,val in losses_m.items()})
             if vc_metrics_m:
                 log_data.update({name: meter.val for name, meter in vc_metrics_m.items()})
