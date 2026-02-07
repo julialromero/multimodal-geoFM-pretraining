@@ -28,19 +28,12 @@ import skdim.id as id
 import json
 from ciip.open_clip_train.data import SSL4EODataset
 from ciip.evaluation.model_utils import build_model_from_checkpoint
+from ciip.evaluation.normalization_utils import IMAGENET_MEAN, IMAGENET_STD, MODALITY_STATS
 from visualizations.ssl4eo.embedding_collapse_diagnostics import compute_singular_values
 import neuco_downstream_loader as neuco_loader
 
 
 DEFAULT_MATRYOSHKA_DIMS: Sequence[int] = (8, 16, 64, 128, 256, 512, 1024)
-S2L1C_MEAN = [2607.345, 2393.068, 2320.225, 2373.963, 2562.536, 3110.071, 3392.832, 3321.154, 3583.77, 1838.712, 1021.753, 3205.112, 2545.798]
-S2L1C_STD = [786.523, 849.702, 875.318, 1143.578, 1126.248, 1161.98, 1273.505, 1246.79, 1342.755, 576.795, 45.626, 1340.347, 1145.036]
-
-S2L2A_MEAN = [1793.243, 1924.863, 2184.553, 2340.936, 2671.402, 3240.082, 3468.412, 3563.244, 3627.704, 3711.071, 3416.714, 2849.625]
-S2L2A_STD = [1160.144, 1201.092, 1219.943, 1397.225, 1400.035, 1373.136, 1429.17, 1485.025, 1447.836, 1652.703, 1471.002, 1365.307]
-
-IMAGENET_MEAN = [0.485, 0.456, 0.406]
-IMAGENET_STD = [0.229, 0.224, 0.225]
 
 # Sentinel-2 central wavelengths in microns (13 bands, B1..B12 incl. B10)
 S2_WAVELENGTHS_UM: List[float] = [
@@ -311,9 +304,9 @@ def build_preprocess_transform(
     if method == "bandwise":
         if mean is None or std is None:
             if tier == "s2l2a":
-                mean, std = S2L2A_MEAN, S2L2A_STD
+                mean, std = MODALITY_STATS["s2l2a"]
             else:
-                mean, std = S2L1C_MEAN, S2L1C_STD
+                mean, std = MODALITY_STATS["s2l1c"]
         return T.Compose([
             T.CenterCrop((224, 224)),
             T.Normalize(mean=mean, std=std),

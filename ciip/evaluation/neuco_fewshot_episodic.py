@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
-import re
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -13,9 +11,18 @@ import numpy as np
 import torch
 
 from ciip.evaluation.model_utils import build_evaluation_adapter
-from ciip.evaluation.unified_evaluation import (
+from ciip.evaluation.normalization_utils import (
     DEFAULT_NORMALIZATION_METHOD,
     NORMALIZATION_METHODS,
+    resolve_normalization_method,
+)
+from ciip.evaluation.output_utils import (
+    build_model_tag,
+    ensure_dir,
+    write_json,
+    write_run_manifest,
+)
+from ciip.evaluation.unified_evaluation import (
     ModelEvalConfig,
     _build_neuco_loader,
     _export_neuco,
@@ -41,20 +48,7 @@ def _resolve_checkpoint(args: argparse.Namespace) -> Path | None:
     return checkpoint_root / f"epoch_{args.ciip_epoch}.pt"
 
 
-def _sanitize_tag(value: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9._-]+", "_", value.strip()).strip("_")
-
-
-def _model_tag(args: argparse.Namespace) -> str:
-    parts: List[str] = [args.model_type]
-    if args.model_weights:
-        parts.append(args.model_weights)
-    if args.model_path:
-        parts.append(args.model_path)
-    if args.model_type == "ciip_checkpoint" and args.ciip_epoch is not None:
-        parts.append(f"epoch{args.ciip_epoch}")
-    tag = "_".join(parts)
-    return _sanitize_tag(tag) if tag else "model"
+ 
 
 
 def _select_neuco_modality(
@@ -294,9 +288,9 @@ def run_from_args(args: argparse.Namespace) -> List[Path]:
     if args.model_type == "croma" and args.croma_weights is None:
         raise ValueError("--croma-weights must be provided when --model-type=croma.")
 
-    normalization_method = args.normalization_method.lower()
-    if normalization_method == "ssl4eobandwisenorm":
-        normalization_method = "ssl4eonorm"
+    normalization_method = resolve_normalization_method(
+        args.model_in_channels, args.normalization_method
+    )
     if normalization_method not in NORMALIZATION_METHODS:
         raise ValueError(
             f"--normalization-method must be one of {', '.join(NORMALIZATION_METHODS)}; got {args.normalization_method!r}"
@@ -341,11 +335,30 @@ def run_from_args(args: argparse.Namespace) -> List[Path]:
         cfg.evaluation_modality, cfg.neuco_modalities
     )
 
-    model_tag = _model_tag(args)
-    output_dir = cfg.output_dir / f"neuco_{normalization_method}" / model_tag
-    export_dir = output_dir / "neuco_export"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    export_dir.mkdir(parents=True, exist_ok=True)
+    model_tag = build_model_tag(
+        model_type=args.model_type,
+        model_weights=args.model_weights,
+        model_path=args.model_path,
+        ciip_epoch=args.ciip_epoch,
+    )
+    output_dir = ensure_dir(cfg.output_dir / "neuco_fewshot" / model_tag / normalization_method)
+    export_dir = ensure_dir(output_dir / "neuco_export")
+    write_run_manifest(
+        output_dir,
+        task_name="neuco_fewshot_episodic",
+        config={
+            "model_type": args.model_type,
+            "model_weights": args.model_weights,
+            "model_path": args.model_path,
+            "ciip_epoch": args.ciip_epoch,
+            "model_in_channels": args.model_in_channels,
+            "normalization_method": args.normalization_method,
+            "neuco_root": args.neuco_root,
+            "annotation_path": args.annotation_path,
+            "feature": args.feature,
+            "seed": args.seed,
+        },
+    )
 
     suffix = "_s1" if active_modality.lower() == "s1" else ""
     csv_out_backbone = export_dir / f"neuco_{neuco_modality}{suffix}_backbone.csv"
@@ -488,12 +501,10 @@ def run_from_args(args: argparse.Namespace) -> List[Path]:
             print(f"[neuco] Unsupported task type {task_type} in {label_path.name}, skipping.")
             continue
 
-        out_path = (
-            output_dir
-            / f"neuco_{task_name}_limited{args.limited_label_train:g}_{args.limited_label_strategy}_"
-            f"{args.feature}_{model_tag}.json"
+        out_path = write_json(
+            output_dir / f"task_{task_name}.json",
+            results,
         )
-        out_path.write_text(json.dumps(results, indent=2))
         output_paths.append(out_path)
         print(f"[neuco] Saved results for {task_name} to {out_path}")
 

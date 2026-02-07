@@ -24,6 +24,7 @@ from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 
 from ciip.eval_utils import CustomTransform
 from ciip.evaluation.model_utils import build_model_from_checkpoint
+from ciip.evaluation.output_utils import write_run_manifest
 from ciip.evaluation.utils import plot_primary_over_epochs
 
 
@@ -649,30 +650,29 @@ def plot_results(results, k_values, metric="accuracy", output_file="few_shot_res
 
 def output_results_to_csv(results, k_values, metric="accuracy", output_dir="."):
     """
-    Write the results to a CSV file with model names as rows and k values as columns.
-    Each cell contains the metric value (accuracy or F1 score).
-    The filename includes the timestamp.
+    Write the results to a JSON file with model names as keys.
+    Each model entry contains per-k metric summaries and metadata.
     """
-    # Get the current timestamp
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    os.makedirs(output_dir, exist_ok=True)  # Ensure the directory exists
-    output_file = os.path.join(output_dir, f"results_{metric}_{timestamp}.csv")
+    os.makedirs(output_dir, exist_ok=True)
+    output_file = os.path.join(output_dir, f"results_{metric}_{timestamp}.json")
 
-    with open(output_file, mode='w', newline='') as file:
-        writer = csv.writer(file)
+    payload = {
+        "metric": metric,
+        "percent_values": list(k_values),
+        "models": {},
+    }
+    for model_name, model_results in results.items():
+        payload["models"][model_name] = {
+            str(k): {
+                f"{metric}_mean": model_results[k][f"{metric}_mean"],
+                f"{metric}_std": model_results[k][f"{metric}_std"],
+            }
+            for k in k_values
+        }
 
-        # Write header row: "Model Name" followed by k values
-        header = ["Model Name"] + [f"percent={k}" for k in k_values] + [f"Std percent={k}" for k in k_values]
-        writer.writerow(header)
-
-        # Write rows: model name followed by metric values for each k
-        for model_name, model_results in results.items():
-            row = [model_name]  # Start the row with the model name
-            for k in k_values:
-                row.append(model_results[k][f'{metric}_mean'])  # Add the metric value for each k
-            for k in k_values:
-                row.append(model_results[k][f'{metric}_std'])
-            writer.writerow(row)
+    with open(output_file, mode="w", encoding="utf-8") as file:
+        json.dump(payload, file, indent=2)
 
     print(f"Results saved to {output_file}")
 
@@ -775,40 +775,22 @@ def discover_checkpoints(
 
 def parse_results_from_csv(csv_file, metric="accuracy"):
     """
-    Reads a CSV file produced by output_results_to_csv() and reconstructs
-    the original results dictionary:
-    
-    {
-        "model_name": {
-            k_value: {f"{metric}_mean": ..., f"{metric}_std": ...},
-            ...
-        },
-        ...
-    }
+    Reads a JSON file produced by output_results_to_csv() and reconstructs
+    the original results dictionary.
     """
+    with open(csv_file, mode="r", encoding="utf-8") as file:
+        payload = json.load(file)
+
     results = {}
-
-    with open(csv_file, mode='r', newline='') as file:
-        reader = csv.reader(file)
-        header = next(reader)
-
-        # Extract k values from the header row
-        # The header format is: ["Model Name", "percent=...", ..., "Std percent=..."]
-        k_values = [float(h.split('=')[1]) for h in header[1:1 + (len(header)-1)//2]]
-
-        for row in reader:
-            model_name = row[0]
-            results[model_name] = {}
-
-            # First half are means, second half are stds
-            mean_values = [float(v) for v in row[1:1 + len(k_values)]]
-            std_values = [float(v) for v in row[1 + len(k_values):1 + 2*len(k_values)]]
-
-            for k, mean, std in zip(k_values, mean_values, std_values):
-                results[model_name][k] = {
-                    f"{metric}_mean": mean,
-                    f"{metric}_std": std
-                }
+    models = payload.get("models", {})
+    for model_name, model_results in models.items():
+        results[model_name] = {
+            float(k): {
+                f"{metric}_mean": stats.get(f"{metric}_mean"),
+                f"{metric}_std": stats.get(f"{metric}_std"),
+            }
+            for k, stats in model_results.items()
+        }
 
     return results
     
@@ -912,6 +894,17 @@ if __name__ == "__main__":
     experiment_name = f"{timestamp}"
     output_dir = os.path.join("results", "linearprobe-clf", f"normalized-{NORMALIZE}", experiment_name)
     os.makedirs(output_dir, exist_ok=True)
+
+    write_run_manifest(
+        Path(output_dir),
+        task_name="linearprobe_comparison",
+        config={
+            "experiment_name": experiment_name,
+            "normalize": NORMALIZE,
+            "percents": CONFIG.get("percents"),
+            "models": CONFIG.get("models"),
+        },
+    )
 
     log_filepath = os.path.join(output_dir, "training_log.txt")
     custom_logger = logging.getLogger(__name__)

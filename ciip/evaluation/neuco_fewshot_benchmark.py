@@ -21,9 +21,18 @@ import numpy as np
 import torch
 
 from ciip.evaluation.model_utils import build_evaluation_adapter
-from ciip.evaluation.unified_evaluation import (
+from ciip.evaluation.normalization_utils import (
     DEFAULT_NORMALIZATION_METHOD,
     NORMALIZATION_METHODS,
+    resolve_normalization_method,
+)
+from ciip.evaluation.output_utils import (
+    build_model_tag,
+    ensure_dir,
+    write_json,
+    write_run_manifest,
+)
+from ciip.evaluation.unified_evaluation import (
     ModelEvalConfig,
     _build_neuco_loader,
     _export_neuco,
@@ -46,26 +55,7 @@ def _resolve_checkpoint(args: argparse.Namespace) -> Optional[Path]:
 
 
 def _build_output_dir(args: argparse.Namespace) -> Path:
-    base = Path(args.output_dir)
-    base.mkdir(parents=True, exist_ok=True)
-    return base
-
-
-def _sanitize_tag(value: str) -> str:
-    safe = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in value.strip())
-    return safe.strip("_")
-
-
-def _model_tag(args: argparse.Namespace) -> str:
-    parts: List[str] = [args.model_type]
-    if args.model_weights:
-        parts.append(args.model_weights)
-    if args.model_path:
-        parts.append(args.model_path)
-    if args.model_type == "ciip_checkpoint" and args.ciip_epoch is not None:
-        parts.append(f"epoch{args.ciip_epoch}")
-    tag = "_".join(parts)
-    return _sanitize_tag(tag) if tag else "model"
+    return ensure_dir(Path(args.output_dir))
 
 
 def _infer_embedding_dim_from_csv(csv_path: Path) -> Optional[int]:
@@ -222,9 +212,9 @@ def run_from_args(args: argparse.Namespace) -> Path:
     if args.model_type == "croma" and args.croma_weights is None:
         raise ValueError("--croma-weights must be provided when --model-type=croma.")
 
-    normalization_method = args.normalization_method.lower()
-    if normalization_method == "ssl4eobandwisenorm":
-        normalization_method = "ssl4eonorm"
+    normalization_method = resolve_normalization_method(
+        args.model_in_channels, args.normalization_method
+    )
     if normalization_method not in NORMALIZATION_METHODS:
         raise ValueError(
             f"--normalization-method must be one of {', '.join(NORMALIZATION_METHODS)}; got {args.normalization_method!r}"
@@ -269,8 +259,15 @@ def run_from_args(args: argparse.Namespace) -> Path:
         cfg.evaluation_modality, cfg.neuco_modalities
     )
 
-    model_tag = _model_tag(args)
-    neuco_output_dir = cfg.output_dir / f"neuco_{normalization_method}" / model_tag
+    model_tag = build_model_tag(
+        model_type=args.model_type,
+        model_weights=args.model_weights,
+        model_path=args.model_path,
+        ciip_epoch=args.ciip_epoch,
+    )
+    neuco_output_dir = ensure_dir(
+        cfg.output_dir / "neuco_fewshot" / model_tag / normalization_method
+    )
     neuco_export_dir = neuco_output_dir / "neuco_export"
     neuco_export_dir.mkdir(parents=True, exist_ok=True)
     suffix = "_s1" if active_modality.lower() == "s1" else ""
@@ -362,8 +359,26 @@ def run_from_args(args: argparse.Namespace) -> Path:
         "benchmark_phase": args.benchmark_phase,
         "benchmark_summary": str(summary_path) if summary_path else None,
     }
-    out_path = neuco_output_dir / f"neuco_fewshot_run_{model_tag}.json"
-    out_path.write_text(json.dumps(results, indent=2))
+    write_run_manifest(
+        neuco_output_dir,
+        task_name="neuco_fewshot_benchmark",
+        config={
+            "model_type": args.model_type,
+            "model_weights": args.model_weights,
+            "model_path": args.model_path,
+            "ciip_epoch": args.ciip_epoch,
+            "model_in_channels": args.model_in_channels,
+            "normalization_method": args.normalization_method,
+            "neuco_root": args.neuco_root,
+            "annotation_path": args.annotation_path,
+            "limited_label_train": args.limited_label_train,
+            "limited_label_val": args.limited_label_val,
+            "limited_label_strategy": args.limited_label_strategy,
+            "task_filter": args.task_filter,
+            "seed": args.seed,
+        },
+    )
+    out_path = write_json(neuco_output_dir / "results.json", results)
 
     gc.collect()
     if torch.cuda.is_available():

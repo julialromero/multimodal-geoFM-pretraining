@@ -36,10 +36,10 @@ from tqdm import tqdm
 from torchvision import transforms
 
 from ciip.evaluation.export_neuco_embeddings import (
-    Divideby10000Normalize,
     E2SChallengeDataset,
     InputResizer,
 )
+from ciip.evaluation.normalization_utils import Divideby10000Normalize
 from ciip.evaluation.model_utils import (
     S2_WAVELENGTHS_UM,
     build_model_from_checkpoint,

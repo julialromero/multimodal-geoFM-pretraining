@@ -17,7 +17,7 @@
     {
       "model_type": "backbone_only",
       "model_weights": "remoteclip",
-      "model_in_channels": 3,
+      "model_in_channels": 3
     },
     {
       "model_type": "ciip_checkpoint",

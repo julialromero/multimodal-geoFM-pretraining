@@ -1,0 +1,17 @@
+{
+  "model_type": "ciip_checkpoint",
+  "model_root": "/local/ms-data/SSL4EO/model/",
+  "ciip_epoch": 10,
+  "croma_image_resolution": 120,
+  "eurosat_root": "/local/ms-data/EuroSAT/",
+  "eurosat_image_size": 224,
+  "normalization_method": "divideby10000",
+  "output_dir": "diagnostics/fewshot_eval",
+  "feature": "backbone",
+  "n_way": 5,
+  "k_shot": 1,
+  "knn_k": 1,
+  "queries_per_class": 15,
+  "episodes": 600,
+  "seed": 0
+}

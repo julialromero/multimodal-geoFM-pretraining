@@ -21,20 +21,24 @@ from torchvision import transforms as T
 from s2geo_dataset import S2Geo
 S2_100K_ROOT = Path("/local/ms-data/S2_100K")
 from ciip.evaluation.model_utils import build_model_from_checkpoint
+from ciip.evaluation.normalization_utils import (
+    IMAGENET_MEAN,
+    IMAGENET_STD,
+    MODALITY_STATS,
+    S2ScaleTransform,
+    SelectS2Channels10,
+)
+from ciip.evaluation.output_utils import write_run_manifest
 
-# SSL4EO V1.1
-S2L1C_MEAN = [2607.345, 2393.068, 2320.225, 2373.963, 2562.536, 3110.071, 3392.832, 3321.154, 3583.77, 1838.712, 1021.753, 3205.112, 2545.798]
-S2L1C_STD = [786.523, 849.702, 875.318, 1143.578, 1126.248, 1161.98, 1273.505, 1246.79, 1342.755, 576.795, 45.626, 1340.347, 1145.036]
-
-S2L2A_MEAN = [1793.243, 1924.863, 2184.553, 2340.936, 2671.402, 3240.082, 3468.412, 3563.244, 3627.704, 3711.071, 3416.714, 2849.625]
-S2L2A_STD = [1160.144, 1201.092, 1219.943, 1397.225, 1400.035, 1373.136, 1429.17, 1485.025, 1447.836, 1652.703, 1471.002, 1365.307]
-
-S2RGB_MEAN = [2340.936, 2184.553, 1924.863]
-S2RGB_STD = [1397.225, 1219.943, 1201.092]
-
-ssl4eo_s2a_norm_transform = T.Normalize(mean=S2L2A_MEAN, std=S2L2A_STD)
-ssl4eo_s2c_norm_transform = T.Normalize(mean=S2L1C_MEAN, std=S2L1C_STD)
-ssl4eo_rgb_norm_transform = T.Normalize(mean=S2RGB_MEAN, std=S2RGB_STD)
+ssl4eo_s2a_norm_transform = T.Normalize(
+    mean=MODALITY_STATS["s2l2a"][0], std=MODALITY_STATS["s2l2a"][1]
+)
+ssl4eo_s2c_norm_transform = T.Normalize(
+    mean=MODALITY_STATS["s2l1c"][0], std=MODALITY_STATS["s2l1c"][1]
+)
+ssl4eo_rgb_norm_transform = T.Normalize(
+    mean=MODALITY_STATS["s2l2a_rgb"][0], std=MODALITY_STATS["s2l2a_rgb"][1]
+)
 
 
 # ---------------------------------------------------------------------------
@@ -931,17 +935,6 @@ def _scalemae_feature_fn(model: nn.Module, x: torch.Tensor) -> torch.Tensor:
     return feats  # (B, D)
 
 
-# create new transform which divides all pixel values by 10000
-class S2ScaleTransform(nn.Module):
-    def __init__(self, scale: float = 10000.0):
-        super().__init__()
-        self.scale = scale
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x.float() / self.scale
-        return torch.clamp(x, 0.0, 1.0)
-
-
 class SelectRGB(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.ndim == 4:
@@ -952,29 +945,6 @@ class SelectRGB(nn.Module):
                 return x[[3, 2, 1], ...]
         return x
 
-
-class SelectS2Channels10(nn.Module):
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.ndim >= 4:
-            channel_dim = 1
-        elif x.ndim == 3:
-            channel_dim = 0
-        else:
-            return x
-
-        current = x.shape[channel_dim]
-        if current == 10:
-            return x
-
-        if current == 13:
-            keep = [1, 2, 3, 4, 5, 6, 7, 8, 11, 12]
-        elif current == 12:
-            keep = [1, 2, 3, 4, 5, 6, 7, 8, 10, 11]
-        else:
-            keep = list(range(min(current, 10)))
-
-        idx = torch.tensor(keep, device=x.device)
-        return torch.index_select(x, channel_dim, idx)
 
 # Registry of models to evaluate
 def build_model_specs() -> List[ModelSpec]:
@@ -1041,8 +1011,6 @@ def build_model_specs() -> List[ModelSpec]:
     )
 
     # # # 4. ScaleMAE Large (RGB)
-    IMAGENET_MEAN =  [0.485, 0.456, 0.406]
-    IMAGENET_STD  = [0.229, 0.224, 0.225]
     specs.append(
         ModelSpec(
             name="ScaleMAE_large_RGB",
@@ -1478,6 +1446,13 @@ def main() -> None:
     # device = torch.device("cuda")
     device = 'cuda:1' #torch.device("cuda" if torch.cuda.is_available() else "cpu")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    write_run_manifest(
+        OUTPUT_DIR,
+        task_name="intrinsic_dimension",
+        config={
+            "output_dir": str(OUTPUT_DIR),
+        },
+    )
 
     specs = build_model_specs()
 
