@@ -17,13 +17,22 @@ from typing import Dict, List, Optional
 import matplotlib.pyplot as plt
 import numpy as np
 
+from ciip.evaluation.output_utils import (
+    build_model_tag,
+    ensure_dir,
+    write_json,
+    write_run_manifest,
+)
 
 
 
 @dataclass(frozen=True)
 class ModelSpec:
-    name: str
     encoder: str
+    model_type: str
+    model_weights: Optional[str] = None
+    model_path: Optional[str] = None
+    ciip_epoch: Optional[int] = None
     encoder_weights: Optional[str] = None
 
 
@@ -71,8 +80,10 @@ DATASETS: List[DatasetSpec] = [
 
 MODELS: List[ModelSpec] = [
     ModelSpec(
-        name="ciip_s2_vit_epoch300_scaled_12k_dai_matryoshka",
         encoder="ciip_s2_vit",
+        model_type="ciip_checkpoint",
+        model_path="2026_01_29_matryoshka_vit",
+        ciip_epoch=300,
         encoder_weights="/local/ms-data/SSL4EO/model/2026_01_29_matryoshka_vit/checkpoints/epoch_300.pt",
     ),
     # ModelSpec(
@@ -93,8 +104,10 @@ MODELS: List[ModelSpec] = [
     #     encoder_weights="/local/ms-data/SSL4EO/model/1_8_2026/checkpoints/epoch_120.pt",
     # ),
     ModelSpec(
-        name="ciip_s2_vit_epoch300_scaled_12k_dai",
         encoder="ciip_s2_vit",
+        model_type="ciip_checkpoint",
+        model_path="1_28-ViT-DAI",
+        ciip_epoch=300,
         encoder_weights="/local/ms-data/SSL4EO/model/1_28-ViT-DAI/checkpoints/epoch_300.pt",
     ),
     
@@ -151,11 +164,29 @@ MODELS: List[ModelSpec] = [
     
 ]
 
+def _model_tag(model: ModelSpec) -> str:
+    return build_model_tag(
+        model_type=model.model_type,
+        model_weights=model.model_weights,
+        model_path=model.model_path,
+        ciip_epoch=model.ciip_epoch,
+    )
+
+
+def _sanitize_path_component(value: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in value.strip()).strip("_")
+
+
 def validate_models(models: List[ModelSpec]) -> None:
     for model in models:
-        if model.name != model.encoder:
-            if not model.name.startswith(model.encoder):
-                raise ValueError(f"Model name '{model.name}' must match encoder '{model.encoder}'")
+        tag = _model_tag(model)
+        if not tag:
+            raise ValueError(f"Model {model} produced an empty tag.")
+        if model.model_type == "ciip_checkpoint":
+            if not model.model_path or model.ciip_epoch is None:
+                raise ValueError(f"CIIP checkpoints must define model_path and ciip_epoch: {model}")
+        if model.model_type == "backbone_only" and not model.model_weights:
+            raise ValueError(f"Backbone-only models must define model_weights: {model}")
 
 
 
@@ -253,6 +284,60 @@ def write_experiment_csv(exp_dir: Path, row: Dict[str, object]) -> Path:
     return out_path
 
 
+def write_results_output(
+    output_root: Path,
+    *,
+    dataset: DatasetSpec,
+    model: ModelSpec,
+    normalization: str,
+    preprocessing: str,
+    metrics: Dict[str, float],
+    exp_dir: Path,
+    log_path: Path,
+    label_split: str,
+) -> Path:
+    model_tag = _model_tag(model)
+    output_dir = ensure_dir(
+        output_root
+        / "pangaea_segmentation"
+        / label_split
+        / model_tag
+        / _sanitize_path_component(dataset.name)
+        / _sanitize_path_component(normalization)
+        / _sanitize_path_component(preprocessing)
+    )
+    config = {
+        "dataset": dataset.name,
+        "encoder": model.encoder,
+        "encoder_weights": model.encoder_weights,
+        "decoder": dataset.decoder,
+        "preprocessing": preprocessing,
+        "criterion": dataset.criterion,
+        "task": dataset.task,
+        "normalization": normalization,
+        "model_type": model.model_type,
+        "model_weights": model.model_weights,
+        "model_path": model.model_path,
+        "ciip_epoch": model.ciip_epoch,
+        "label_split": label_split,
+    }
+    write_run_manifest(
+        output_dir,
+        task_name="pangaea_segmentation",
+        config=config,
+        extra={"exp_dir": str(exp_dir), "log_path": str(log_path)},
+    )
+    results = {
+        **config,
+        "exp_dir": str(exp_dir),
+        "log_path": str(log_path),
+        "mIoU": metrics["mIoU"],
+        "mF1": metrics["mF1"],
+        "mAcc": metrics["mAcc"],
+    }
+    return write_json(output_dir / "results.json", results)
+
+
 def load_experiment_rows(result_root: Path) -> List[Dict[str, object]]:
     rows: List[Dict[str, object]] = []
     for csv_path in result_root.rglob("metrics.csv"):
@@ -273,7 +358,7 @@ def to_float(value: object) -> float:
 def plot_metrics(rows: List[Dict[str, object]], output_dir: Path) -> None:
     datasets_order = [d.name for d in DATASETS]
     metrics = [("mIoU", "Mean IoU"), ("mF1", "F1 Score"), ("mAcc", "Accuracy")]
-    models = [m.name for m in MODELS]
+    models = [_model_tag(m) for m in MODELS]
     colors = {name: plt.get_cmap("tab10")(idx % 10) for idx, name in enumerate(models)}
 
     for norm_key in NORMALIZATION_VARIANTS:
@@ -342,6 +427,12 @@ def main() -> None:
         help="Directory to store experiment outputs.",
     )
     parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Directory to write standardized results outputs.",
+    )
+    parser.add_argument(
         "--torchrun",
         type=str,
         default="torchrun",
@@ -371,6 +462,7 @@ def main() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     work_dir = args.work_dir.resolve()
     work_dir.mkdir(parents=True, exist_ok=True)
+    output_root = (args.output_dir or work_dir / "evaluation_outputs").resolve()
 
     results_root = work_dir / "metrics"
     results_root.mkdir(parents=True, exist_ok=True)
@@ -390,12 +482,13 @@ def main() -> None:
         for model in MODELS:
             for norm_key in NORMALIZATION_VARIANTS:
                 preprocessing = pick_preprocessing(dataset.preprocessing, norm_key)
-                result_key = (dataset.name, model.name, norm_key, preprocessing)
+                model_tag = _model_tag(model)
+                result_key = (dataset.name, model_tag, norm_key, preprocessing)
                 if result_key in existing_results:
-                    print(f"Skipping existing result: dataset={dataset.name}, model={model.name}, "
+                    print(f"Skipping existing result: dataset={dataset.name}, model={model_tag}, "
                           f"normalization={norm_key}, preprocessing={preprocessing}")
                     continue
-                master_port = base_master_port + (hash((dataset.name, model.name, norm_key)) % 1000)
+                master_port = base_master_port + (hash((dataset.name, model_tag, norm_key)) % 1000)
                 cmd = [
                     args.torchrun,
                     "--nnodes=1",
@@ -430,17 +523,21 @@ def main() -> None:
                     continue
 
                 before_dirs = {p for p in work_dir.iterdir() if p.is_dir()}
-                print(f"\n\n------\n\nStarting experiment for model={model.name}, dataset={dataset.name}, normalization={norm_key}")
+                print(
+                    f"\n\n------\n\nStarting experiment for model={model_tag}, "
+                    f"dataset={dataset.name}, normalization={norm_key}"
+                )
                 subprocess.run(cmd, check=True, cwd=repo_root, env=env)
                 exp_dir = find_new_experiment_dir(work_dir, before_dirs)
 
                 log_path = find_log_file(exp_dir)
                 metrics = parse_segmentation_metrics(log_path, split="test")
+                label_split = "full"
 
                 row = {
                     "experiment": exp_dir.name,
                     "dataset": dataset.name,
-                    "model": model.encoder,
+                    "model": model_tag,
                     "normalization": norm_key,
                     "preprocessing": preprocessing,
                     "mIoU": metrics["mIoU"],
@@ -450,6 +547,17 @@ def main() -> None:
                     "exp_dir": str(exp_dir),
                 }
                 metrics_csv = write_experiment_csv(exp_dir, row)
+                write_results_output(
+                    output_root,
+                    dataset=dataset,
+                    model=model,
+                    normalization=norm_key,
+                    preprocessing=preprocessing,
+                    metrics=metrics,
+                    exp_dir=exp_dir,
+                    log_path=log_path,
+                    label_split=label_split,
+                )
                 rows.append(row)
                 existing_results.add(result_key)
 
