@@ -101,6 +101,10 @@ loss:
   learn_curv: True
   entail_weight: 0.0
 
+recon:
+  lambda: 0.1
+  warmup_epochs: 5
+
 datamodule:
   batch_size: 2 #2 #6 # batch size per GPU
   world_size:

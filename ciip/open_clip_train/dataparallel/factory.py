@@ -36,7 +36,11 @@ def _load_checkpoint_if_available(model: torch.nn.Module, resume_path: str, devi
 
 
 def create_model(args: DictConfig, device: torch.device) -> torch.nn.Module:
-    model = build_ciip_architecture(args.model, getattr(args, "loss", None))
+    model = build_ciip_architecture(
+        args.model,
+        getattr(args, "loss", None),
+        recon_cfg=getattr(args, "recon", None),
+    )
     model = finalize_model(model, device, getattr(args.model, "precision", "fp32"))
     _load_checkpoint_if_available(model, getattr(args.io, "resume", ""), device)
     return maybe_data_parallel(model)
