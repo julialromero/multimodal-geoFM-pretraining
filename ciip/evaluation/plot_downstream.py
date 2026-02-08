@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -86,9 +87,26 @@ def _format_model_label(payload: Mapping[str, object]) -> str:
         ciip_epoch=payload.get("ciip_epoch"),
     )
     normalization = payload.get("normalization_method") or payload.get("normalization_label")
+    model_label = _clean_model_label(model_label)
     if normalization:
-        return f"{model_label} ({normalization})"
+        return f"{model_label} {_clean_model_label(str(normalization))}".strip()
     return model_label
+
+
+def _clean_model_label(label: str) -> str:
+    cleaned = label.replace("backbone_only_", "").replace("backbone_only", "")
+    cleaned = cleaned.replace("_", " ").replace("-", " ")
+    cleaned = cleaned.replace("(", " ").replace(")", " ")
+    cleaned = " ".join(cleaned.split())
+    cleaned = re.sub(r"\bciip checkpoint\b", "CIIP", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bclip\b", "CLIP", cleaned, flags=re.IGNORECASE)
+    return cleaned
+
+
+def _format_tick(value: float) -> str:
+    if float(value).is_integer():
+        return str(int(value))
+    return f"{value:g}"
 
 
 def _iter_eurosat_fewshot_results(root: Path, *, knn_k: Optional[int]) -> Iterable[Tuple[str, float, float]]:
@@ -116,8 +134,10 @@ def plot_eurosat_fewshot(root: Path, output_dir: Path, *, knn_k: Optional[int]) 
         return None
 
     data: Dict[str, List[Tuple[float, float]]] = {}
+    x_values: set[float] = set()
     for model, k_shot, score in records:
         data.setdefault(model, []).append((k_shot, score))
+        x_values.add(k_shot)
 
     fig, ax = plt.subplots(figsize=(8, 5))
     for model, points in sorted(data.items()):
@@ -135,11 +155,14 @@ def plot_eurosat_fewshot(root: Path, output_dir: Path, *, knn_k: Optional[int]) 
         title += f" (kNN k={knn_k})"
     ax.set_title(title)
     ax.grid(True, linestyle="--", alpha=0.4)
-    ax.legend(loc="best")
-    fig.tight_layout()
+    tick_values = sorted(x_values)
+    ax.set_xticks(tick_values)
+    ax.set_xticklabels([_format_tick(value) for value in tick_values])
+    ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1), borderaxespad=0, frameon=False)
+    fig.tight_layout(rect=[0, 0, 0.78, 1])
 
     out_path = output_dir / "eurosat_fewshot_lineplot.png"
-    fig.savefig(out_path, dpi=300)
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
     print(f"[plot_downstream] Saved {out_path}")
     return out_path
@@ -183,6 +206,7 @@ def plot_neuco_fewshot_tasks(root: Path, output_dir: Path) -> Optional[Path]:
         return None
 
     grouped = _group_fewshot(records)
+    tick_values = sorted({record.x_value for record in records})
     n_tasks = len(NEUCO_TASKS)
     cols = 2
     rows = int(np.ceil(n_tasks / cols))
@@ -203,6 +227,8 @@ def plot_neuco_fewshot_tasks(root: Path, output_dir: Path) -> Optional[Path]:
         ax.set_title(task)
         ax.set_ylabel("Raw score")
         ax.grid(True, linestyle="--", alpha=0.4)
+        ax.set_xticks(tick_values)
+        ax.set_xticklabels([_format_tick(value) for value in tick_values])
         if idx // cols == rows - 1:
             ax.set_xlabel("Limited-label train fraction")
 
@@ -294,6 +320,8 @@ def plot_neuco_fewshot_aggregates(root: Path, output_dir: Path) -> Optional[Path
     axes[0].set_ylabel("Raw score")
     axes[0].set_xlabel("Limited-label train fraction")
     axes[0].grid(True, linestyle="--", alpha=0.4)
+    axes[0].set_xticks(x_values)
+    axes[0].set_xticklabels([_format_tick(value) for value in x_values])
 
     for model, by_x in sorted(norm_scores.items()):
         points = [(x, by_x.get(x)) for x in x_values if x in by_x]
@@ -310,6 +338,8 @@ def plot_neuco_fewshot_aggregates(root: Path, output_dir: Path) -> Optional[Path
     axes[1].set_ylabel("Normalized score")
     axes[1].set_xlabel("Limited-label train fraction")
     axes[1].grid(True, linestyle="--", alpha=0.4)
+    axes[1].set_xticks(x_values)
+    axes[1].set_xticklabels([_format_tick(value) for value in x_values])
 
     handles, labels = axes[0].get_legend_handles_labels()
     if handles:
@@ -339,7 +369,7 @@ def _collect_unified_eurosat_knn(root: Path) -> Dict[str, Dict[float, float]]:
         name = path.name.lower()
         if "eurosat" not in name or "knn" not in name:
             continue
-        model_label = path.relative_to(root).parts[0]
+        model_label = _clean_model_label(path.relative_to(root).parts[0])
         payload = _read_json(path)
         for key, metrics in payload.items():
             frac = _parse_fraction_key(key)
@@ -389,7 +419,7 @@ def _iter_unified_neuco_results(root: Path) -> Iterable[UnifiedRecord]:
         task_results = payload.get("task_results")
         if not isinstance(task_results, dict):
             continue
-        model_label = path.relative_to(root).parts[0]
+        model_label = _clean_model_label(path.relative_to(root).parts[0])
         for task, task_payload in task_results.items():
             if task not in NEUCO_TASKS:
                 continue
