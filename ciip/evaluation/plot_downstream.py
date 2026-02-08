@@ -89,12 +89,14 @@ def _format_model_label(payload: Mapping[str, object]) -> str:
     normalization = payload.get("normalization_method") or payload.get("normalization_label")
     model_label = _clean_model_label(model_label)
     if normalization:
-        return f"{model_label} ({_clean_model_label(str(normalization))})"
+        return f"{model_label} {_clean_model_label(str(normalization))}".strip()
     return model_label
 
 
 def _clean_model_label(label: str) -> str:
-    cleaned = label.replace("_", " ").replace("-", " ")
+    cleaned = label.replace("backbone_only_", "").replace("backbone_only", "")
+    cleaned = cleaned.replace("_", " ").replace("-", " ")
+    cleaned = cleaned.replace("(", " ").replace(")", " ")
     cleaned = " ".join(cleaned.split())
     cleaned = re.sub(r"\bciip checkpoint\b", "CIIP", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\bclip\b", "CLIP", cleaned, flags=re.IGNORECASE)
