@@ -109,10 +109,21 @@ def _format_tick(value: float) -> str:
     return f"{value:g}"
 
 
+def _has_run_manifest(path: Path, root: Path) -> bool:
+    for parent in (path, *path.parents):
+        if (parent / "run_manifest.json").exists():
+            return True
+        if parent == root:
+            break
+    return False
+
+
 def _iter_eurosat_fewshot_results(root: Path, *, knn_k: Optional[int]) -> Iterable[Tuple[str, float, float]]:
     if not root.exists():
         return
     for path in root.rglob("results.json"):
+        if not _has_run_manifest(path.parent, root):
+            continue
         if "eurosat_fewshot" not in path.parts:
             continue
         payload = _read_json(path)
@@ -172,6 +183,8 @@ def _iter_neuco_fewshot_results(root: Path) -> Iterable[FewshotRecord]:
     if not root.exists():
         return
     for path in root.rglob("task_*.json"):
+        if not _has_run_manifest(path.parent, root):
+            continue
         if "neuco_fewshot" not in path.parts:
             continue
         payload = _read_json(path)
@@ -366,6 +379,8 @@ def _collect_unified_eurosat_knn(root: Path) -> Dict[str, Dict[float, float]]:
     if not root.exists():
         return results
     for path in root.rglob("*metrics.json"):
+        if not _has_run_manifest(path.parent, root):
+            continue
         name = path.name.lower()
         if "eurosat" not in name or "knn" not in name:
             continue
@@ -415,6 +430,8 @@ def _iter_unified_neuco_results(root: Path) -> Iterable[UnifiedRecord]:
     if not root.exists():
         return
     for path in root.rglob("results_summary.json"):
+        if not _has_run_manifest(path.parent, root):
+            continue
         payload = _read_json(path)
         task_results = payload.get("task_results")
         if not isinstance(task_results, dict):
