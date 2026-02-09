@@ -1,4 +1,4 @@
-"""NeuCo limited-label evaluation with stratified sampling and k-NN probes."""
+"""NeuCo limited-label evaluation with stratified sampling and linear probes."""
 
 from __future__ import annotations
 
@@ -14,7 +14,8 @@ from ciip.evaluation.model_utils import build_evaluation_adapter
 from ciip.evaluation.normalization_utils import (
     DEFAULT_NORMALIZATION_METHOD,
     NORMALIZATION_METHODS,
-    resolve_normalization_method,
+    resolve_normalization_method_for_weights,
+    select_ssl4eo_transform,
 )
 from ciip.evaluation.output_utils import (
     build_model_tag,
@@ -197,68 +198,33 @@ def _apply_sampling(
     return [rows[idx] for idx in indices.tolist()]
 
 
-def _l2_normalize(features: np.ndarray) -> np.ndarray:
-    denom = np.linalg.norm(features, axis=1, keepdims=True)
-    denom = np.clip(denom, 1e-12, None)
-    return features / denom
-
-
-def _knn_classify(
-    train_feats: np.ndarray,
-    train_labels: List[str],
-    test_feats: np.ndarray,
-    k: int,
-) -> Tuple[np.ndarray, Dict[str, int]]:
-    if train_feats.shape[0] == 0 or test_feats.shape[0] == 0:
-        return np.array([], dtype=np.int64), {}
-    labels = sorted(set(train_labels))
-    label_to_idx = {label: idx for idx, label in enumerate(labels)}
-    train_encoded = np.asarray([label_to_idx[label] for label in train_labels], dtype=np.int64)
-    k = min(k, train_feats.shape[0])
-    train_norm = _l2_normalize(train_feats)
-    test_norm = _l2_normalize(test_feats)
-    sims = test_norm @ train_norm.T
-    if k == 1:
-        nn_indices = np.argmax(sims, axis=1)
-        preds = train_encoded[nn_indices]
-        return preds, label_to_idx
-    topk = np.argpartition(-sims, k - 1, axis=1)[:, :k]
-    preds: List[int] = []
-    for row_idx, idxs in enumerate(topk):
-        row_labels = train_encoded[idxs]
-        row_scores = sims[row_idx, idxs]
-        weights = np.maximum(row_scores, 0.0)
-        if weights.sum() == 0:
-            weights = np.ones_like(weights)
-        cls_scores = np.bincount(row_labels, weights=weights, minlength=len(labels))
-        preds.append(int(np.argmax(cls_scores)))
-    return np.asarray(preds, dtype=np.int64), label_to_idx
-
-
-def _knn_regress(
+def _fit_linear_regression(
     train_feats: np.ndarray,
     train_values: np.ndarray,
+    *,
+    l2_reg: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    if train_feats.shape[0] == 0:
+        return np.array([], dtype=np.float64), np.array([], dtype=np.float64)
+    x = train_feats.astype(np.float64, copy=False)
+    y = train_values.astype(np.float64, copy=False)
+    x_aug = np.concatenate([x, np.ones((x.shape[0], 1), dtype=x.dtype)], axis=1)
+    xtx = x_aug.T @ x_aug
+    reg = np.eye(xtx.shape[0], dtype=xtx.dtype) * l2_reg
+    reg[-1, -1] = 0.0
+    weights = np.linalg.solve(xtx + reg, x_aug.T @ y)
+    return weights, x_aug
+
+
+def _predict_linear_regression(
+    weights: np.ndarray,
     test_feats: np.ndarray,
-    k: int,
 ) -> np.ndarray:
-    if train_feats.shape[0] == 0 or test_feats.shape[0] == 0:
+    if test_feats.shape[0] == 0:
         return np.array([], dtype=np.float64)
-    k = min(k, train_feats.shape[0])
-    train_norm = _l2_normalize(train_feats)
-    test_norm = _l2_normalize(test_feats)
-    sims = test_norm @ train_norm.T
-    if k == 1:
-        nn_indices = np.argmax(sims, axis=1)
-        return train_values[nn_indices]
-    topk = np.argpartition(-sims, k - 1, axis=1)[:, :k]
-    preds = np.zeros(test_feats.shape[0], dtype=np.float64)
-    for row_idx, idxs in enumerate(topk):
-        row_scores = sims[row_idx, idxs]
-        distances = 1.0 - row_scores
-        weights = 1.0 / (distances + 1e-6)
-        pred = np.sum(weights * train_values[idxs]) / np.sum(weights)
-        preds[row_idx] = pred
-    return preds
+    x = test_feats.astype(np.float64, copy=False)
+    x_aug = np.concatenate([x, np.ones((x.shape[0], 1), dtype=x.dtype)], axis=1)
+    return x_aug @ weights
 
 
 def _filter_rows(rows: List[Dict[str, str]], id_to_index: Dict[str, int]) -> Tuple[np.ndarray, List[str]]:
@@ -273,6 +239,7 @@ def _filter_rows(rows: List[Dict[str, str]], id_to_index: Dict[str, int]) -> Tup
 
 
 def run_from_args(args: argparse.Namespace) -> List[Path]:
+    print("Running NeuCo fewshot episodic evaluation with the following configuration:")
     if args.model_in_channels is None:
         if args.model_weights == "remoteclip":
             args.model_in_channels = 3
@@ -288,8 +255,8 @@ def run_from_args(args: argparse.Namespace) -> List[Path]:
     if args.model_type == "croma" and args.croma_weights is None:
         raise ValueError("--croma-weights must be provided when --model-type=croma.")
 
-    normalization_method = resolve_normalization_method(
-        args.model_in_channels, args.normalization_method
+    normalization_method = resolve_normalization_method_for_weights(
+        args.model_in_channels, args.normalization_method, args.model_weights
     )
     if normalization_method not in NORMALIZATION_METHODS:
         raise ValueError(
@@ -341,8 +308,10 @@ def run_from_args(args: argparse.Namespace) -> List[Path]:
         model_path=args.model_path,
         ciip_epoch=args.ciip_epoch,
     )
-    output_dir = ensure_dir(cfg.output_dir / "neuco_fewshot" / model_tag / normalization_method)
-    export_dir = ensure_dir(output_dir / "neuco_export")
+    normalization_label = normalization_method
+    base_output_dir = ensure_dir(cfg.output_dir / "neuco_fewshot" / model_tag / normalization_label)
+    output_dir = ensure_dir(base_output_dir / f"train{args.limited_label_train}")
+    export_dir = ensure_dir(base_output_dir / "neuco_export")
     write_run_manifest(
         output_dir,
         task_name="neuco_fewshot_episodic",
@@ -353,23 +322,32 @@ def run_from_args(args: argparse.Namespace) -> List[Path]:
             "ciip_epoch": args.ciip_epoch,
             "model_in_channels": args.model_in_channels,
             "normalization_method": args.normalization_method,
+            "normalization_label": normalization_label,
             "neuco_root": args.neuco_root,
             "annotation_path": args.annotation_path,
             "feature": args.feature,
+            "linear_l2_reg": args.linear_l2_reg,
             "seed": args.seed,
         },
     )
 
     suffix = "_s1" if active_modality.lower() == "s1" else ""
     csv_out_backbone = export_dir / f"neuco_{neuco_modality}{suffix}_backbone.csv"
+    print(
+        f"NeuCo embeddings CSV path: {csv_out_backbone} "
+        f"(reuse_embeddings={args.reuse_embeddings})"
+    )
 
     embeddings: Optional[np.ndarray] = None
     projected: Optional[np.ndarray] = None
     ids: List[str] = []
 
     if args.reuse_embeddings and csv_out_backbone.exists():
+        print(f"Reusing cached embeddings from {csv_out_backbone}.")
         ids, embeddings = _load_neuco_csv_embeddings(csv_out_backbone)
+        print(f"Loaded {len(ids)} embeddings from {csv_out_backbone} due to --reuse-embeddings.")
     else:
+        print(f"Extracting NeuCo embeddings for modality {active_modality} using model {model_tag}...")
         neuco_loader = _build_neuco_loader(cfg, modalities=[neuco_modality])
         expected_channels = _infer_model_in_channels(
             adapter, cfg.model_in_channels, modality=active_modality
@@ -450,10 +428,11 @@ def run_from_args(args: argparse.Namespace) -> List[Path]:
             "eval_total": len(eval_rows),
             "train_used": int(train_indices.size),
             "eval_used": int(eval_indices.size),
-            "knn_k": args.knn_k,
+            "linear_l2_reg": args.linear_l2_reg,
             "feature": args.feature,
             "feature_dim": int(features.shape[1]),
             "normalization_method": normalization_method,
+            "normalization_label": normalization_label,
             "evaluation_modality": active_modality,
             "neuco_modality": neuco_modality,
             "model_type": args.model_type,
@@ -464,30 +443,16 @@ def run_from_args(args: argparse.Namespace) -> List[Path]:
             "seed": args.seed,
         }
 
-        if task_type == "cls":
-            preds, label_to_idx = _knn_classify(train_feats, train_labels, eval_feats, args.knn_k)
-            eval_encoded = []
-            valid_mask = []
-            for idx, label in enumerate(eval_labels):
-                if label in label_to_idx:
-                    eval_encoded.append(label_to_idx[label])
-                    valid_mask.append(idx)
-            if valid_mask:
-                preds = preds[valid_mask]
-                eval_encoded = np.asarray(eval_encoded, dtype=np.int64)
-                accuracy = float(np.mean(preds == eval_encoded)) if preds.size else 0.0
-            else:
-                accuracy = 0.0
-            results.update(
-                {
-                    "accuracy": accuracy,
-                    "eval_dropped": int(len(eval_labels) - len(valid_mask)),
-                }
-            )
-        elif task_type == "regr":
+
+        if task_type == "regr":
             train_values = np.asarray([float(label) for label in train_labels], dtype=np.float64)
             eval_values = np.asarray([float(label) for label in eval_labels], dtype=np.float64)
-            preds = _knn_regress(train_feats, train_values, eval_feats, args.knn_k)
+            weights, _ = _fit_linear_regression(
+                train_feats,
+                train_values,
+                l2_reg=args.linear_l2_reg,
+            )
+            preds = _predict_linear_regression(weights, eval_feats)
             if preds.size:
                 residuals = preds - eval_values
                 mae = float(np.mean(np.abs(residuals)))
@@ -531,7 +496,7 @@ def _load_neuco_csv_embeddings(csv_path: Path) -> Tuple[List[str], np.ndarray]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Run NeuCo limited-label evaluation with stratified sampling and k-NN probes."
+        description="Run NeuCo limited-label evaluation with stratified sampling and linear probes."
     )
     parser.add_argument(
         "--model-type",
@@ -560,7 +525,7 @@ def main() -> None:
     parser.add_argument("--checkpoint", type=str, help="Path to a CIIP checkpoint.")
     parser.add_argument("--model-root", type=str, default="/local/ms-data/SSL4EO/model/", help="Root for CIIP checkpoints.")
     parser.add_argument("--model-path", type=str, help="Experiment path identifier for the model.")
-    parser.add_argument("--ciip-epoch", type=int, default=10, help="Epoch number for CIIP checkpoint to evaluate.")
+    parser.add_argument("--ciip-epoch", type=int, default=500, help="Epoch number for CIIP checkpoint to evaluate.")
     parser.add_argument(
         "--ciip-framework",
         choices=["modified_resnet", "transformer", "resnet18", "resnet50"],
@@ -587,7 +552,12 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, default=Path("diagnostics/neuco_fewshot"), help="Output directory.")
     parser.add_argument("--annotation-path", type=Path, default=Path("/local/ms-data/SSL4EO-S12-downstream/labels"), help="NeuCo labels root.")
     parser.add_argument("--feature", choices=["backbone", "projected"], default="backbone", help="Embedding space to use.")
-    parser.add_argument("--knn-k", type=int, default=3, help="Number of neighbors for k-NN classification/regression.")
+    parser.add_argument(
+        "--linear-l2-reg",
+        type=float,
+        default=1e-6,
+        help="L2 regularization for the linear regression probe.",
+    )
     parser.add_argument("--limited-label-train", type=float, default=0.1, help="Fraction of train labels to keep.")
     parser.add_argument("--limited-label-val", type=float, default=1.0, help="Fraction of eval labels to keep.")
     parser.add_argument(

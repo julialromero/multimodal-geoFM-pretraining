@@ -37,6 +37,14 @@ _SSL4EO_ALIAS = "ssl4eobandwisenorm"
 
 _S2L2A_KEEP_10 = [1, 2, 3, 4, 5, 6, 7, 8, 10, 11]
 
+IMAGENET_MODEL_WEIGHTS = {
+    "scalemae_large_rgb",
+    "resnet18_s2_rgb_moco",
+    "resnet50_s2_rgb_moco",
+    "resnet152_imagenet_rgb",
+    "remoteclip",
+}
+
 MODALITY_STATS: Dict[str, Tuple[Sequence[float], Sequence[float]]] = {
     "s2l1c": (S2L1C_MEAN, S2L1C_STD),
     "s2l2a": (S2L2A_MEAN, S2L2A_STD),
@@ -150,7 +158,8 @@ class S2ScaleTransform(nn.Module):
         self.scale = scale
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x / self.scale
+        x = x / self.scale
+        return x
 
 
 class SelectS2Channels10(nn.Module):
@@ -181,23 +190,29 @@ def resolve_normalization_method(
     model_in_channels: Optional[int],
     normalization_method: Optional[str],
 ) -> str:
+    if model_in_channels == 3:
+        return NORMALIZATION_METHOD_IMAGENET #NORMALIZATION_METHOD_BANDWISE
     normalized = (normalization_method or "").strip().lower()
     if normalized == _SSL4EO_ALIAS:
         return NORMALIZATION_METHOD_SSL4EO
     if normalized:
-        if (
-            normalized == NORMALIZATION_METHOD_DIVIDE
-            and model_in_channels == 3
-        ):
-            return NORMALIZATION_METHOD_IMAGENET
         return normalized
-    if model_in_channels == 3:
-        return NORMALIZATION_METHOD_IMAGENET
     return DEFAULT_NORMALIZATION_METHOD
 
 
+def resolve_normalization_method_for_weights(
+    model_in_channels: Optional[int],
+    normalization_method: Optional[str],
+    model_weights: Optional[str],
+) -> str:
+    method = resolve_normalization_method(model_in_channels, normalization_method)
+    if (model_weights or "").lower() in IMAGENET_MODEL_WEIGHTS:
+        return NORMALIZATION_METHOD_IMAGENET
+    return method
+
+
 def build_imagenet_normalization() -> T.Compose:
-    return T.Compose([Divideby10000Normalize(), T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)])
+    return T.Compose([T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)])
 
 
 def build_normalization_transform(
@@ -209,6 +224,7 @@ def build_normalization_transform(
     if normalized == NORMALIZATION_METHOD_IMAGENET:
         return build_imagenet_normalization()
     if normalized == NORMALIZATION_METHOD_BANDWISE:
+        raise ValueError("Bandwise normalization requires mean/std stats, which are not provided by default.")
         if bandwise_stats is None:
             raise ValueError("bandwise normalization requires mean/std stats")
         mean, std = bandwise_stats
@@ -229,6 +245,12 @@ SSL4EO_MODEL_TRANSFORMS: Dict[str, Callable[[torch.Tensor], torch.Tensor]] = {
         [
             T.CenterCrop((224, 224)),
             build_imagenet_normalization(),
+        ]
+    ),
+    "moco": T.Compose(
+        [
+            T.CenterCrop((224, 224)),
+            S2ScaleTransform(scale=10000.0),
         ]
     ),
     "resnet18_s2_all_moco": T.Compose(
@@ -314,6 +336,12 @@ SSL4EO_MODEL_TRANSFORMS: Dict[str, Callable[[torch.Tensor], torch.Tensor]] = {
         [
             T.Resize((120, 120)),
             CromaNormalize(use_8_bit=False),
+        ]
+    ),
+    "dino": T.Compose(
+        [
+            T.CenterCrop((224, 224)),
+            S2ScaleTransform(scale=10000.0),
         ]
     ),
 }

@@ -138,6 +138,7 @@ class SSL4EODataset(Dataset):
         self.seasons = seasons
         self.transforms = transforms
         self.temporal_agg = temporal_agg
+        self.s2_jitter = BandwiseJitter(sigma=0.02, kind="multiplicative", p=0.8)
         # New behavior: optionally return all timestamps so downstream can run the
         # model per-season and average embeddings. Keep backward compatibility by
         # honoring temporal_agg="mean" as a request to return all timestamps
@@ -212,11 +213,11 @@ class SSL4EODataset(Dataset):
         s2: torch.Tensor,  # (P, 12, H, W)
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Apply joint spatial transforms + per-modality transforms.
+        Apply per-modality transforms.
 
         s1, s2: (P, C, H, W) where P = num_samples_per_file (64).
-        We apply the SAME crop/flip to all 64 samples and both modalities,
-        then apply s1_transforms/s2_transforms per sample.
+        Each modality transform runs per patch and is expected to handle
+        normalization and resizing consistently.
         """
         if self.transforms is None:
             return s1, s2
@@ -233,28 +234,6 @@ class SSL4EODataset(Dataset):
         # print descr stats of s2 before transforms
         # print(f'S2 before transforms: mean={s2_tensor.mean().item():.4f}, std={s2_tensor.std().item():.4f}, min={s2_tensor.min().item():.4f}, max={s2_tensor.max().item():.4f}')
     
-
-        if self.is_train:
-            # Use first sample to get crop params, then apply to all P
-            i, j, h, w = T.RandomCrop.get_params(s1_tensor[0], output_size=(224, 224))
-            s1_tensor = torch.stack(
-                [F.crop(s1_tensor[p], i, j, h, w) for p in range(P)],
-                dim=0,
-            )
-            s2_tensor = torch.stack(
-                [F.crop(s2_tensor[p], i, j, h, w) for p in range(P)],
-                dim=0,
-            )
-
-            # Joint horizontal flip
-            if random.random() < 0.5:
-                s1_tensor = torch.flip(s1_tensor, dims=[3])  # flip W
-                s2_tensor = torch.flip(s2_tensor, dims=[3])
-
-            # Joint vertical flip
-            if random.random() < 0.5:
-                s1_tensor = torch.flip(s1_tensor, dims=[2])  # flip H
-                s2_tensor = torch.flip(s2_tensor, dims=[2])
 
         # Apply modality-specific transforms per patch
         s1_out = torch.stack(
@@ -316,6 +295,12 @@ class SSL4EODataset(Dataset):
                     elif s2_t.ndim == 4 and s2_t.shape[1] >= 4:
                         s2_t = s2_t[:, [3, 2, 1], ...]
 
+                if self.is_train:
+                    s2_t = torch.stack(
+                        [self.s2_jitter(s2_t[p]) for p in range(P)],
+                        dim=0,
+                    )
+
                 s1_t, s2_t = self._apply_transforms(s1_t, s2_t)
                 s1_list.append(s1_t)
                 s2_list.append(s2_t)
@@ -335,6 +320,12 @@ class SSL4EODataset(Dataset):
                     s2 = s2[[3, 2, 1], ...]
                 elif s2.ndim == 4 and s2.shape[1] >= 4:
                     s2 = s2[:, [3, 2, 1], ...]
+
+            if self.is_train:
+                s2 = torch.stack(
+                    [self.s2_jitter(s2[p]) for p in range(P)],
+                    dim=0,
+                )
 
             s1, s2 = self._apply_transforms(s1, s2)
 
@@ -370,6 +361,7 @@ class SSL4EOTextDataset(Dataset):
         self.transforms = transforms
         self.caption_column = caption_column
         self.tokenize = tokenizer or partial(clip_tokenize, context_length=77)
+        self.s2_jitter = BandwiseJitter(sigma=0.02, kind="multiplicative", p=0.8)
         if transforms is not None:
             self.s2_transforms = transforms.get("s2")
         else:
@@ -429,14 +421,6 @@ class SSL4EOTextDataset(Dataset):
         assert C in (3, 12, 13), f"Unexpected S2 channel count: {C}"
 
         s2_tensor = s2
-        if self.is_train:
-            i, j, h, w = T.RandomCrop.get_params(s2_tensor[0], output_size=(224, 224))
-            s2_tensor = torch.stack([F.crop(s2_tensor[p], i, j, h, w) for p in range(P)], dim=0)
-            if random.random() < 0.5:
-                s2_tensor = torch.flip(s2_tensor, dims=[3])
-            if random.random() < 0.5:
-                s2_tensor = torch.flip(s2_tensor, dims=[2])
-
         s2_out = torch.stack([self.s2_transforms(s2_tensor[p]) for p in range(P)], dim=0)
         return s2_out
 
@@ -464,6 +448,12 @@ class SSL4EOTextDataset(Dataset):
         if self.is_rgb:
             if s2.ndim == 4 and s2.shape[1] >= 4:
                 s2 = s2[:, [3, 2, 1], ...]
+
+        if self.is_train:
+            s2 = torch.stack(
+                [self.s2_jitter(s2[p]) for p in range(P)],
+                dim=0,
+            )
 
         s2 = self._apply_s2_only_transforms(s2)
         text_tokens = self.tokenize(captions_for_time)
@@ -495,6 +485,7 @@ class SSL4EOAlignedTrioDataset(Dataset):
         self.transforms = transforms
         self.caption_column = caption_column
         self.tokenize = tokenizer or partial(clip_tokenize, context_length=77)
+        self.s2_jitter = BandwiseJitter(sigma=0.02, kind="multiplicative", p=0.8)
         if transforms is not None:
             self.s1_transforms = transforms.get("s1")
             self.s2_transforms = transforms.get("s2")
@@ -569,17 +560,6 @@ class SSL4EOAlignedTrioDataset(Dataset):
 
         s1_tensor = s1
         s2_tensor = s2
-        if self.is_train:
-            i, j, h, w = T.RandomCrop.get_params(s1_tensor[0], output_size=(224, 224))
-            s1_tensor = torch.stack([F.crop(s1_tensor[p], i, j, h, w) for p in range(P)], dim=0)
-            s2_tensor = torch.stack([F.crop(s2_tensor[p], i, j, h, w) for p in range(P)], dim=0)
-            if random.random() < 0.5:
-                s1_tensor = torch.flip(s1_tensor, dims=[3])
-                s2_tensor = torch.flip(s2_tensor, dims=[3])
-            if random.random() < 0.5:
-                s1_tensor = torch.flip(s1_tensor, dims=[2])
-                s2_tensor = torch.flip(s2_tensor, dims=[2])
-
         s1_out = torch.stack([self.s1_transforms(s1_tensor[p]) for p in range(P)], dim=0)
         s2_out = torch.stack([self.s2_transforms(s2_tensor[p]) for p in range(P)], dim=0)
         return s1_out, s2_out
@@ -614,6 +594,12 @@ class SSL4EOAlignedTrioDataset(Dataset):
 
         if self.is_rgb and s2.ndim == 4 and s2.shape[1] >= 4:
             s2 = s2[:, [3, 2, 1], ...]
+
+        if self.is_train:
+            s2 = torch.stack(
+                [self.s2_jitter(s2[p]) for p in range(P)],
+                dim=0,
+            )
 
         s1, s2 = self._apply_transforms(s1, s2)
 
@@ -1097,69 +1083,87 @@ class Clamp_S1:
     def __call__(self, img: torch.Tensor) -> torch.Tensor:
         img = torch.clamp(img, -25.0, 0.0)
         return img + 25.0 / 25.0
+
+
+class SentinelNormalize:
+    """
+    Normalization for Sentinel imagery (2-sigma clipping -> uint8).
+    Mirrors ciip.evaluation.normalization_utils.SentinelNormalize.
+    """
+
+    def __init__(self, mean, std):
+        self.mean = np.array(mean)
+        self.std = np.array(std)
+
+    def __call__(self, x, *args, **kwargs):
+        if torch.is_tensor(x):
+            if x.ndim == 4:
+                mean_t = torch.as_tensor(self.mean, dtype=x.dtype, device=x.device).view(1, -1, 1, 1)
+                std_t = torch.as_tensor(self.std, dtype=x.dtype, device=x.device).view(1, -1, 1, 1)
+            elif x.ndim == 3:
+                mean_t = torch.as_tensor(self.mean, dtype=x.dtype, device=x.device).view(-1, 1, 1)
+                std_t = torch.as_tensor(self.std, dtype=x.dtype, device=x.device).view(-1, 1, 1)
+            else:
+                raise ValueError(f"Expected CxHxW or NxCxHxW input, got {x.shape}")
+            min_value = mean_t - 2 * std_t
+            max_value = mean_t + 2 * std_t
+            denom = max_value - min_value
+            denom = torch.where(denom == 0, torch.ones_like(denom), denom)
+            img = (x - min_value) / denom * 255.0
+            img = torch.clamp(img, 0, 255).to(torch.uint8)
+            return img
+
+        min_value = self.mean - 2 * self.std
+        max_value = self.mean + 2 * self.std
+        img = (x - min_value) / (max_value - min_value) * 255.0
+        img = np.clip(img, 0, 255).astype(np.uint8)
+        return img
+
+
+class SSL4EOTransform(torch.nn.Module):
+    def __init__(
+        self,
+        mean: Sequence[float],
+        std: Sequence[float],
+        size: int | Tuple[int, int] = (120, 120),
+        interpol_mode: T.InterpolationMode = T.InterpolationMode.BICUBIC,
+    ):
+        super().__init__()
+        self.normalize = SentinelNormalize(mean, std)
+        if isinstance(size, int):
+            size = (size, size)
+        self.resize = T.Resize(size, interpolation=interpol_mode)
+
+    def forward(self, x: np.ndarray | torch.Tensor) -> torch.Tensor:
+        if isinstance(x, np.ndarray):
+            x = torch.from_numpy(x)
+
+        squeeze_batch = False
+        if x.ndim == 3:
+            x = x.unsqueeze(0)
+            squeeze_batch = True
+
+        x = self.normalize(x)
+        if isinstance(x, np.ndarray):
+            x = torch.from_numpy(x)
+        x = x.float().div(255.0)
+        x = self.resize(x)
+
+        if squeeze_batch:
+            x = x.squeeze(0)
+        return x
     
 
 
 def get_transform(modality, is_train):
     if modality == "s1":
-        if is_train:
-            return transforms.Compose([
-                # transforms.Normalize(mean=S1GRD_MEAN, std=S1GRD_STD),
-                Clamp_S1()
-            ])
-        else:
-            # raise NotImplementedError("S1 validation transforms - check norm method.")
-            return transforms.Compose([
-                transforms.CenterCrop(224),
-                Clamp_S1()
-                # transforms.Normalize(mean=S1GRD_MEAN, std=S1GRD_STD),
-            ])
+        return SSL4EOTransform(mean=S1GRD_MEAN, std=S1GRD_STD, size=(224, 224))
     elif modality.lower() == "s2a" or modality.lower() == "s2l2a":
-        if is_train:
-            return transforms.Compose([
-                transforms.RandomApply(
-                    [transforms.GaussianBlur(kernel_size=3)],
-                    p=0.3,
-                ),
-                BandwiseJitter(sigma=0.02, kind="multiplicative", p=0.8),
-                # transforms.Normalize(mean=S2L2A_MEAN, std=S2L2A_STD),
-                Divideby10000Normalize(),
-                # clamp 0-1
-
-            ])
-        else:
-            # raise NotImplementedError("S2 validation transforms - check norm method.")
-            return transforms.Compose([
-                    transforms.CenterCrop(224),
-                    # transforms.Normalize(mean=S2L2A_MEAN, std=S2L2A_STD),
-                    Divideby10000Normalize(),
-                ])
+        return SSL4EOTransform(mean=S2L2A_MEAN, std=S2L2A_STD, size=(224, 224))
     elif modality.lower() == "s2c" or modality.lower() == "s2l1c":
-        if is_train:
-            return transforms.Compose([
-                transforms.RandomApply(
-                    [transforms.GaussianBlur(kernel_size=3)],
-                    p=0.3,
-                ),
-                BandwiseJitter(sigma=0.02, kind="multiplicative", p=0.8),
-                transforms.Normalize(mean=S2L1C_MEAN, std=S2L1C_STD),
-                
-
-            ])
-        else:
-            print("Using S2 13 band L1C normalization.")
-            return transforms.Compose([
-                transforms.CenterCrop(224),
-                transforms.Normalize(mean=S2L1C_MEAN, std=S2L1C_STD),
-            ])
+        return SSL4EOTransform(mean=S2L1C_MEAN, std=S2L1C_STD, size=(224, 224))
     elif modality=='rgb':
-        if is_train:
-            raise NotImplementedError("RGB transforms not implemented yet.")
-        else:
-            return transforms.Compose([
-                transforms.CenterCrop(224),
-                transforms.Normalize(mean=S2RGB_MEAN, std=S2RGB_STD),
-            ])
+        return SSL4EOTransform(mean=S2RGB_MEAN, std=S2RGB_STD, size=(224, 224))
     else:
         raise ValueError(f"Unsupported modality: {modality}")
 

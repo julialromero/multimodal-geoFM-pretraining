@@ -10,7 +10,6 @@
   "model_root": "/local/ms-data/SSL4EO/model/",
   "croma_image_resolution": 120,
   "feature": "backbone",
-  "knn_k": 3,
   "limited_label_train": 0.1,
   "limited_label_val": 1.0,
   "limited_label_strategy": "stratified",
@@ -18,7 +17,7 @@
   "val_frac": 0.2,
   "task_filter": null,
   "seed": 0,
-  "reuse_embeddings": false,
-  "export_embeddings": false,
+  "reuse_embeddings": true,
+  "export_embeddings": true,
   "summary_json": null
 }

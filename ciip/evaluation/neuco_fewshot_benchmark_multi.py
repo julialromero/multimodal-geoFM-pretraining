@@ -56,6 +56,12 @@ def main() -> None:
     parser.add_argument("--croma-image-resolution", type=int, default=120, help="Input resolution expected by CROMA.")
     parser.add_argument("--feature", choices=["backbone", "projected"], default="backbone", help="Embedding space to use.")
     parser.add_argument("--knn-k", type=int, default=3, help="Number of neighbors for k-NN classification/regression.")
+    parser.add_argument(
+        "--linear-l2-reg",
+        type=float,
+        default=1e-6,
+        help="L2 regularization for the linear regression probe.",
+    )
     parser.add_argument("--limited-label-train", type=float, default=0.1, help="Fraction of train labels to keep.")
     parser.add_argument("--limited-label-val", type=float, default=1.0, help="Fraction of eval labels to keep.")
     parser.add_argument(
@@ -93,7 +99,6 @@ def main() -> None:
         model_root=args.model_root,
         croma_weights=args.croma_weights,
         croma_image_resolution=args.croma_image_resolution,
-        eurosat_root=Path("/local/ms-data/EuroSAT/"),
         neuco_root=args.neuco_root,
         neuco_modalities=args.neuco_modalities,
         neuco_seasons=args.neuco_seasons,
@@ -103,6 +108,7 @@ def main() -> None:
         annotation_path=args.annotation_path,
         feature=args.feature,
         knn_k=args.knn_k,
+        linear_l2_reg=args.linear_l2_reg,
         limited_label_train=args.limited_label_train,
         limited_label_val=args.limited_label_val,
         limited_label_strategy=args.limited_label_strategy,

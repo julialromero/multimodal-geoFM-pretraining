@@ -1124,8 +1124,7 @@ def build_model_specs() -> List[ModelSpec]:
             builder=_load_llama3_ms_clip_model,
             transform=T.Compose([
                 T.CenterCrop((224, 224)),
-                # S2ScaleTransform(scale=10000.0),
-                raise ValueError("LLaMA-3 MS-CLIP model expects 10-channel input; ensure your dataset is configured to provide this."),
+                ssl4eo_s2a_norm_transform,
                 SelectS2Channels10(),
             ]),
             feature_fn=_open_clip_vit_feature_fn,
