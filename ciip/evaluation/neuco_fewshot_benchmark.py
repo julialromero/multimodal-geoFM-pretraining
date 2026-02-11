@@ -38,8 +38,13 @@ from ciip.evaluation.unified_evaluation import (
     _export_neuco,
     _extract_embeddings,
     _infer_model_in_channels,
+    _normalize_explicit_method,
+    _resolve_model_transform,
+    _sanitize_label,
     _use_adapter_modality,
 )
+
+_AUTO_NORMALIZATION_METHOD = "auto"
 
 
 def _resolve_checkpoint(args: argparse.Namespace) -> Optional[Path]:
@@ -161,19 +166,19 @@ def _prepare_fewshot_annotations(
     return output_root
 
 
-def _select_neuco_modality(
-    evaluation_modality: str, neuco_modalities: Sequence[str]
-) -> Tuple[str, str]:
-    evaluation_modality = evaluation_modality.lower()
-    modalities = list(neuco_modalities)
-    if evaluation_modality == "s1":
-        return "s1", "s1"
-    s2_candidates = [m for m in modalities if m in ("s2l2a", "s2l1c")]
-    if s2_candidates:
-        return s2_candidates[0], "s2"
-    if modalities:
-        return modalities[0], "s2"
-    return "s2l1c", "s2"
+# def _select_neuco_modality(
+#     evaluation_modality: str, neuco_modalities: Sequence[str]
+# ) -> Tuple[str, str]:
+#     evaluation_modality = evaluation_modality.lower()
+#     modalities = list(neuco_modalities)
+#     if evaluation_modality == "s1":
+#         return "s1", "s1"
+#     s2_candidates = [m for m in modalities if m in ("s2l2a", "s2l1c")]
+#     if s2_candidates:
+#         return s2_candidates[0], "s2"
+#     if modalities:
+#         return modalities[0], "s2"
+#     return "s2l1c", "s2"
 
 
 def _find_latest_benchmark_summary(
@@ -212,10 +217,12 @@ def run_from_args(args: argparse.Namespace) -> Path:
     if args.model_type == "croma" and args.croma_weights is None:
         raise ValueError("--croma-weights must be provided when --model-type=croma.")
 
-    normalization_method = resolve_normalization_method(
-        args.model_in_channels, args.normalization_method
-    )
-    if normalization_method not in NORMALIZATION_METHODS:
+    normalization_override = args.normalization_method
+    if normalization_override == _AUTO_NORMALIZATION_METHOD:
+        normalization_override = None
+    normalization_override = _normalize_explicit_method(normalization_override)
+    normalization_method = normalization_override
+    if normalization_method is not None and normalization_method not in NORMALIZATION_METHODS:
         raise ValueError(
             f"--normalization-method must be one of {', '.join(NORMALIZATION_METHODS)}; got {args.normalization_method!r}"
         )
@@ -236,9 +243,19 @@ def run_from_args(args: argparse.Namespace) -> Path:
         evaluation_modality=args.evaluation_modality,
         neuco_modalities=tuple(args.neuco_modalities),
         neuco_seasons=args.neuco_seasons,
-        normalization_method=normalization_method,
+        normalization_method=normalization_override,
+        neuco_normalization_method=normalization_method,
         random_seed=args.seed,
     )
+    normalization_label = normalization_method
+    if normalization_override is None:
+        _, transform_label = _resolve_model_transform(cfg)
+        if transform_label:
+            normalization_label = _sanitize_label(transform_label)
+        else:
+            normalization_label = resolve_normalization_method(
+                args.model_in_channels, normalization_override
+            )
 
     adapter = build_evaluation_adapter(
         model_type=cfg.model_type,
@@ -255,9 +272,22 @@ def run_from_args(args: argparse.Namespace) -> Path:
     adapter = adapter.to(device)
     adapter.eval()
 
-    neuco_modality, active_modality = _select_neuco_modality(
-        cfg.evaluation_modality, cfg.neuco_modalities
-    )
+    if args.model_in_channels:# and args.neuco_modalities:
+        if args.model_in_channels == 12:
+            print('Setting modalities to s2l2a')
+            # args.neuco_modalities = ['s2l2a']
+            neuco_modality = 's2l2a'
+        if args.model_in_channels == 13:
+            print('Setting modalities to s2l1c')
+            # args.neuco_modalities = ['s2l1c']
+            neuco_modality = 's2l1c'
+        if args.model_in_channels == 10 and (args.model_weights == "llama3_ms_clip_base"):
+            print('Setting modalities to s2l2a for MS-CLIP (10ch)')
+            neuco_modality = 's2l2a'
+        if args.model_in_channels == 3 or args.model_weights == "remoteclip":
+            print('Setting modalities to rgb for RGB model')
+            neuco_modality = 'rgb'
+    active_modality = 's2'
 
     model_tag = build_model_tag(
         model_type=args.model_type,
@@ -265,10 +295,18 @@ def run_from_args(args: argparse.Namespace) -> Path:
         model_path=args.model_path,
         ciip_epoch=args.ciip_epoch,
     )
+    embed_model_tag = model_tag
+    if args.model_type == "ciip_checkpoint":
+        is_vit = args.ciip_framework == "transformer" or "vit" in (args.model_path or "").lower()
+        if is_vit:
+            embed_model_tag = f"{model_tag}_meanpool"
     neuco_output_dir = ensure_dir(
-        cfg.output_dir / "neuco_fewshot" / model_tag / normalization_method
+        Path("diagnostics/neuco_fewshot") / "neuco_fewshot" / model_tag / normalization_label
     )
-    neuco_export_dir = neuco_output_dir / "neuco_export"
+    embed_output_dir = ensure_dir(
+        Path("diagnostics/unified_eval") / embed_model_tag / f"neuco_{normalization_label}"
+    )
+    neuco_export_dir = embed_output_dir / "neuco_export"
     neuco_export_dir.mkdir(parents=True, exist_ok=True)
     suffix = "_s1" if active_modality.lower() == "s1" else ""
     csv_out_backbone = neuco_export_dir / f"neuco_{neuco_modality}{suffix}_backbone.csv"
@@ -358,7 +396,8 @@ def run_from_args(args: argparse.Namespace) -> Path:
         "model_weights": args.model_weights,
         "model_path": args.model_path,
         "ciip_epoch": args.ciip_epoch,
-        "normalization_method": normalization_method,
+        "normalization_method": normalization_label,
+        "normalization_label": normalization_label,
         "evaluation_modality": active_modality,
         "neuco_modality": neuco_modality,
         "embedding_dim": embedding_dim,
@@ -381,6 +420,7 @@ def run_from_args(args: argparse.Namespace) -> Path:
             "ciip_epoch": args.ciip_epoch,
             "model_in_channels": args.model_in_channels,
             "normalization_method": args.normalization_method,
+            "normalization_label": normalization_label,
             "neuco_root": args.neuco_root,
             "annotation_path": args.annotation_path,
             "limited_label_train": args.limited_label_train,
@@ -406,12 +446,14 @@ def main() -> None:
     parser.add_argument(
         "--model-type",
         default="ciip_checkpoint",
-        choices=["ciip_checkpoint", "torchgeo_resnet50", "croma", "backbone_only"],
+        choices=["ciip_checkpoint", "torchgeo_resnet50", "croma", "backbone_only", "galileo_s2", "galileo"],
         help="Model source to evaluate.",
     )
     parser.add_argument(
         "--model-weights",
         choices=[
+            "ciip_bandwise",
+            "ciip_10kscale",
             "dino",
             "moco",
             "rcf_13ch",
@@ -424,6 +466,8 @@ def main() -> None:
             "vitsmall16_s2_all_moco",
             "llama3_ms_clip_base",
             "remoteclip",
+            "croma",
+            "vitsmall16_s2_all_dino"
         ],
         help="Pretrained weight selection for the requested model type.",
     )
@@ -451,8 +495,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--normalization-method",
-        choices=tuple(NORMALIZATION_METHODS) + ("ssl4eobandwisenorm",),
-        default=DEFAULT_NORMALIZATION_METHOD,
+        choices=tuple(NORMALIZATION_METHODS) + ("ssl4eobandwisenorm", _AUTO_NORMALIZATION_METHOD),
+        default="ssl4eonorm",
         help="Normalization applied to NeuCo inputs.",
     )
     parser.add_argument("--output-dir", type=Path, default=Path("diagnostics/neuco_fewshot"), help="Output directory.")

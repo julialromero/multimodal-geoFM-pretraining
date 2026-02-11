@@ -33,7 +33,10 @@ from ciip.model_ciip import CIIP, LorentzCIIP
 from torchvision.models import resnet152, ResNet152_Weights
 
 _CROMA_MODULE: Optional[ModuleType] = None
+_GALILEO_MODULE: Optional[ModuleType] = None
 PANGAEA_CONFIG_ROOT = Path("/local/ms-data/pangaea-bench/configs")
+GALILEO_SINGLE_FILE = Path("/local/ms-data/galileo/single_file_galileo.py")
+GALILEO_DEFAULT_WEIGHTS = Path("/local/ms-data/pangaea-bench/pretrained_models/models/base")
 
 
 class RandomConvFeatures(nn.Module):
@@ -83,6 +86,29 @@ def _load_croma_module() -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     _CROMA_MODULE = module
+    return module
+
+
+def _load_galileo_module() -> ModuleType:
+    """Dynamically import the Galileo single-file helper without extra dependencies."""
+
+    global _GALILEO_MODULE
+    if _GALILEO_MODULE is not None:
+        return _GALILEO_MODULE
+
+    if not GALILEO_SINGLE_FILE.exists():
+        raise FileNotFoundError(
+            "Galileo weights requested but single_file_galileo.py was not found. "
+            f"Expected it at {GALILEO_SINGLE_FILE}."
+        )
+
+    spec = importlib.util.spec_from_file_location("galileo_single_file", GALILEO_SINGLE_FILE)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Unable to import Galileo utilities from '{GALILEO_SINGLE_FILE}'.")
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _GALILEO_MODULE = module
     return module
 
 
@@ -674,6 +700,192 @@ class RemoteClipEvaluationAdapter(EvaluationAdapter):
         return None
 
 
+class GalileoS2Wrapper(nn.Module):
+    """Thin wrapper around Galileo encoder for Sentinel-2-only evaluation."""
+
+    S2_BAND_ORDERING = [
+        "B1",
+        "B2",
+        "B3",
+        "B4",
+        "B5",
+        "B6",
+        "B7",
+        "B8",
+        "B8A",
+        "B9",
+        "B10",
+        "B11",
+        "B12",
+    ]
+
+    def __init__(
+        self,
+        pretrained_path: Path,
+        *,
+        patch_size: int = 8,
+        month: int = 6,
+        do_pool: bool = True,
+        add_layernorm_on_exit: bool = True,
+    ) -> None:
+        super().__init__()
+
+        module = _load_galileo_module()
+        Encoder = getattr(module, "Encoder")
+
+        self.encoder = Encoder.load_from_folder(pretrained_path, device=torch.device("cpu"))
+        self.encoder.eval()
+        self.encoder.requires_grad_(False)
+
+        self.dim = self.encoder.embedding_size
+        self.patch_size = patch_size
+        self.do_pool = do_pool
+        self.month = month
+        self.add_layernorm_on_exit = add_layernorm_on_exit
+
+        self._space_time_bands = module.SPACE_TIME_BANDS
+        self._space_time_groups_idx = module.SPACE_TIME_BANDS_GROUPS_IDX
+        self._space_bands = module.SPACE_BANDS
+        self._time_bands = module.TIME_BANDS
+        self._static_bands = module.STATIC_BANDS
+        self._space_band_groups_idx = module.SPACE_BAND_GROUPS_IDX
+        self._time_band_groups_idx = module.TIME_BAND_GROUPS_IDX
+        self._static_band_groups_idx = module.STATIC_BAND_GROUPS_IDX
+        self._s2_bands = module.S2_BANDS
+
+        kept_s2_band_names = [val for val in self.S2_BAND_ORDERING if val in self._s2_bands]
+        self._kept_s2_band_idx = [
+            i for i, v in enumerate(self.S2_BAND_ORDERING) if v in self._s2_bands
+        ]
+        self._to_galileo_s2_map = [
+            self._space_time_bands.index(val) for val in kept_s2_band_names
+        ]
+        self._s2_group_indices = [
+            idx for idx, key in enumerate(self._space_time_groups_idx) if "S2" in key
+        ]
+
+    def _preprocess_s2(self, s2: torch.Tensor):
+        if s2.ndim == 4:
+            b, h, w, c_s2 = s2.shape
+            t = 1
+        elif s2.ndim == 5:
+            b, h, w, t, c_s2 = s2.shape
+        else:
+            raise ValueError(f"Expected Galileo input with 4 or 5 dims, got {s2.shape}")
+
+        if c_s2 != len(self.S2_BAND_ORDERING):
+            raise ValueError(
+                f"Galileo expects {len(self.S2_BAND_ORDERING)} S2 channels (L1C order); "
+                f"got {c_s2}."
+            )
+
+        s_t_x = torch.zeros(
+            (b, h, w, t, len(self._space_time_bands)),
+            dtype=s2.dtype,
+            device=s2.device,
+        )
+        if s2.ndim == 4:
+            s_t_x[:, :, :, 0, self._to_galileo_s2_map] = s2[:, :, :, self._kept_s2_band_idx]
+        else:
+            s_t_x[:, :, :, :, self._to_galileo_s2_map] = s2[:, :, :, :, self._kept_s2_band_idx]
+
+        s_t_m = torch.ones(
+            (b, h, w, t, len(self._space_time_groups_idx)),
+            dtype=s2.dtype,
+            device=s2.device,
+        )
+        s_t_m[:, :, :, :, self._s2_group_indices] = 0
+
+        months = torch.ones((b, t), dtype=s2.dtype, device=s2.device) * self.month
+
+        return (
+            s_t_x,
+            torch.zeros((b, h, w, len(self._space_bands)), dtype=s2.dtype, device=s2.device),
+            torch.zeros((b, t, len(self._time_bands)), dtype=s2.dtype, device=s2.device),
+            torch.zeros((b, len(self._static_bands)), dtype=s2.dtype, device=s2.device),
+            s_t_m,
+            torch.ones((b, h, w, len(self._space_band_groups_idx)), dtype=s2.dtype, device=s2.device),
+            torch.ones((b, t, len(self._time_band_groups_idx)), dtype=s2.dtype, device=s2.device),
+            torch.ones((b, len(self._static_band_groups_idx)), dtype=s2.dtype, device=s2.device),
+            months.long(),
+        )
+
+    def forward(self, s2: torch.Tensor) -> torch.Tensor:
+        (
+            s_t_x,
+            sp_x,
+            t_x,
+            st_x,
+            s_t_m,
+            sp_m,
+            t_m,
+            st_m,
+            month,
+        ) = self._preprocess_s2(s2)
+
+        output = self.encoder(
+            s_t_x,
+            sp_x,
+            t_x,
+            st_x,
+            s_t_m,
+            sp_m,
+            t_m,
+            st_m,
+            month,
+            patch_size=self.patch_size,
+            add_layernorm_on_exit=self.add_layernorm_on_exit,
+        )
+        s_t_x, sp_x, t_x, st_x, s_t_m, sp_m, t_m, st_m, _ = output
+        if self.do_pool:
+            return self.encoder.average_tokens(s_t_x, sp_x, t_x, st_x, s_t_m, sp_m, t_m, st_m)
+        s2_tokens = s_t_x[:, :, :, :, self._s2_group_indices, :].mean(dim=3)
+        s2_tokens = s2_tokens.reshape(s2_tokens.shape[0], -1, s2_tokens.shape[-1])
+        return s2_tokens.mean(dim=1)
+
+
+class GalileoEvaluationAdapter(EvaluationAdapter):
+    """Adapter around the Galileo base encoder for Sentinel-2."""
+
+    supports_ssl4eo = True
+
+    def __init__(self, model: nn.Module) -> None:
+        super().__init__()
+        self.base_model = model.eval()
+        self.encoder_s2 = model
+        self.encoder_s1 = None
+        self.dtype_s2 = torch.float32
+        self.dtype_s1 = torch.float32
+
+    def prepare_inputs(self, batch: Any, *, device: torch.device, modality: str = "s2") -> torch.Tensor:
+        if modality.lower() != "s2":
+            raise ValueError("Galileo adapter only supports Sentinel-2 inputs.")
+        tensor = super().prepare_inputs(batch, device=device, modality=modality)
+        if isinstance(tensor, torch.Tensor) and tensor.ndim == 3:
+            tensor = tensor.unsqueeze(0)
+        if isinstance(tensor, torch.Tensor) and tensor.ndim == 4:
+            tensor = tensor.permute(0, 2, 3, 1)
+        elif isinstance(tensor, torch.Tensor) and tensor.ndim == 5:
+            tensor = tensor.permute(0, 3, 4, 1, 2)
+        return tensor
+
+    def compute_backbone(self, images: torch.Tensor, modality: str = "s2") -> torch.Tensor:
+        if modality.lower() != "s2":
+            raise ValueError("Galileo adapter only supports Sentinel-2 inputs.")
+        features = self.encoder_s2(images)
+        if isinstance(features, (tuple, list)):
+            features = features[0]
+        if features.ndim > 2:
+            features = features.flatten(start_dim=1)
+        return features
+
+    def compute_embeddings(
+        self, images: Any, modality: str = "s2"
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+        backbone = self.compute_backbone(images, modality=modality)
+        return backbone, None, None
+
+
 class CromaEvaluationAdapter(EvaluationAdapter):
     """Adapter around the published CROMA base checkpoint."""
 
@@ -1218,6 +1430,8 @@ def _build_backbone_adapter(model_weights: Optional[str]) -> EvaluationAdapter:
         model.fc = nn.Identity()
     elif normalized == "vitsmall16_s2_all_moco":
         model = vit_small_patch16_224(weights=ViTSmall16_Weights.SENTINEL2_ALL_MOCO)
+    elif normalized == "vitsmall16_s2_all_dino":
+        model = vit_small_patch16_224(weights=ViTSmall16_Weights.SENTINEL2_ALL_DINO)
     elif normalized == "llama3_ms_clip_base":
         return _build_llama3_ms_clip_adapter()
     elif normalized == "remoteclip":
@@ -1238,6 +1452,7 @@ def build_evaluation_adapter(
     croma_weights: Optional[Path] = None,
     croma_image_resolution: int = 120,
     ciip_framework: Optional[str] = None,
+    galileo_weights: Optional[Path] = None,
     enable_s1: bool = True,
 ) -> EvaluationAdapter:
     """Create an evaluation adapter based on the requested model type."""
@@ -1255,6 +1470,15 @@ def build_evaluation_adapter(
     if model_type == "backbone_only":
         return _build_backbone_adapter(model_weights)
 
+    if model_type in {"galileo_s2", "galileo"}:
+        weights_path = galileo_weights or GALILEO_DEFAULT_WEIGHTS
+        if not weights_path.exists():
+            raise FileNotFoundError(f"Galileo weights not found at {weights_path}.")
+        model = GalileoS2Wrapper(weights_path)
+        model.eval()
+        model.requires_grad_(False)
+        return GalileoEvaluationAdapter(model)
+
     if model_type == "croma":
         if croma_weights is None:
             raise ValueError("'croma_weights' must be provided when model_type='croma'.")
@@ -1265,7 +1489,7 @@ def build_evaluation_adapter(
 
     raise ValueError(
         f"Unsupported model_type '{model_type}'. "
-        "Valid options are 'ciip_checkpoint', 'torchgeo_resnet50', 'backbone_only' and 'croma'."
+        "Valid options are 'ciip_checkpoint', 'torchgeo_resnet50', 'backbone_only', 'galileo_s2', 'galileo' and 'croma'."
     )
 
 
@@ -1276,6 +1500,7 @@ __all__ = [
     "BackboneOnlyAdapter",
     "OpenClipVisionAdapter",
     "RemoteClipEvaluationAdapter",
+    "GalileoEvaluationAdapter",
     "CromaEvaluationAdapter",
     "build_model_from_checkpoint",
     "build_evaluation_adapter",

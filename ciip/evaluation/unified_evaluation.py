@@ -74,6 +74,100 @@ def _looks_like_vit_checkpoint(checkpoint_path: Optional[Path]) -> bool:
             return True
     return False
 
+
+def _sanitize_label(value: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip())
+    return safe.strip("_")
+
+
+_AUTO_NORMALIZATION_METHOD = "auto"
+
+
+def _log_transform(label: str, transform: object) -> None:
+    print(f"{label}: {transform}")
+    steps: List[object]
+    if isinstance(transform, transforms.Compose):
+        steps = list(transform.transforms)
+    else:
+        steps = [transform]
+    for step in steps:
+        if isinstance(step, SSL4EOTransform):
+            norm = step.normalize
+            print(
+                f"{label} normalization: SSL4EOTransform "
+                f"mean={norm.mean.tolist()} std={norm.std.tolist()}"
+            )
+        elif isinstance(step, CromaNormalize):
+            norm = step.normalize
+            print(
+                f"{label} normalization: CromaNormalize "
+                f"mean={norm.mean.tolist()} std={norm.std.tolist()}"
+            )
+
+
+def _normalize_explicit_method(method: Optional[str]) -> Optional[str]:
+    if method is None:
+        return None
+    normalized = method.strip().lower()
+    if normalized == "ssl4eobandwisenorm":
+        return NORMALIZATION_METHOD_SSL4EO
+    return normalized
+
+
+def _resolve_ssl4eo_transform_key(config: ModelEvalConfig) -> str:
+    candidates: List[str] = []
+    for key in (config.model_weights, config.model_type):
+        if key:
+            candidates.append(key)
+    if config.model_path:
+        normalized = config.model_path.lower()
+        if "matryoshka" in normalized and "vit" in normalized:
+            candidates.append("ciip_matryoshka_vit")
+        if "vit" in normalized and "dai" in normalized:
+            candidates.append("ciip_vit_dai")
+        if "text" in normalized:
+            candidates.append("ciip_text_s2")
+    for key in candidates:
+        key_lower = key.lower()
+        if key_lower in SSL4EO_MODEL_TRANSFORMS:
+            return key_lower
+    raise ValueError(
+        "No SSL4EO transform found for model. "
+        f"Checked keys: {', '.join(candidates) if candidates else 'none'}."
+    )
+
+
+def _resolve_ssl4eo_transform(config: ModelEvalConfig) -> Tuple[Callable[[torch.Tensor], torch.Tensor], str]:
+    key = _resolve_ssl4eo_transform_key(config)
+    return SSL4EO_MODEL_TRANSFORMS[key], key
+
+
+def _is_spatial_transform(step: object) -> bool:
+    return isinstance(
+        step,
+        (
+            transforms.Resize,
+            transforms.CenterCrop,
+            transforms.RandomResizedCrop,
+            transforms.RandomCrop,
+            transforms.FiveCrop,
+            transforms.TenCrop,
+        ),
+    )
+
+
+def _strip_spatial_transforms(transform: Optional[Callable[[torch.Tensor], torch.Tensor]]) -> Optional[Callable[[torch.Tensor], torch.Tensor]]:
+    if transform is None:
+        return None
+    if isinstance(transform, transforms.Compose):
+        filtered = [step for step in transform.transforms if not _is_spatial_transform(step)]
+        if not filtered:
+            return transforms.Lambda(lambda x: x)
+        return transforms.Compose(filtered)
+    if _is_spatial_transform(transform):
+        return transforms.Lambda(lambda x: x)
+    return transform
+
 ## EUROSAT STANDARDIZATION VALUES
 EUROSATMEAN = {
     'B01': 1354.40546513,
@@ -243,6 +337,19 @@ def _resolve_bigearthnet_bands(num_channels: int) -> Tuple[str, ...]:
     return tuple(BIGEARTHNET_BANDS[:num_channels])
 
 
+def _resolve_model_transform(
+    config: ModelEvalConfig,
+) -> Tuple[Optional[Callable[[torch.Tensor], torch.Tensor]], Optional[str]]:
+    model_transform = select_ssl4eo_transform(config.model_weights)
+    transform_source = config.model_weights
+    if model_transform is None:
+        model_transform = select_ssl4eo_transform(config.model_type)
+        transform_source = config.model_type
+    if model_transform is None or transform_source is None:
+        return None, None
+    return model_transform, f"ssl4eo_transform:{transform_source}"
+
+
 def _align_s2_channels(image: torch.Tensor, expected_channels: Optional[int]) -> torch.Tensor:
     """Drop the cirrus band when the model only supports 12 Sentinel-2 bands."""
 
@@ -394,7 +501,9 @@ from ciip.evaluation.normalization_utils import (
     NORMALIZATION_METHODS,
     SSL4EO_MODEL_TRANSFORMS,
     SSL4EONormalize,
+    SSL4EOTransform,
     NeuCoNormalize,
+    SelectS2Channels10,
     S2ScaleTransform,
     build_normalization_transform,
     resolve_normalization_method_for_weights,
@@ -440,7 +549,8 @@ class ModelEvalConfig:
     eurosat_image_size: int = 224
     bigearthnet_root: Optional[Path] = None
     bigearthnet_image_size: int = 224
-    normalization_method: str = DEFAULT_NORMALIZATION_METHOD
+    normalization_method: Optional[str] = DEFAULT_NORMALIZATION_METHOD
+    neuco_normalization_method: Optional[str] = None
     matryoshka_dims: Optional[Sequence[int]] = None
     matryoshka_feature: str = "backbone"
     stats_max_batches: int = 0
@@ -700,43 +810,61 @@ def _extract_embeddings(
 
 
 def _build_eurosat_loaders(
-    config: ModelEvalConfig, *, bands: Sequence[str], modality: str
+    config: ModelEvalConfig,
+    *,
+    bands: Sequence[str],
+    modality: str,
+    model_transform: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
+    transform_label: Optional[str] = None,
 ) -> Dict[str, DataLoader]:
     normalized = modality.lower()
     if normalized == "s1":
         raise ValueError("EuroSAT dataset does not support Sentinel-1 modality")
 
-    # Compute per-band stats in the same order as the resolved band tuple
-    mean = [EUROSATMEAN[b] for b in bands]
-    std = [EUROSATSTD[b] for b in bands]
+    # # Compute per-band stats in the same order as the resolved band tuple
+    # mean = [EUROSATMEAN[b] for b in bands]
+    # std = [EUROSATSTD[b] for b in bands]
 
     target_size = int(config.eurosat_image_size)
     eval_resize = max(target_size, int(round(target_size * 256 / 224)))
 
-    normalization_method = resolve_normalization_method_for_weights(
-        config.model_in_channels, config.normalization_method, config.model_weights
-    )
-    norm_layer = build_normalization_transform(
-        normalization_method,
-        bandwise_stats=(mean, std),
-    )
+    if model_transform is not None:
+        if transform_label:
+            print(f"EuroSAT using model-specific transform: {transform_label}")
+        norm_layer = model_transform
+    else:
+        raise ValueError("EuroSAT requires an SSL4EO model transform; no transform was provided.")
     print(f"EuroSAT using normalization method: {norm_layer}")
-    data_transforms = {
-        "train": transforms.Compose(
-            [
-                transforms.RandomResizedCrop(target_size),
-                transforms.RandomHorizontalFlip(),
-                norm_layer,
-            ]
-        ),
-        "eval": transforms.Compose(
-            [
-                transforms.Resize(eval_resize),
-                transforms.CenterCrop(target_size),
-                norm_layer,
-            ]
-        ),
-    }
+    if model_transform is not None:
+        data_transforms = {
+            "train": transforms.Compose(
+                [
+                    transforms.RandomHorizontalFlip(),
+                    norm_layer,
+                ]
+            ),
+            "eval": norm_layer,
+        }
+    else:
+        raise ValueError("EuroSAT requires a model transform for proper evaluation.")
+        data_transforms = {
+            "train": transforms.Compose(
+                [
+                    transforms.RandomResizedCrop(target_size),
+                    transforms.RandomHorizontalFlip(),
+                    norm_layer,
+                ]
+            ),
+            "eval": transforms.Compose(
+                [
+                    transforms.Resize(eval_resize),
+                    transforms.CenterCrop(target_size),
+                    norm_layer,
+                ]
+            ),
+        }
+    _log_transform("EuroSAT train transform", data_transforms["train"])
+    _log_transform("EuroSAT eval transform", data_transforms["eval"])
 
     train_transform = CustomTransform(data_transforms["train"])
     eval_transform = CustomTransform(data_transforms["eval"])
@@ -753,7 +881,7 @@ def _build_eurosat_loaders(
     }
 
     loaders = {
-        split: DataLoader(dataset, batch_size=64, shuffle=False, num_workers=4)
+        split: DataLoader(dataset, batch_size=64, shuffle=False, num_workers=8)
         for split, dataset in datasets.items()
     }
     # print each split
@@ -876,7 +1004,11 @@ def _resolve_bigearthnet_root(root: Path) -> Path:
 
 
 def _build_bigearthnet_loaders(
-    config: ModelEvalConfig, *, expected_channels: Optional[int] = None
+    config: ModelEvalConfig,
+    *,
+    expected_channels: Optional[int] = None,
+    model_transform: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
+    transform_label: Optional[str] = None,
 ) -> Tuple[Dict[str, DataLoader], Sequence[str]]:
     if config.bigearthnet_root is None:
         raise ValueError("bigearthnet_root must be provided for BigEarthNet evaluation.")
@@ -913,15 +1045,20 @@ def _build_bigearthnet_loaders(
     if selector is not None:
         train_steps.append(selector)
         eval_steps.append(selector)
-    normalization_method = resolve_normalization_method_for_weights(
-        config.model_in_channels, config.normalization_method, config.model_weights
-    )
-    if normalization_method == NORMALIZATION_METHOD_BANDWISE:
-        band_norm_layer = transforms.Normalize(mean=band_mean, std=band_std)
-    elif normalization_method == NORMALIZATION_METHOD_SSL4EO:
-        band_norm_layer = SSL4EONormalize()
+    if model_transform is not None:
+        if transform_label:
+            print(f"BigEarthNet using model-specific transform: {transform_label}")
+        band_norm_layer = model_transform
     else:
-        band_norm_layer = build_normalization_transform(normalization_method)
+        normalization_method = resolve_normalization_method_for_weights(
+            config.model_in_channels, config.normalization_method, config.model_weights
+        )
+        if normalization_method == NORMALIZATION_METHOD_BANDWISE:
+            band_norm_layer = transforms.Normalize(mean=band_mean, std=band_std)
+        elif normalization_method == NORMALIZATION_METHOD_SSL4EO:
+            band_norm_layer = SSL4EONormalize()
+        else:
+            band_norm_layer = build_normalization_transform(normalization_method)
     print(f"band norm method: {band_norm_layer}")
     train_steps.extend(
         [
@@ -941,6 +1078,8 @@ def _build_bigearthnet_loaders(
         "train": transforms.Compose(train_steps),
         "eval": transforms.Compose(eval_steps),
     }
+    _log_transform("BigEarthNet train transform", data_transforms["train"])
+    _log_transform("BigEarthNet eval transform", data_transforms["eval"])
 
     train_transform = CustomTransform(data_transforms["train"])
     eval_transform = CustomTransform(data_transforms["eval"])
@@ -985,44 +1124,15 @@ def _build_neuco_loader(
     *,
     modalities: Sequence[str],
 ) -> DataLoader:
-    transform_steps: List[object] = []
-    if config.model_type != "ciip_checkpoint":
-        model_transform = select_ssl4eo_transform(config.model_weights)
-        if model_transform is None:
-            model_transform = select_ssl4eo_transform(config.model_type)
-        if model_transform is None:
-            raise ValueError(
-                "No SSL4EO transform found for model_weights="
-                f"{config.model_weights!r} or model_type={config.model_type!r}"
-            )
-        transform_steps.append(model_transform)
-    else:
-        transform_steps.append(InputResizer(224))
-        normalization_method = resolve_normalization_method_for_weights(
-            config.model_in_channels, config.normalization_method, config.model_weights
-        )
-
-        if normalization_method == NORMALIZATION_METHOD_BANDWISE:
-            print("Using NeuCo bandwise normalization for NeuCo inputs")
-            transform_steps.append(NeuCoNormalize())
-        elif normalization_method == NORMALIZATION_METHOD_SSL4EO:
-            print("Using SSL4EO normalization for NeuCo inputs")
-            transform_steps.append(SSL4EONormalize())
-        else:
-            if normalization_method == NORMALIZATION_METHOD_IMAGENET:
-                print("Using ImageNet normalization for NeuCo inputs")
-            else:
-                print("Using divide-by-10000 normalization for NeuCo inputs")
-            transform_steps.append(build_normalization_transform(normalization_method))
-
-    # transform_steps.append(TemporalMean())  # skip temporal averaging; keep per-season inputs
-    # if config.neuco_resize is not None:
-    #     transform_steps.append(InputResizer(config.neuco_resize))
-    transform = transforms.Compose(transform_steps)
+    model_transform, transform_key = _resolve_ssl4eo_transform(config)
+    transform = transforms.Compose([transforms.RandomHorizontalFlip(), model_transform])
+    _log_transform(f"NeuCo transform ({transform_key})", transform)
 
 
     # print(f"Building NeuCo dataset with modalities: {modalities}")
     rgb = True if config.model_in_channels == 3 else False
+    if config.model_in_channels == 13:
+        modalities = ["s2l1c"]
     dataset = E2SChallengeDataset(
         data_path=str(config.neuco_root),
         modalities=list(modalities),
@@ -1042,7 +1152,7 @@ def _build_neuco_loader(
         dataset,
         batch_size=16,
         shuffle=False,
-        num_workers=4,
+        num_workers=32,
         # collate_fn=collate_fn,
     )
     # print shape of first batch
@@ -1062,6 +1172,8 @@ def _build_ssl4eo_dataset(config: ModelEvalConfig) -> torch.utils.data.Dataset:
 
     s2_transform = select_ssl4eo_transform(config.model_weights)
     if s2_transform is None:
+        s2_transform = select_ssl4eo_transform(config.model_type)
+    if s2_transform is None:
         print(f"Using default SSL4EO transform for tier {config.ssl4eo_s2_tier}")
         normalization_method = resolve_normalization_method_for_weights(
             config.model_in_channels, config.normalization_method, config.model_weights
@@ -1074,6 +1186,7 @@ def _build_ssl4eo_dataset(config: ModelEvalConfig) -> torch.utils.data.Dataset:
                 transforms.CenterCrop(224),
                 norm_layer,
             ])
+    _log_transform("SSL4EO S2 transform", s2_transform)
 
     dataset = SSL4EODataset(
         root=str(config.ssl4eo_root.expanduser()),
@@ -1149,7 +1262,7 @@ def _run_linear_probe(
     slice_dim: Optional[int] = None,
     feature_override: Optional[str] = None,
 ) -> None:
-    percents = (0.01, 0.1, 1.0)
+    percents = (0.01, 0.05, 0.1, 0.3, 1.0)
     rng = np.random.default_rng(config.random_seed)
 
     def _maybe_slice(features: np.ndarray) -> np.ndarray:
@@ -1994,7 +2107,7 @@ def _run_embedding_diagnostics(
     )
 
     normalized_weights = (config.model_weights or "").lower()
-    is_transformer = config.model_type in ("croma", "croma_vit", "croma_s1s2") or any(
+    is_transformer = config.model_type in ("croma", "croma_vit", "croma_s1s2", "galileo_s2", "galileo") or any(
         token in normalized_weights for token in ("dofa", "scalemae", "vitsmall", "vit", 'visiontransformer')
     )
     is_scalemae = any(token in normalized_weights for token in ("scalemae", "dofa", 'visiontransformer', 'vit'))
@@ -2231,6 +2344,8 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
         "resnet18_s2_all_moco",
         "moco",
         "dino",
+        "galileo_s2",
+        "galileo",
     }
     if (config.model_weights and config.model_weights in thirteen_band_models) or (
         config.model_type and config.model_type in thirteen_band_models
@@ -2256,15 +2371,22 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
         },
     )
 
+    normalization_override = config.normalization_method
+    if normalization_override == _AUTO_NORMALIZATION_METHOD:
+        normalization_override = None
     normalization_method = resolve_normalization_method_for_weights(
-        config.model_in_channels, config.normalization_method, config.model_weights
+        config.model_in_channels, normalization_override, config.model_weights
     )
-    print(f'Normalization method: {normalization_method}')
+    print(f"Normalization method: {normalization_method}")
     if normalization_method not in NORMALIZATION_METHODS:
         raise ValueError(
             "normalization_method must be one of "
             f"{', '.join(NORMALIZATION_METHODS)}; got {config.normalization_method!r}"
         )
+    model_transform, transform_key = _resolve_ssl4eo_transform(config)
+    transform_label = f"ssl4eo_transform:{transform_key}"
+    normalization_label = _sanitize_label(transform_label)
+    print(f"Using model-specific transform for normalization: {transform_label}")
 
 
     if args.disable_eurosat == False:
@@ -2281,10 +2403,14 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
         
 
         # check if dir exists
-        eurosat_output_dir = output_dir / f"linear_probe_{normalization_method}"
+        eurosat_output_dir = output_dir / f"linear_probe_{normalization_label}"
         if True:
             eurosat_loaders = _build_eurosat_loaders(
-                config, bands=eurosat_bands, modality=target_modality
+                config,
+                bands=eurosat_bands,
+                modality=target_modality,
+                model_transform=model_transform,
+                transform_label=transform_label,
             )
             _print_band_stats(
                 "EuroSAT eval",
@@ -2307,7 +2433,7 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
                 eurosat_embeddings,
                 output_dir=output_dir,
                 label="eurosat",
-                norm_method=normalization_method,
+                norm_method=normalization_label,
             )
             if config.matryoshka_dims:
                 for dim in config.matryoshka_dims:
@@ -2317,7 +2443,7 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
                         eurosat_embeddings,
                         output_dir=mat_output_dir,
                         label="eurosat",
-                        norm_method=normalization_method,
+                        norm_method=normalization_label,
                         slice_dim=dim,
                         feature_override="backbone",
                     )
@@ -2348,7 +2474,10 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
     if not args.disable_bigearthnet:
         print("Running BigEarthNet linear probe...")
         bigearthnet_loaders, bigearthnet_bands = _build_bigearthnet_loaders(
-            config, expected_channels=model_channels
+            config,
+            expected_channels=model_channels,
+            model_transform=model_transform,
+            transform_label=transform_label,
         )
         _print_band_stats(
             "BigEarthNet eval",
@@ -2371,27 +2500,27 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
         if config.matryoshka_dims:
             for dim in config.matryoshka_dims:
                 mat_output_dir = output_dir / f"matryoshka_dim_{dim}"
-                _run_linear_probe(
-                    config,
-                    bigearthnet_embeddings,
-                    output_dir=mat_output_dir,
-                    label="bigearthnet",
-                    norm_method=normalization_method,
-                    slice_dim=dim,
-                    feature_override="backbone",
-                )
+            _run_linear_probe(
+                config,
+                bigearthnet_embeddings,
+                output_dir=mat_output_dir,
+                label="bigearthnet",
+                norm_method=normalization_label,
+                slice_dim=dim,
+                feature_override="backbone",
+            )
         else:
             _run_linear_probe(
                 config,
                 bigearthnet_embeddings,
                 output_dir=output_dir,
                 label="bigearthnet",
-                norm_method=normalization_method,
+                norm_method=normalization_label,
             )
 
 
     if args.disable_neuco == False:
-        neuco_output_dir = output_dir / f"neuco_{normalization_method}"
+        neuco_output_dir = output_dir / f"neuco_{normalization_label}"
         base_modalities: List[str] = list(config.neuco_modalities)
         s2_candidates = [m for m in base_modalities if m in ("s2l2a", "s2l1c")]
         has_dual_neuco = (
@@ -2406,10 +2535,9 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
             csv_out_backbone = neuco_output_dir / "neuco_export" / f"neuco_{modality}{suffix}_backbone.csv"
             # csv_out_projected = neuco_output_dir / "neuco_export" / f"neuco_{modality}_projected.csv"
 
-            if False: #csv_out_backbone.exists():
-                pass
-                # print(f"NeuCo embeddings already exist for modality {modality}, skipping extraction.")
-                # neuco_bundle = None
+            if csv_out_backbone.exists():
+                print(f"NeuCo embeddings already exist for modality {modality}, skipping extraction.")
+                neuco_bundle = None
             else:
                 print(f"Extracting NeuCo embeddings for modality {modality} into {csv_out_backbone.parent}")
                 neuco_output_dir.mkdir(parents=True, exist_ok=True)
@@ -2455,6 +2583,8 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
                 embedding_dim_backbone = "384"
             elif 'scalemae' in config.model_weights.lower() if config.model_weights else False:
                 embedding_dim_backbone = "1024"
+            elif 'rcf_13ch' in config.model_weights.lower() if config.model_weights else False:
+                embedding_dim_backbone = "512"
             else:
                 backbone_tensor = getattr(neuco_bundle, "backbone", None) if neuco_bundle is not None else None
 
@@ -2534,6 +2664,8 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
             # print('Target modality: ', target_modality)
             if target_modality == "s1":
                 neuco_modalities = ["s1"]
+            elif config.model_in_channels == 13:
+                neuco_modalities = ["s2l1c"]
             elif not neuco_modalities:
                 neuco_modalities = ["s2l1c"]
 
@@ -2673,7 +2805,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model-type",
         default="ciip_checkpoint",
-        choices=["ciip_checkpoint", "torchgeo_resnet50", "croma", "backbone_only"],
+        choices=["ciip_checkpoint", "torchgeo_resnet50", "croma", "backbone_only", "galileo_s2", "galileo"],
         help="Model source to evaluate.",
     )
     # parser.add_argument("--checkpoint", type=Path, help="Checkpoint path for CIIP/Lorentz models.")
@@ -2692,6 +2824,12 @@ if __name__ == "__main__":
             "vitsmall16_s2_all_moco",
             "llama3_ms_clip_base",
             "remoteclip",
+            "ciip_vit_dai",
+            "ciip_text_s2",
+            "croma",
+            "vitsmall16_s2_all_dino",
+            "ciip_bandwise",
+            "ciip_10kscale"
         ],
         help="Pretrained weight selection for the requested model type.",
     )
@@ -2720,9 +2858,15 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--normalization-method",
-        choices=NORMALIZATION_METHODS,
-        default=DEFAULT_NORMALIZATION_METHOD,
+        choices=tuple(NORMALIZATION_METHODS) + (_AUTO_NORMALIZATION_METHOD,),
+        default=_AUTO_NORMALIZATION_METHOD,
         help="Normalization applied to Sentinel-2 / optical inputs.",
+    )
+    parser.add_argument(
+        "--neuco-normalization-method",
+        choices=tuple(NORMALIZATION_METHODS) + (_AUTO_NORMALIZATION_METHOD,),
+        default=_AUTO_NORMALIZATION_METHOD,
+        help="Normalization applied to NeuCo inputs (defaults to auto).",
     )
     # parser.add_argument("--neuco-resize", type=int, nargs=2, help="Resize dimensions for NeuCo images.")
 
@@ -2858,6 +3002,11 @@ if __name__ == "__main__":
     if args.model_type == "croma" and args.croma_weights is None:
         parser.error("--croma-weights must be provided when --model-type=croma")
     
+    if args.normalization_method == _AUTO_NORMALIZATION_METHOD:
+        args.normalization_method = None
+    if args.neuco_normalization_method == _AUTO_NORMALIZATION_METHOD:
+        args.neuco_normalization_method = None
+
 
     cfg = ModelEvalConfig(
         eurosat_root=args.eurosat_root,
@@ -2885,6 +3034,7 @@ if __name__ == "__main__":
         bigearthnet_root=args.bigearthnet_root,
         bigearthnet_image_size=args.bigearthnet_image_size,
         normalization_method=args.normalization_method,
+        neuco_normalization_method=args.neuco_normalization_method,
         stats_max_batches=int(args.stats_max_batches),
     )
     run_full_evaluation(cfg)

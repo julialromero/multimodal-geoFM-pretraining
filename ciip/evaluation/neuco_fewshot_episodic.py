@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -29,12 +30,16 @@ from ciip.evaluation.unified_evaluation import (
     _export_neuco,
     _extract_embeddings,
     _infer_model_in_channels,
+    _normalize_explicit_method,
+    _resolve_model_transform,
+    _sanitize_label,
     _use_adapter_modality,
 )
 
 
 _DEV_COLUMN = "cvpr_earthvision_phase_dev"
 _EVAL_COLUMN = "cvpr_earthvision_phase_eval"
+_AUTO_NORMALIZATION_METHOD = "auto"
 
 
 def _resolve_checkpoint(args: argparse.Namespace) -> Path | None:
@@ -55,6 +60,7 @@ def _resolve_checkpoint(args: argparse.Namespace) -> Path | None:
 def _select_neuco_modality(
     evaluation_modality: str, neuco_modalities: Sequence[str]
 ) -> Tuple[str, str]:
+    
     evaluation_modality = evaluation_modality.lower()
     modalities = list(neuco_modalities)
     if evaluation_modality == "s1":
@@ -124,7 +130,8 @@ def _sample_indices_random(size: int, fraction: float, rng: np.random.Generator)
     if fraction <= 0:
         return np.array([], dtype=np.int64)
     count = max(1, int(size * fraction))
-    return rng.choice(size, size=count, replace=False)
+    order = rng.permutation(size)
+    return order[:count]
 
 
 def _sample_indices_stratified_class(labels: List[str], fraction: float, rng: np.random.Generator) -> np.ndarray:
@@ -136,7 +143,8 @@ def _sample_indices_stratified_class(labels: List[str], fraction: float, rng: np
         if fraction <= 0:
             continue
         count = max(1, int(len(indices) * fraction))
-        selected.extend(rng.choice(indices, size=count, replace=False).tolist())
+        order = rng.permutation(len(indices))
+        selected.extend([indices[i] for i in order[:count]])
     return np.asarray(selected, dtype=np.int64)
 
 
@@ -146,7 +154,7 @@ def _sample_indices_stratified_reg(values: np.ndarray, fraction: float, num_bins
     if values.min() == values.max():
         return _sample_indices_random(values.size, fraction, rng)
     bin_edges = np.linspace(values.min(), values.max(), num_bins + 1)
-    binned = np.digitize(values, bin_edges) - 1
+    binned = np.digitize(values, bin_edges, right=True) - 1
     indices_per_bin: Dict[int, List[int]] = {i: [] for i in range(num_bins)}
     for idx, bin_idx in enumerate(binned):
         if bin_idx in indices_per_bin:
@@ -158,7 +166,8 @@ def _sample_indices_stratified_reg(values: np.ndarray, fraction: float, num_bins
         if fraction <= 0:
             continue
         count = max(1, int(len(indices) * fraction))
-        selected.extend(rng.choice(indices, size=count, replace=False).tolist())
+        order = rng.permutation(len(indices))
+        selected.extend([indices[i] for i in order[:count]])
     return np.asarray(selected, dtype=np.int64)
 
 
@@ -227,6 +236,15 @@ def _predict_linear_regression(
     return x_aug @ weights
 
 
+def _standardize_features(
+    train_feats: np.ndarray, eval_feats: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray]:
+    mean = train_feats.mean(axis=0, keepdims=True)
+    std = train_feats.std(axis=0, keepdims=True)
+    std = np.where(std > 0, std, 1.0)
+    return (train_feats - mean) / std, (eval_feats - mean) / std
+
+
 def _filter_rows(rows: List[Dict[str, str]], id_to_index: Dict[str, int]) -> Tuple[np.ndarray, List[str]]:
     indices: List[int] = []
     labels: List[str] = []
@@ -236,6 +254,12 @@ def _filter_rows(rows: List[Dict[str, str]], id_to_index: Dict[str, int]) -> Tup
             indices.append(id_to_index[sample_id])
             labels.append(str(row.get("label")))
     return np.asarray(indices, dtype=np.int64), labels
+
+
+def _seed_for_task(base_seed: int, task_name: str, salt: str) -> int:
+    payload = f"{base_seed}:{task_name}:{salt}".encode("utf-8")
+    digest = hashlib.blake2b(payload, digest_size=8).digest()
+    return int.from_bytes(digest, "little")
 
 
 def run_from_args(args: argparse.Namespace) -> List[Path]:
@@ -255,10 +279,12 @@ def run_from_args(args: argparse.Namespace) -> List[Path]:
     if args.model_type == "croma" and args.croma_weights is None:
         raise ValueError("--croma-weights must be provided when --model-type=croma.")
 
-    normalization_method = resolve_normalization_method_for_weights(
-        args.model_in_channels, args.normalization_method, args.model_weights
-    )
-    if normalization_method not in NORMALIZATION_METHODS:
+    normalization_override = args.normalization_method
+    if normalization_override == _AUTO_NORMALIZATION_METHOD:
+        normalization_override = None
+    normalization_override = _normalize_explicit_method(normalization_override)
+    normalization_method = normalization_override
+    if normalization_method is not None and normalization_method not in NORMALIZATION_METHODS:
         raise ValueError(
             f"--normalization-method must be one of {', '.join(NORMALIZATION_METHODS)}; got {args.normalization_method!r}"
         )
@@ -279,9 +305,19 @@ def run_from_args(args: argparse.Namespace) -> List[Path]:
         evaluation_modality=args.evaluation_modality,
         neuco_modalities=tuple(args.neuco_modalities),
         neuco_seasons=args.neuco_seasons,
-        normalization_method=normalization_method,
+        normalization_method=normalization_override,
+        neuco_normalization_method=normalization_method,
         random_seed=args.seed,
     )
+    normalization_label = normalization_method
+    if normalization_override is None:
+        _, transform_label = _resolve_model_transform(cfg)
+        if transform_label:
+            normalization_label = _sanitize_label(transform_label)
+        else:
+            normalization_label = resolve_normalization_method_for_weights(
+                args.model_in_channels, normalization_override, args.model_weights
+            )
 
     adapter = build_evaluation_adapter(
         model_type=cfg.model_type,
@@ -298,9 +334,26 @@ def run_from_args(args: argparse.Namespace) -> List[Path]:
     adapter = adapter.to(device)
     adapter.eval()
 
-    neuco_modality, active_modality = _select_neuco_modality(
-        cfg.evaluation_modality, cfg.neuco_modalities
-    )
+    if args.model_in_channels:# and args.neuco_modalities:
+        if args.model_in_channels == 12:
+            print('Setting modalities to s2l2a')
+            # args.neuco_modalities = ['s2l2a']
+            neuco_modality = 's2l2a'
+        if args.model_in_channels == 13:
+            print('Setting modalities to s2l1c')
+            # args.neuco_modalities = ['s2l1c']
+            neuco_modality = 's2l1c'
+        if args.model_in_channels == 10 and (args.model_weights == "llama3_ms_clip_base"):
+            print('Setting modalities to s2l2a for MS-CLIP (10ch)')
+            neuco_modality = 's2l2a'
+        if args.model_in_channels == 3 or args.model_weights == "remoteclip":
+            print('Setting modalities to rgb for RGB model')
+            neuco_modality = 'rgb'
+    active_modality = 's2'
+
+    # neuco_modality, active_modality = _select_neuco_modality(
+    #     cfg.evaluation_modality, cfg.neuco_modalities
+    # )
 
     model_tag = build_model_tag(
         model_type=args.model_type,
@@ -308,10 +361,19 @@ def run_from_args(args: argparse.Namespace) -> List[Path]:
         model_path=args.model_path,
         ciip_epoch=args.ciip_epoch,
     )
-    normalization_label = normalization_method
-    base_output_dir = ensure_dir(cfg.output_dir / "neuco_fewshot" / model_tag / normalization_label)
-    output_dir = ensure_dir(base_output_dir / f"train{args.limited_label_train}")
-    export_dir = ensure_dir(base_output_dir / "neuco_export")
+    embed_model_tag = model_tag
+    if args.model_type == "ciip_checkpoint":
+        is_vit = args.ciip_framework == "transformer" or "vit" in (args.model_path or "").lower()
+        if is_vit:
+            embed_model_tag = f"{model_tag}_meanpool"
+    results_base_dir = ensure_dir(
+        Path("diagnostics/neuco_fewshot") / "neuco_fewshot" / model_tag / normalization_label
+    )
+    embed_base_dir = ensure_dir(
+        Path("diagnostics/unified_eval") / embed_model_tag / f"neuco_{normalization_label}"
+    )
+    output_dir = ensure_dir(results_base_dir / f"train{args.limited_label_train}")
+    export_dir = ensure_dir(embed_base_dir / "neuco_export")
     write_run_manifest(
         output_dir,
         task_name="neuco_fewshot_episodic",
@@ -380,7 +442,6 @@ def run_from_args(args: argparse.Namespace) -> List[Path]:
     id_to_index = {sample_id: idx for idx, sample_id in enumerate(ids)}
 
     output_paths: List[Path] = []
-    rng = np.random.default_rng(args.seed)
     for task_idx, (task_name, task_type, label_path) in enumerate(
         _iter_label_tasks(Path(args.annotation_path), args.task_filter)
     ):
@@ -388,14 +449,17 @@ def run_from_args(args: argparse.Namespace) -> List[Path]:
         if not rows:
             print(f"[neuco] No labels in {label_path.name}, skipping.")
             continue
-        train_rows, eval_rows = _split_rows(rows, args.seed + task_idx, args.val_frac)
+        split_seed = _seed_for_task(args.seed, task_name, "split")
+        train_rows, eval_rows = _split_rows(rows, split_seed, args.val_frac)
+        train_rng = np.random.default_rng(_seed_for_task(args.seed, task_name, "train"))
+        eval_rng = np.random.default_rng(_seed_for_task(args.seed, task_name, "eval"))
         train_rows = _apply_sampling(
             train_rows,
             task_type,
             fraction=args.limited_label_train,
             strategy=args.limited_label_strategy,
             num_bins=args.stratification_bins,
-            rng=rng,
+            rng=train_rng,
         )
         eval_rows = _apply_sampling(
             eval_rows,
@@ -403,7 +467,7 @@ def run_from_args(args: argparse.Namespace) -> List[Path]:
             fraction=args.limited_label_val,
             strategy=args.limited_label_strategy,
             num_bins=args.stratification_bins,
-            rng=rng,
+            rng=eval_rng,
         )
 
         train_indices, train_labels = _filter_rows(train_rows, id_to_index)
@@ -414,6 +478,7 @@ def run_from_args(args: argparse.Namespace) -> List[Path]:
 
         train_feats = features[train_indices]
         eval_feats = features[eval_indices]
+        train_feats, eval_feats = _standardize_features(train_feats, eval_feats)
 
         results = {
             "dataset": "NeuCo",
@@ -431,7 +496,7 @@ def run_from_args(args: argparse.Namespace) -> List[Path]:
             "linear_l2_reg": args.linear_l2_reg,
             "feature": args.feature,
             "feature_dim": int(features.shape[1]),
-            "normalization_method": normalization_method,
+            "normalization_method": normalization_label,
             "normalization_label": normalization_label,
             "evaluation_modality": active_modality,
             "neuco_modality": neuco_modality,
@@ -463,6 +528,7 @@ def run_from_args(args: argparse.Namespace) -> List[Path]:
                 mae = rmse = r2 = 0.0
             results.update({"mae": mae, "rmse": rmse, "r2": r2})
         else:
+            raise ValueError(f"Unsupported task type: {task_type}")
             print(f"[neuco] Unsupported task type {task_type} in {label_path.name}, skipping.")
             continue
 
@@ -501,12 +567,15 @@ def main() -> None:
     parser.add_argument(
         "--model-type",
         default="ciip_checkpoint",
-        choices=["ciip_checkpoint", "torchgeo_resnet50", "croma", "backbone_only"],
+        choices=["ciip_checkpoint", "torchgeo_resnet50", "croma", "backbone_only", "galileo_s2", "galileo"],
         help="Model source to evaluate.",
     )
     parser.add_argument(
         "--model-weights",
         choices=[
+            "ciip_bandwise",
+            "ciip_10kscale",
+            "croma",
             "dino",
             "moco",
             "rcf_13ch",
@@ -519,6 +588,9 @@ def main() -> None:
             "vitsmall16_s2_all_moco",
             "llama3_ms_clip_base",
             "remoteclip",
+            "ciip_vit_dai",
+            "ciip_text_s2",
+            "vitsmall16_s2_all_dino"
         ],
         help="Pretrained weight selection for the requested model type.",
     )
@@ -545,8 +617,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--normalization-method",
-        choices=tuple(NORMALIZATION_METHODS) + ("ssl4eobandwisenorm",),
-        default=DEFAULT_NORMALIZATION_METHOD,
+        choices=tuple(NORMALIZATION_METHODS) + ("ssl4eobandwisenorm", _AUTO_NORMALIZATION_METHOD),
+        default="ssl4eonorm",
         help="Normalization applied to NeuCo inputs.",
     )
     parser.add_argument("--output-dir", type=Path, default=Path("diagnostics/neuco_fewshot"), help="Output directory.")

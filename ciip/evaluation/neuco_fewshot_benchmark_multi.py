@@ -49,7 +49,7 @@ def main() -> None:
         default="s2",
         help="Sentinel modality to use for NeuCo evaluation.",
     )
-    parser.add_argument("--normalization-method", default="divideby10000", help="Normalization method.")
+    parser.add_argument("--normalization-method", default="auto", help="Normalization method.")
     parser.add_argument("--annotation-path", type=Path, default=Path("/local/ms-data/SSL4EO-S12-downstream/labels"), help="NeuCo labels root.")
     parser.add_argument("--model-root", type=str, default="/local/ms-data/SSL4EO/model/", help="Root for CIIP checkpoints.")
     parser.add_argument("--croma-weights", type=Path, help="Default path to pretrained CROMA weights.")
@@ -87,6 +87,22 @@ def main() -> None:
     models, defaults = _load_model_specs(args.models_json)
     if not models:
         raise ValueError("No models found in the provided JSON file.")
+    # if args.model_in_channels:# and args.neuco_modalities:
+    #     if args.model_in_channels == 12:
+    #         print('Setting modalities to s2l2a')
+    #         # args.neuco_modalities = ['s2l2a']
+    #         args.neuco_modalities = 's2l2a'
+    #     if args.model_in_channels == 13:
+    #         print('Setting modalities to s2l1c')
+    #         # args.neuco_modalities = ['s2l1c']
+    #         args.neuco_modalities = 's2l1c'
+    #     if args.model_in_channels == 10 and (args.model_weights == "llama3_ms_clip_base"):
+    #         print('Setting modalities to s2l2a for MS-CLIP (10ch)')
+    #         args.neuco_modalities = 's2l2a'
+    #     if args.model_in_channels == 3 or args.model_weights == "remoteclip":
+    #         print('Setting modalities to rgb for RGB model')
+    #         args.neuco_modalities = 'rgb'
+  
 
     base = argparse.Namespace(
         model_type=None,
