@@ -429,7 +429,6 @@ def compute_cross_encoder_cka(
     cuda_cka,
 ) -> Tuple[List[str], List[str], Optional[np.ndarray]]:
     device = "cuda"
-    max_samples = 200
 
     # Order layer names
     names_s1 = _order_layers(s1_layers)
@@ -438,7 +437,7 @@ def compute_cross_encoder_cka(
     if not names_s1 or not names_s2:
         return [], [], None
 
-    # ---- Decide shared subsampling indices from first layer of each encoder ----
+    # ---- Validate first layer tensors and shared sample axis ----
     first_s1 = names_s1[0]
     t1 = _prepare_cka_tensor(s1_layers[first_s1])
     if t1 is None:
@@ -458,14 +457,8 @@ def compute_cross_encoder_cka(
         )
 
     N = N1
-    if N > max_samples:
-        idx = torch.randperm(N)[:max_samples]
-        t1 = t1[idx]
-        t2 = t2[idx]
-    else:
-        idx = None
 
-    # ---- Prepare S1 on CPU with shared idx ----
+    # ---- Prepare S1 on CPU ----
     prepared_s1: Dict[str, torch.Tensor] = {first_s1: t1}
     for name in names_s1[1:]:
         t = _prepare_cka_tensor(s1_layers[name])
@@ -476,11 +469,9 @@ def compute_cross_encoder_cka(
                 f"All S1 layers must have same #samples for CKA: "
                 f"{first_s1} has {N}, but {name} has {t.shape[0]}"
             )
-        if idx is not None:
-            t = t[idx]
         prepared_s1[name] = t
 
-    # ---- Prepare S2 on CPU with same idx ----
+    # ---- Prepare S2 on CPU ----
     prepared_s2: Dict[str, torch.Tensor] = {first_s2: t2}
     for name in names_s2[1:]:
         t = _prepare_cka_tensor(s2_layers[name])
@@ -491,8 +482,6 @@ def compute_cross_encoder_cka(
                 f"All S2 layers must have same #samples for CKA: "
                 f"{first_s2} has {N}, but {name} has {t.shape[0]}"
             )
-        if idx is not None:
-            t = t[idx]
         prepared_s2[name] = t
 
     names_1 = [name for name in names_s1 if name in prepared_s1]
@@ -540,34 +529,27 @@ def compute_within_encoder_cka(
     # print("Computing within encsoder CKA")
 
     device = "cuda"
-    max_samples = 200
-
     # Order layer names
     # print(layer_features.keys())
     ordered = _order_layers(layer_features)
 
-    # Prepare features and choose ONE subsampling index shared by all layers
+    # Prepare features on the shared sample axis
     prepared: Dict[str, torch.Tensor] = {}
 
     if not ordered:
         return [], None
 
-    # Use the first layer to decide subsampling indices
+    # Use the first layer to establish sample count
     first_name = ordered[0]
     t0 = _prepare_cka_tensor(layer_features[first_name])
     if t0 is None:
         raise ValueError(f"CKA preparation returned None for layer {first_name}")
 
     N = t0.shape[0]
-    if N > max_samples:
-        idx = torch.randperm(N)[:max_samples]
-        t0 = t0[idx]
-    else:
-        idx = None  # no subsampling needed
 
     prepared[first_name] = t0
 
-    # Prepare all other layers with the SAME idx
+    # Prepare all other layers
     for name in ordered[1:]:
         t = _prepare_cka_tensor(layer_features[name])
         if t is None:
@@ -578,9 +560,6 @@ def compute_within_encoder_cka(
                 f"All layers must have same #samples for CKA: "
                 f"{first_name} has {N}, but {name} has {t.shape[0]}"
             )
-
-        if idx is not None:
-            t = t[idx]
 
         prepared[name] = t
 
@@ -658,7 +637,7 @@ def _register_layer_hooks(
     print('REGISTERING LAYER HOOKS')
 
     
-    def _make_layer_hook(key: str, name: str):
+    def _make_layer_hook(key: str, name: str, *, force_batch_first_lnd: bool = False):
         cache = layer_caches[key].setdefault(name, [])
 
         def hook(module, inputs, output):
@@ -667,6 +646,10 @@ def _register_layer_hooks(
             tensor = output[0] if isinstance(output, (list, tuple)) else output
             if not isinstance(tensor, torch.Tensor):
                 return
+            if force_batch_first_lnd and tensor.ndim == 3:
+                # CIIP VisionTransformer blocks run in LND format; switch to NLD
+                # so the first dimension remains the sample axis for CKA.
+                tensor = tensor.permute(1, 0, 2).contiguous()
             tensor = tensor.detach()
             tensor = tensor.flatten(start_dim=1)
             tensor = tensor.to(dtype=torch.float32)
@@ -960,6 +943,90 @@ def _register_layer_hooks(
                         module.drop_path2.register_forward_hook(_dp2_hook)
                     )
 
+    def _attach_layers_ciip_vit(encoder: nn.Module, key: str):
+        """
+        Attach hooks for CIIP/OpenCLIP-style VisionTransformer blocks
+        (ResidualAttentionBlock in ``transformer.resblocks``).
+
+        Captures per block:
+          - attn.ln / attn.core / attn.residual
+          - ffn.ln  / ffn.core  / ffn.residual
+        """
+        transformer = getattr(encoder, "transformer", None)
+        resblocks = getattr(transformer, "resblocks", None)
+        if resblocks is None:
+            raise ValueError(
+                f"Expected CIIP VisionTransformer with transformer.resblocks, got {type(encoder)}"
+            )
+
+        for layer_idx, block in enumerate(resblocks):
+            buf = {"x_in": None, "attn_out": None}
+
+            attn_ln_hook = _make_layer_hook(
+                key, f"layer{layer_idx}.attn.ln", force_batch_first_lnd=True
+            )
+            attn_core_hook = _make_layer_hook(
+                key, f"layer{layer_idx}.attn.core", force_batch_first_lnd=True
+            )
+            ffn_ln_hook = _make_layer_hook(
+                key, f"layer{layer_idx}.ffn.ln", force_batch_first_lnd=True
+            )
+            ffn_core_hook = _make_layer_hook(
+                key, f"layer{layer_idx}.ffn.core", force_batch_first_lnd=True
+            )
+            attn_res_hook = _make_layer_hook(
+                key, f"layer{layer_idx}.attn.residual", force_batch_first_lnd=True
+            )
+            ffn_res_hook = _make_layer_hook(
+                key, f"layer{layer_idx}.ffn.residual", force_batch_first_lnd=True
+            )
+
+            if hasattr(block, "ln_1"):
+                handles.append(block.ln_1.register_forward_hook(attn_ln_hook))
+
+            if hasattr(block, "attn"):
+                def _attn_hook(module, inputs, output, *, core=attn_core_hook, state=buf):
+                    core(module, inputs, output)
+                    tensor = output[0] if isinstance(output, (list, tuple)) else output
+                    if isinstance(tensor, torch.Tensor):
+                        state["attn_out"] = tensor
+
+                handles.append(block.attn.register_forward_hook(_attn_hook))
+
+            if hasattr(block, "ln_2"):
+                handles.append(block.ln_2.register_forward_hook(ffn_ln_hook))
+
+            if hasattr(block, "mlp"):
+                handles.append(block.mlp.register_forward_hook(ffn_core_hook))
+
+            def _block_pre_hook(module, inputs, *, state=buf):
+                x_in = inputs[0] if isinstance(inputs, tuple) and inputs else None
+                state["x_in"] = x_in
+                state["attn_out"] = None
+
+            def _block_post_hook(
+                module,
+                inputs,
+                output,
+                *,
+                state=buf,
+                attn_res_cb=attn_res_hook,
+                ffn_res_cb=ffn_res_hook,
+            ):
+                out = output[0] if isinstance(output, (list, tuple)) else output
+                x_in = state.get("x_in")
+                attn_out = state.get("attn_out")
+                if isinstance(x_in, torch.Tensor) and isinstance(attn_out, torch.Tensor):
+                    attn_res_tensor = x_in + attn_out
+                    attn_res_cb(module, (None,), attn_res_tensor)
+                if isinstance(out, torch.Tensor):
+                    ffn_res_cb(module, (None,), out)
+                state["x_in"] = None
+                state["attn_out"] = None
+
+            handles.append(block.register_forward_pre_hook(_block_pre_hook))
+            handles.append(block.register_forward_hook(_block_post_hook))
+
     def _attach_layers_scalemae(encoder: nn.Module, key: str):
         """
         Attach 4 hook points for each sublayer (attention + MLP) in each ScaleMAE ViT Block.
@@ -1124,9 +1191,6 @@ def _register_layer_hooks(
     encoder_s2 = getattr(real_model, "encoder_s2")
 
 
-    # print('ENCODER S1:', encoder_s1)
-    print('ENCODER S2:', encoder_s2)
-
     print('ENCODER S1 TYPE:', type(encoder_s1))
     print('ENCODER S2 TYPE:', type(encoder_s2))
     # print model architecture
@@ -1138,6 +1202,12 @@ def _register_layer_hooks(
         if 'ResNet' in enc_type1:
             print('Attaching ResNet S1 layers')
             _attach_layers_resnet(encoder_s1, "s1")
+        elif hasattr(getattr(encoder_s1, "transformer", None), "resblocks"):
+            print("Attaching CIIP VisionTransformer S1 layers")
+            _attach_layers_ciip_vit(encoder_s1, "s1")
+        elif "DOFA" in enc_type1 or "ScaleMAE" in enc_type1:
+            print("Attaching ViT S1 layer hooks")
+            _attach_layers_dofa(encoder_s1, "s1")
         elif 'croma' in enc_type1.lower():
             print('Attaching CromaViT S1 layers')
             _attach_layers_croma_vit(encoder_s1, "s1")
@@ -1150,6 +1220,10 @@ def _register_layer_hooks(
         if "ResNet" in enc_type:
             print("Attaching ResNet S2 layers")
             _attach_layers_resnet(encoder_s2, "s2")
+
+        elif hasattr(getattr(encoder_s2, "transformer", None), "resblocks"):
+            print("Attaching CIIP VisionTransformer S2 layers")
+            _attach_layers_ciip_vit(encoder_s2, "s2")
 
         elif "DOFA" in enc_type or "ScaleMAE" in enc_type or 'VisionTransformer' in enc_type:
             print("Attaching ViT S2 layer hooks")
@@ -1432,13 +1506,32 @@ def extract_embeddings_for_dataset(
         getattr(model_attr, "compute_projected")
     )
 
-    def _sample_to_tensor(array) -> torch.Tensor:
+    def _sample_to_tensors(array) -> List[Tuple[torch.Tensor, str]]:
+        """
+        Convert one dataset field into per-sample CHW tensors plus a stable suffix.
+
+        Supported shapes:
+          - (C, H, W)                -> 1 sample
+          - (P, C, H, W)             -> P samples
+          - (P, T, C, H, W)          -> P*T samples
+        """
         tensor = torch.as_tensor(array)
-        if tensor.ndim == 4 and tensor.shape[0] == 1:
-            tensor = tensor.squeeze(0)
-        if tensor.ndim != 3:
-            raise ValueError("Unsupported sample shape for embedding extraction")
-        return tensor
+        if tensor.ndim == 3:
+            return [(tensor, "")]
+        if tensor.ndim == 4:
+            return [(tensor[idx], f"_p{idx:03d}") for idx in range(tensor.shape[0])]
+        if tensor.ndim == 5:
+            expanded: List[Tuple[torch.Tensor, str]] = []
+            for patch_idx in range(tensor.shape[0]):
+                for time_idx in range(tensor.shape[1]):
+                    expanded.append(
+                        (tensor[patch_idx, time_idx], f"_p{patch_idx:03d}_t{time_idx:02d}")
+                    )
+            return expanded
+        raise ValueError(
+            "Unsupported sample shape for embedding extraction: "
+            f"{tuple(tensor.shape)}"
+        )
 
     def _iter_batches(sequence: Sequence[int], size: int) -> Iterable[List[int]]:
         batch: List[int] = []
@@ -1487,9 +1580,28 @@ def extract_embeddings_for_dataset(
                     if s1_img is None or s2_img is None:
                         continue
 
-                    s1_samples.append(_sample_to_tensor(s1_img))
-                    s2_samples.append(_sample_to_tensor(s2_img))
-                    batch_uids.append(str(uid))
+                    s1_expanded = _sample_to_tensors(s1_img)
+                    s2_expanded = _sample_to_tensors(s2_img)
+                    if len(s1_expanded) != len(s2_expanded):
+                        raise ValueError(
+                            "Mismatched expanded S1/S2 sample counts: "
+                            f"{len(s1_expanded)} vs {len(s2_expanded)} for uid={uid}"
+                        )
+
+                    uid_base = str(uid) if uid is not None else str(dataset_idx)
+                    for item_idx, (s1_item, s2_item) in enumerate(zip(s1_expanded, s2_expanded)):
+                        s1_tensor_i, s1_suffix = s1_item
+                        s2_tensor_i, s2_suffix = s2_item
+                        s1_samples.append(s1_tensor_i)
+                        s2_samples.append(s2_tensor_i)
+
+                        suffix = s1_suffix or s2_suffix
+                        if suffix:
+                            batch_uids.append(f"{uid_base}{suffix}")
+                        elif len(s1_expanded) > 1:
+                            batch_uids.append(f"{uid_base}_i{item_idx:03d}")
+                        else:
+                            batch_uids.append(uid_base)
 
                 if not s1_samples:
                     continue
@@ -1993,23 +2105,25 @@ def plot_epoch_diagnostics(epoch_diag: EpochDiagnostics, output_dir: Path, label
         title="S1 within-encoder (all layers)"
     )
 
-    # [0,1] odd
-    _plot_cka(
-        axes[0, 1],
-        epoch_diag.s1_odd_within_cka,
-        epoch_diag.s1_odd_layers,
-        epoch_diag.s1_odd_layers,
-        title="S1 within-encoder (odd layers)",
-    )
-
-    # [0,2] even
-    _plot_cka(
-        axes[0, 2],
-        epoch_diag.s1_even_within_cka,
-        epoch_diag.s1_even_layers,
-        epoch_diag.s1_even_layers,
-        title="S1 within-encoder (even layers)",
-    )
+    # [0,1] odd / [0,2] even
+    if plot_even_odd:
+        _plot_cka(
+            axes[0, 1],
+            epoch_diag.s1_odd_within_cka,
+            epoch_diag.s1_odd_layers,
+            epoch_diag.s1_odd_layers,
+            title="S1 within-encoder (odd layers)",
+        )
+        _plot_cka(
+            axes[0, 2],
+            epoch_diag.s1_even_within_cka,
+            epoch_diag.s1_even_layers,
+            epoch_diag.s1_even_layers,
+            title="S1 within-encoder (even layers)",
+        )
+    else:
+        axes[0, 1].axis("off")
+        axes[0, 2].axis("off")
 
     # [0,3] cross
     _plot_cka(
@@ -2031,23 +2145,25 @@ def plot_epoch_diagnostics(epoch_diag: EpochDiagnostics, output_dir: Path, label
         title="S2 within-encoder (all layers)",
     )
 
-    # [1,1] odd
-    _plot_cka(
-        axes[1, 1],
-        epoch_diag.s2_odd_within_cka,
-        epoch_diag.s2_odd_layers,
-        epoch_diag.s2_odd_layers,
-        title="S2 within-encoder (odd layers)",
-    )
-
-    # [1,2] even
-    _plot_cka(
-        axes[1, 2],
-        epoch_diag.s2_even_within_cka,
-        epoch_diag.s2_even_layers,
-        epoch_diag.s2_even_layers,
-        title="S2 within-encoder (even layers)",
-    )
+    # [1,1] odd / [1,2] even
+    if plot_even_odd:
+        _plot_cka(
+            axes[1, 1],
+            epoch_diag.s2_odd_within_cka,
+            epoch_diag.s2_odd_layers,
+            epoch_diag.s2_odd_layers,
+            title="S2 within-encoder (odd layers)",
+        )
+        _plot_cka(
+            axes[1, 2],
+            epoch_diag.s2_even_within_cka,
+            epoch_diag.s2_even_layers,
+            epoch_diag.s2_even_layers,
+            title="S2 within-encoder (even layers)",
+        )
+    else:
+        axes[1, 1].axis("off")
+        axes[1, 2].axis("off")
 
     # [1,3] summary
     axes[1, 3].axis("off")
