@@ -121,10 +121,16 @@ def _resolve_ssl4eo_transform_key(config: ModelEvalConfig) -> str:
             candidates.append(key)
     if config.model_path:
         normalized = config.model_path.lower()
+        if "10kscale" in normalized:
+            candidates.append("ciip_10kscale")
+        if "bandwise" in normalized:
+            candidates.append("ciip_bandwise")
         if "matryoshka" in normalized and "vit" in normalized:
             candidates.append("ciip_matryoshka_vit")
+            candidates.append("ciip_10kscale")
         if "vit" in normalized and "dai" in normalized:
             candidates.append("ciip_vit_dai")
+            candidates.append("ciip_10kscale")
         if "text" in normalized:
             candidates.append("ciip_text_s2")
     for key in candidates:
@@ -137,7 +143,12 @@ def _resolve_ssl4eo_transform_key(config: ModelEvalConfig) -> str:
     )
 
 
-def _resolve_ssl4eo_transform(config: ModelEvalConfig) -> Tuple[Callable[[torch.Tensor], torch.Tensor], str]:
+def _resolve_ssl4eo_transform(
+    config: ModelEvalConfig,
+    *,
+    expected_channels: Optional[int] = None,
+) -> Tuple[Callable[[torch.Tensor], torch.Tensor], str]:
+    del expected_channels
     key = _resolve_ssl4eo_transform_key(config)
     return SSL4EO_MODEL_TRANSFORMS[key], key
 
@@ -279,14 +290,33 @@ def _infer_model_in_channels(
     """Best-effort detection of the channel count for the requested modality."""
 
     normalized = modality.lower()
+    adapter_candidates = [adapter, getattr(adapter, "module", None)]
+
+    if normalized == "s2":
+        for candidate in adapter_candidates:
+            if candidate is None:
+                continue
+            expected = getattr(candidate, "expected_s2_channels", None)
+            if isinstance(expected, int) and expected > 0:
+                return expected
+
     encoders = []
     if normalized == "s1":
-        encoders.append(getattr(adapter, "encoder_s1", None))
-        encoders.append(getattr(adapter, "encoder_s2", None))
+        for candidate in adapter_candidates:
+            if candidate is None:
+                continue
+            encoders.append(getattr(candidate, "encoder_s1", None))
+            encoders.append(getattr(candidate, "encoder_s2", None))
     else:
-        encoders.append(getattr(adapter, "encoder_s2", None))
-        encoders.append(getattr(adapter, "encoder_s1", None))
-    encoders.append(getattr(adapter, "base_model", None))
+        for candidate in adapter_candidates:
+            if candidate is None:
+                continue
+            encoders.append(getattr(candidate, "encoder_s2", None))
+            encoders.append(getattr(candidate, "encoder_s1", None))
+    for candidate in adapter_candidates:
+        if candidate is None:
+            continue
+        encoders.append(getattr(candidate, "base_model", None))
 
     for encoder in encoders:
         in_channels = _first_conv_in_channels(encoder)
@@ -340,14 +370,11 @@ def _resolve_bigearthnet_bands(num_channels: int) -> Tuple[str, ...]:
 def _resolve_model_transform(
     config: ModelEvalConfig,
 ) -> Tuple[Optional[Callable[[torch.Tensor], torch.Tensor]], Optional[str]]:
-    model_transform = select_ssl4eo_transform(config.model_weights)
-    transform_source = config.model_weights
-    if model_transform is None:
-        model_transform = select_ssl4eo_transform(config.model_type)
-        transform_source = config.model_type
-    if model_transform is None or transform_source is None:
+    try:
+        model_transform, transform_key = _resolve_ssl4eo_transform(config)
+    except Exception:
         return None, None
-    return model_transform, f"ssl4eo_transform:{transform_source}"
+    return model_transform, f"ssl4eo_transform:{transform_key}"
 
 
 def _align_s2_channels(image: torch.Tensor, expected_channels: Optional[int]) -> torch.Tensor:
@@ -503,11 +530,9 @@ from ciip.evaluation.normalization_utils import (
     SSL4EONormalize,
     SSL4EOTransform,
     NeuCoNormalize,
-    SelectS2Channels10,
     S2ScaleTransform,
     build_normalization_transform,
     resolve_normalization_method_for_weights,
-    select_ssl4eo_transform,
 )
 from ciip.evaluation.output_utils import (
     build_model_tag,
@@ -528,6 +553,7 @@ class ModelEvalConfig:
     model_type: str = "ciip_checkpoint"
     model_weights: Optional[str] = None
     ciip_framework: Optional[str] = None
+    ciip_model_source: str = "current"
     model_in_channels: int = 13
     evaluation_modality: str = "s2"
     croma_weights: Optional[Path] = None
@@ -567,6 +593,40 @@ class EmbeddingBundle:
 
 def _to_numpy(tensor: torch.Tensor) -> np.ndarray:
     return tensor.detach().cpu().to(torch.float32).numpy()
+
+
+def _season_indices_to_months(
+    season_indices: Optional[torch.Tensor],
+    *,
+    batch_size: int,
+    timesteps: int,
+    device: torch.device,
+) -> torch.Tensor:
+    # NeuCo seasons map to representative calendar months (0-indexed).
+    season_to_month = torch.tensor([0, 3, 6, 9], dtype=torch.long, device=device)
+
+    if season_indices is None:
+        if timesteps <= season_to_month.numel():
+            base = season_to_month[:timesteps]
+        else:
+            repeats = int(np.ceil(timesteps / season_to_month.numel()))
+            base = season_to_month.repeat(repeats)[:timesteps]
+        return base.unsqueeze(0).expand(batch_size, -1).contiguous()
+
+    seasons = season_indices.to(device=device, dtype=torch.long)
+    if seasons.ndim == 1:
+        if batch_size != 1 or seasons.shape[0] != timesteps:
+            raise ValueError(
+                f"Season indices must be shaped (B,T)=({batch_size},{timesteps}) or (T,) when B=1; got {tuple(seasons.shape)}."
+            )
+        seasons = seasons.unsqueeze(0)
+    if seasons.shape != (batch_size, timesteps):
+        raise ValueError(
+            f"Season indices must be shaped (B,T)=({batch_size},{timesteps}); got {tuple(seasons.shape)}."
+        )
+    if torch.any(seasons < 0) or torch.any(seasons > 3):
+        raise ValueError("Season indices for NeuCo must be within [0, 3].")
+    return season_to_month[seasons]
 
 
 def _extract_image_tensor(batch) -> Optional[torch.Tensor]:
@@ -659,6 +719,9 @@ def _extract_embeddings(
     multi_labels: List[List[int]] = []
     ids: List[str] = []
 
+    adapter_module = adapter.module if isinstance(adapter, torch.nn.DataParallel) else adapter
+    supports_temporal_months = bool(getattr(adapter_module, "supports_temporal_months", False))
+
     pca_tensor: torch.Tensor    
     for i, batch in enumerate(dataloader):
         if isinstance(batch, dict):
@@ -666,10 +729,12 @@ def _extract_embeddings(
             batch_labels = batch.get("label")
             batch_multi_labels = batch.get("multi_label")
             batch_ids = batch.get("file_name")
+            batch_season_indices = batch.get("season_indices")
         else:
             image, batch_labels = batch
             batch_multi_labels = None
             batch_ids = None
+            batch_season_indices = None
 
         # print bandwise mean std of images
         # if i % 20 == 0:
@@ -697,7 +762,13 @@ def _extract_embeddings(
 
         reshape_back = False
         seasons = 1
-        if isinstance(image, torch.Tensor) and image.ndim == 5:
+        galileo_temporal_input = (
+            supports_temporal_months
+            and modality.lower() == "s2"
+            and isinstance(image, torch.Tensor)
+            and image.ndim == 5
+        )
+        if isinstance(image, torch.Tensor) and image.ndim == 5 and not galileo_temporal_input:
             # Flatten temporal and batch dimensions before feeding the model.
             batch_size, seasons, channels, height, width = image.shape
             image = image.reshape(batch_size * seasons, channels, height, width)
@@ -705,7 +776,21 @@ def _extract_embeddings(
         if modality.lower() == "s2" and isinstance(image, torch.Tensor):
             image = _align_s2_channels(image, expected_in_channels)
 
-        prepared_inputs = adapter.prepare_inputs(image, device=device, modality=modality)
+        if galileo_temporal_input:
+            batch_size, seasons, _, _, _ = image.shape
+            months = _season_indices_to_months(
+                batch_season_indices,
+                batch_size=batch_size,
+                timesteps=seasons,
+                device=device,
+            )
+            prepared_inputs = adapter.prepare_inputs(
+                {"pixels": image, "months": months},
+                device=device,
+                modality=modality,
+            )
+        else:
+            prepared_inputs = adapter.prepare_inputs(image, device=device, modality=modality)
 
         with torch.no_grad():
             outputs = adapter.compute_embeddings(
@@ -825,44 +910,20 @@ def _build_eurosat_loaders(
     # mean = [EUROSATMEAN[b] for b in bands]
     # std = [EUROSATSTD[b] for b in bands]
 
-    target_size = int(config.eurosat_image_size)
-    eval_resize = max(target_size, int(round(target_size * 256 / 224)))
-
     if model_transform is not None:
-        if transform_label:
-            print(f"EuroSAT using model-specific transform: {transform_label}")
         norm_layer = model_transform
     else:
-        raise ValueError("EuroSAT requires an SSL4EO model transform; no transform was provided.")
+        norm_layer, _ = _resolve_ssl4eo_transform(config)
     print(f"EuroSAT using normalization method: {norm_layer}")
-    if model_transform is not None:
-        data_transforms = {
-            "train": transforms.Compose(
-                [
-                    transforms.RandomHorizontalFlip(),
-                    norm_layer,
-                ]
-            ),
-            "eval": norm_layer,
-        }
-    else:
-        raise ValueError("EuroSAT requires a model transform for proper evaluation.")
-        data_transforms = {
-            "train": transforms.Compose(
-                [
-                    transforms.RandomResizedCrop(target_size),
-                    transforms.RandomHorizontalFlip(),
-                    norm_layer,
-                ]
-            ),
-            "eval": transforms.Compose(
-                [
-                    transforms.Resize(eval_resize),
-                    transforms.CenterCrop(target_size),
-                    norm_layer,
-                ]
-            ),
-        }
+    data_transforms = {
+        "train": transforms.Compose(
+            [
+                transforms.RandomHorizontalFlip(),
+                norm_layer,
+            ]
+        ),
+        "eval": norm_layer,
+    }
     _log_transform("EuroSAT train transform", data_transforms["train"])
     _log_transform("EuroSAT eval transform", data_transforms["eval"])
 
@@ -1015,12 +1076,10 @@ def _build_bigearthnet_loaders(
 
     channel_budget = expected_channels or config.model_in_channels
     bands = _resolve_bigearthnet_bands(channel_budget)
-    band_mean, band_std = _bigearthnet_stats_for_bands(bands)
     band_indices = [BIGEARTHNET_BANDS.index(b) for b in bands]
     select_bands = len(band_indices) != len(BIGEARTHNET_BANDS)
 
     target_size = int(config.bigearthnet_image_size)
-    eval_resize = max(target_size, int(round(target_size * 256 / 224)))
 
     class _SelectBandsTransform:
         def __init__(self, indices: Sequence[int]):
@@ -1046,19 +1105,9 @@ def _build_bigearthnet_loaders(
         train_steps.append(selector)
         eval_steps.append(selector)
     if model_transform is not None:
-        if transform_label:
-            print(f"BigEarthNet using model-specific transform: {transform_label}")
         band_norm_layer = model_transform
     else:
-        normalization_method = resolve_normalization_method_for_weights(
-            config.model_in_channels, config.normalization_method, config.model_weights
-        )
-        if normalization_method == NORMALIZATION_METHOD_BANDWISE:
-            band_norm_layer = transforms.Normalize(mean=band_mean, std=band_std)
-        elif normalization_method == NORMALIZATION_METHOD_SSL4EO:
-            band_norm_layer = SSL4EONormalize()
-        else:
-            band_norm_layer = build_normalization_transform(normalization_method)
+        band_norm_layer, _ = _resolve_ssl4eo_transform(config)
     print(f"band norm method: {band_norm_layer}")
     train_steps.extend(
         [
@@ -1123,9 +1172,12 @@ def _build_neuco_loader(
     config: ModelEvalConfig,
     *,
     modalities: Sequence[str],
+    expected_channels: Optional[int] = None,
 ) -> DataLoader:
-    model_transform, transform_key = _resolve_ssl4eo_transform(config)
-    transform = transforms.Compose([transforms.RandomHorizontalFlip(), model_transform])
+    model_transform, transform_key = _resolve_ssl4eo_transform(
+        config, expected_channels=expected_channels
+    )
+    transform = transforms.Compose([model_transform])
     _log_transform(f"NeuCo transform ({transform_key})", transform)
 
 
@@ -1164,29 +1216,20 @@ def _build_neuco_loader(
         # print(f"NeuCo batch image shape: {image.shape if isinstance(image, torch.Tensor) else 'N/A'}")
     return loader
 
-def _build_ssl4eo_dataset(config: ModelEvalConfig) -> torch.utils.data.Dataset:
+def _build_ssl4eo_dataset(
+    config: ModelEvalConfig,
+    *,
+    expected_channels: Optional[int] = None,
+) -> torch.utils.data.Dataset:
     if config.ssl4eo_root is None:
         raise RuntimeError("SSL4EO dataset root must be provided for diagnostics")
 
     ensure_hydra_original_cwd()
 
-    s2_transform = select_ssl4eo_transform(config.model_weights)
-    if s2_transform is None:
-        s2_transform = select_ssl4eo_transform(config.model_type)
-    if s2_transform is None:
-        print(f"Using default SSL4EO transform for tier {config.ssl4eo_s2_tier}")
-        normalization_method = resolve_normalization_method_for_weights(
-            config.model_in_channels, config.normalization_method, config.model_weights
-        )
-        if normalization_method in {NORMALIZATION_METHOD_BANDWISE, NORMALIZATION_METHOD_SSL4EO}:
-            norm_layer = SSL4EONormalize()
-        else:
-            norm_layer = build_normalization_transform(normalization_method)
-        s2_transform = transforms.Compose([
-                transforms.CenterCrop(224),
-                norm_layer,
-            ])
-    _log_transform("SSL4EO S2 transform", s2_transform)
+    s2_transform, transform_key = _resolve_ssl4eo_transform(
+        config, expected_channels=expected_channels
+    )
+    _log_transform(f"SSL4EO S2 transform ({transform_key})", s2_transform)
 
     dataset = SSL4EODataset(
         root=str(config.ssl4eo_root.expanduser()),
@@ -1213,9 +1256,10 @@ def _extract_ssl4eo_embeddings(
     model: nn.Module,
     *,
     device: torch.device,
-    max_batches_cka: int
+    max_batches_cka: int,
+    expected_channels: Optional[int] = None,
 ) -> Tuple[ModalityEmbeddings, ModalityEmbeddings, List[str]]:
-    dataset = _build_ssl4eo_dataset(config)
+    dataset = _build_ssl4eo_dataset(config, expected_channels=expected_channels)
 
     # Ensure S2 inputs match model channel expectations (e.g., drop B1/B9/B10 for 10-ch MS-CLIP).
     if config.model_in_channels == 10 and isinstance(getattr(dataset, "transforms", None), dict):
@@ -2139,7 +2183,7 @@ def _run_embedding_diagnostics(
                 epoch_diagnostics,
                 output_dir,
                 label="embeddings_raw",
-                plot_even_odd=True,
+                plot_even_odd=False,
             )
         else:
             logging.info(
@@ -2209,43 +2253,37 @@ def _run_embedding_diagnostics(
     
 
     for feature_name in ("projected", "backbone"):
-        # ciip is lorentz
-        curv = None
-        if 'lorentz' in config.model_type and feature_name == "projected":
-            use = 'poincare'
-            curv = config.curvature
-
-        else:
-            use = 'zscore'
-
-
         combined, modality_labels = _stack_features(feature_name)
         if combined.size == 0:
             continue
-        for mode in ("raw", use):
-            subset, subset_labels = _sample(combined, modality_labels, config.tsne_samples)
-            processed = preprocess_projection_data(subset, mode=mode, random_state=config.random_seed, curvature=curv)
-            coords = compute_projection(processed, method="tsne", random_state=config.random_seed)
-            if coords is not None:
-                suffix = mode
-                plot_projection(
-                    coords,
-                    subset_labels,
-                    output_dir / f"tsne_{feature_name}_{suffix}.png",
-                    title=f"t-SNE ({feature_name}, {suffix})",
-                )
+        mode = "zscore"
+        subset, subset_labels = _sample(combined, modality_labels, config.tsne_samples)
+        processed = preprocess_projection_data(
+            subset,
+            mode=mode,
+            random_state=config.random_seed,
+        )
+        coords = compute_projection(processed, method="tsne", random_state=config.random_seed)
+        if coords is not None:
+            suffix = "zscore"
+            plot_projection(
+                coords,
+                subset_labels,
+                output_dir / f"tsne_{feature_name}_{suffix}.png",
+                title=f"t-SNE ({feature_name}, {suffix})",
+            )
 
-            subset, subset_labels = _sample(combined, modality_labels, config.pca_samples)
-            processed = preprocess_projection_data(subset, mode=mode, random_state=config.random_seed)
-            if processed.shape[0] >= 2:
-                suffix = "zscore" if mode == "zscore" else "raw"
-                pca_coords = PCA(n_components=2, random_state=config.random_seed).fit_transform(processed)
-                plot_projection(
-                    pca_coords,
-                    subset_labels,
-                    output_dir / f"pca_{feature_name}_{suffix}.png",
-                    title=f"PCA ({feature_name}, {suffix})",
-                )
+        subset, subset_labels = _sample(combined, modality_labels, config.pca_samples)
+        processed = preprocess_projection_data(subset, mode=mode, random_state=config.random_seed)
+        if processed.shape[0] >= 2:
+            suffix = "zscore"
+            pca_coords = PCA(n_components=2, random_state=config.random_seed).fit_transform(processed)
+            plot_projection(
+                pca_coords,
+                subset_labels,
+                output_dir / f"pca_{feature_name}_{suffix}.png",
+                title=f"PCA ({feature_name}, {suffix})",
+            )
     print(f"Embedding diagnostics saved to {output_dir}")
 
 def _run_hyperbolic_visualisations(
@@ -2311,6 +2349,7 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
         croma_weights=config.croma_weights,
         croma_image_resolution=config.croma_image_resolution,
         ciip_framework=config.ciip_framework,
+        ciip_model_source=config.ciip_model_source,
         enable_s1=config.evaluation_modality.lower() == "s1",
     )
     print(f'Model loaded')
@@ -2320,9 +2359,15 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
         raise ValueError
     print(device)
     adapter = adapter.to(device)
+    
+    # Distribute across multiple GPUs with DataParallel
+    # if torch.cuda.device_count() > 1:
+    #     print(f"Using {torch.cuda.device_count()} GPUs")
+    #     adapter = torch.nn.DataParallel(adapter)
+    
     adapter.eval()
-    base_model = getattr(adapter, "base_model", adapter)
-    is_lorentz = getattr(adapter, "is_lorentz", False)
+    base_model = getattr(adapter, "base_model" if not isinstance(adapter, torch.nn.DataParallel) else "module.base_model", adapter)
+    is_lorentz = getattr(adapter, "is_lorentz" if not isinstance(adapter, torch.nn.DataParallel) else "module.is_lorentz", False)
     # save curvature to config if lorentz
     if is_lorentz and hasattr(base_model, "curvature"):
         config.curvature = float(base_model.curvature)
@@ -2344,8 +2389,6 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
         "resnet18_s2_all_moco",
         "moco",
         "dino",
-        "galileo_s2",
-        "galileo",
     }
     if (config.model_weights and config.model_weights in thirteen_band_models) or (
         config.model_type and config.model_type in thirteen_band_models
@@ -2361,6 +2404,7 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
             "model_weights": config.model_weights,
             "model_path": config.model_path,
             "ciip_framework": config.ciip_framework,
+            "ciip_model_source": config.ciip_model_source,
             "model_in_channels": config.model_in_channels,
             "normalization_method": config.normalization_method,
             "eurosat_root": config.eurosat_root,
@@ -2386,7 +2430,7 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
     model_transform, transform_key = _resolve_ssl4eo_transform(config)
     transform_label = f"ssl4eo_transform:{transform_key}"
     normalization_label = _sanitize_label(transform_label)
-    print(f"Using model-specific transform for normalization: {transform_label}")
+    print(f"Using model-specific SSL4EO transform for normalization: {transform_label}")
 
 
     if args.disable_eurosat == False:
@@ -2541,16 +2585,20 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
             else:
                 print(f"Extracting NeuCo embeddings for modality {modality} into {csv_out_backbone.parent}")
                 neuco_output_dir.mkdir(parents=True, exist_ok=True)
-                neuco_loader = _build_neuco_loader(config, modalities=[modality])
+                expected_channels = _infer_model_in_channels(
+                    adapter, config.model_in_channels, modality=active_modality
+                )
+                neuco_loader = _build_neuco_loader(
+                    config,
+                    modalities=[modality],
+                    expected_channels=expected_channels,
+                )
                 _print_band_stats(
                     f"NeuCo eval ({modality})",
                     neuco_loader,
                     max_batches=config.stats_max_batches,
                 )
 
-                expected_channels = (
-                    _infer_model_in_channels(adapter, config.model_in_channels, modality=active_modality)
-                )
                 with _use_adapter_modality(adapter, active_modality):
                     neuco_bundle = _extract_embeddings(
                         adapter,
@@ -2585,6 +2633,10 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
                 embedding_dim_backbone = "1024"
             elif 'rcf_13ch' in config.model_weights.lower() if config.model_weights else False:
                 embedding_dim_backbone = "512"
+            elif 'transformer' in config.ciip_framework.lower() if config.ciip_framework else False:
+                embedding_dim_backbone = "768"
+            elif 'terramind' in config.model_weights.lower() if config.model_weights else False:
+                embedding_dim_backbone = "768"
             else:
                 backbone_tensor = getattr(neuco_bundle, "backbone", None) if neuco_bundle is not None else None
 
@@ -2690,7 +2742,8 @@ def run_full_evaluation(config: ModelEvalConfig) -> None:
             config,
             adapter,
             device=device,
-            max_batches_cka=max_batches_cka
+            max_batches_cka=max_batches_cka,
+            expected_channels=model_channels,
         )
 
         # create Path fo diagnostics
@@ -2824,6 +2877,9 @@ if __name__ == "__main__":
             "vitsmall16_s2_all_moco",
             "llama3_ms_clip_base",
             "remoteclip",
+            "galileo",
+            "ssl4eo_mae_optical",
+            "terramind_base",
             "ciip_vit_dai",
             "ciip_text_s2",
             "croma",
@@ -2841,6 +2897,12 @@ if __name__ == "__main__":
         "--ciip-framework",
         choices=["modified_resnet", "transformer", "resnet18", "resnet50"],
         help="Backbone framework for CIIP checkpoints (defaults to auto-detect).",
+    )
+    parser.add_argument(
+        "--ciip-model-source",
+        choices=["current", "posenc"],
+        default="current",
+        help="Choose CIIP implementation to instantiate checkpoints from.",
     )
     
     parser.add_argument("--tsne-samples", type=int, default=1500, help="Samples used for t-SNE visualisations.")
@@ -2980,15 +3042,6 @@ if __name__ == "__main__":
         ciip_epoch=args.ciip_epoch,
     )
     output_dir = Path("/home/juro4948/ciip/diagnostics/unified_eval") / model_tag
-    if args.model_type == "ciip_checkpoint":
-        is_vit_run = (
-            args.ciip_framework == "transformer"
-            or ("vit" in (args.model_path or "").lower())
-        )
-        if not is_vit_run and args.ciip_framework is None:
-            is_vit_run = _looks_like_vit_checkpoint(args.checkpoint)
-        if is_vit_run:
-            output_dir = Path(f"{output_dir}_meanpool")
     args.output_dir = output_dir
 
      #dino_13bands/") #curv_init_1_epoch10/ curv_init_1
@@ -3016,6 +3069,7 @@ if __name__ == "__main__":
         model_type=args.model_type,
         model_weights=args.model_weights,
         ciip_framework=args.ciip_framework,
+        ciip_model_source=args.ciip_model_source,
         model_in_channels=args.model_in_channels,
         croma_weights=args.croma_weights,
         croma_image_resolution=args.croma_image_resolution,

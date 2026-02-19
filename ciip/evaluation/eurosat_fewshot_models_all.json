@@ -1,0 +1,22 @@
+{
+  "models": [
+    {
+      "model_type": "ciip_checkpoint",
+      "model_path": "1_28-ViT-DAI",
+      "ciip_epoch": 300,
+      "ciip_framework": "transformer",
+      "model_in_channels": 12,
+      "model_weights": "ciip_10kscale",
+      "ciip_model_source": "current"
+    },
+    {
+      "model_type": "ciip_checkpoint",
+      "model_path": "2_9_2026_vit-dai-masked-reconstruct",
+      "ciip_epoch": 300,
+      "ciip_framework": "transformer",
+      "model_in_channels": 12,
+      "model_weights": "ciip_10kscale",
+      "ciip_model_source": "posenc"
+    }
+  ]
+}

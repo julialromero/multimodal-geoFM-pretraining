@@ -514,8 +514,11 @@ class E2SChallengeDataset(Dataset):
             data = {m: data[..., start_ind_of_modality[m]: start_ind_of_modality[m] + n_bands_per_modality[m], :, :] for m in self.modalities}
 
         if self.output_file_name:
-            
-            return {'data': data, 'file_name': file_name}
+            return {
+                'data': data,
+                'file_name': file_name,
+                'season_indices': torch.as_tensor(seasons, dtype=torch.long),
+            }
         else:
             
             return data
@@ -532,6 +535,7 @@ def collate_fn(batch):
     elif isinstance(batch, list) and isinstance(batch[0], dict):
         file_names = [sample['file_name'] for sample in batch]
         data = [sample['data'] for sample in batch]
+        season_indices = [sample.get('season_indices') for sample in batch]
         if isinstance(data[0], torch.Tensor):
             data = torch.concat(data, dim=0)
         elif isinstance(data[0], dict):
@@ -539,7 +543,10 @@ def collate_fn(batch):
                 m: torch.concat([b[m] for b in data], dim=0)
                 for m in data[0].keys()
             }
-        return {'data': data, 'file_name': file_names}
+        out = {'data': data, 'file_name': file_names}
+        if all(s is not None for s in season_indices):
+            out['season_indices'] = torch.stack([s for s in season_indices], dim=0)
+        return out
 
 class InputResizer(nn.Module):
     """

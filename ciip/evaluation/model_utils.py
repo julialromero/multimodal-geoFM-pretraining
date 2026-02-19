@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import logging
+import os
 import sys
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Type
 
 import torch
 import torch.nn.functional as F
@@ -34,9 +36,11 @@ from torchvision.models import resnet152, ResNet152_Weights
 
 _CROMA_MODULE: Optional[ModuleType] = None
 _GALILEO_MODULE: Optional[ModuleType] = None
+_CIIP_CLASS_CACHE: Dict[str, Tuple[Type[nn.Module], Type[nn.Module]]] = {}
 PANGAEA_CONFIG_ROOT = Path("/local/ms-data/pangaea-bench/configs")
 GALILEO_SINGLE_FILE = Path("/local/ms-data/galileo/single_file_galileo.py")
 GALILEO_DEFAULT_WEIGHTS = Path("/local/ms-data/pangaea-bench/pretrained_models/models/base")
+GALILEO_NORMALIZATION_JSON = Path("/local/ms-data/galileo/config/normalization.json")
 
 
 class RandomConvFeatures(nn.Module):
@@ -60,6 +64,96 @@ class RandomConvFeatures(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         features = self.conv(x)
         return features.mean(dim=(2, 3))
+
+
+def _normalize_ciip_model_source(source: Optional[str]) -> str:
+    if source is None:
+        source = os.getenv("CIIP_MODEL_SOURCE", "current")
+    normalized = str(source).strip().lower().replace("-", "_")
+    aliases = {
+        "current": "current",
+        "default": "current",
+        "legacy": "current",
+        "posenc": "posenc",
+        "models_posenc": "posenc",
+    }
+    resolved = aliases.get(normalized)
+    if resolved is None:
+        raise ValueError(
+            f"Unsupported CIIP model source '{source}'. Expected one of: current, posenc."
+        )
+    return resolved
+
+
+def _load_module_from_file(module_name: str, module_path: Path) -> ModuleType:
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Unable to import module '{module_name}' from '{module_path}'.")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_ciip_classes(ciip_model_source: Optional[str]) -> Tuple[Type[nn.Module], Type[nn.Module]]:
+    source = _normalize_ciip_model_source(ciip_model_source)
+    cached = _CIIP_CLASS_CACHE.get(source)
+    if cached is not None:
+        return cached
+
+    if source == "current":
+        classes = (CIIP, LorentzCIIP)
+        _CIIP_CLASS_CACHE[source] = classes
+        return classes
+
+    # Load alternate CIIP modules from ciip/models-posenc using a synthetic package
+    # name so relative imports (e.g., ".model") continue to work.
+    posenc_dir = Path(__file__).resolve().parents[1] / "models-posenc"
+    model_ciip_path = posenc_dir / "model_ciip.py"
+    model_path = posenc_dir / "model.py"
+    if not model_ciip_path.exists() or not model_path.exists():
+        raise FileNotFoundError(
+            "Requested ciip_model_source='posenc' but expected files were not found at "
+            f"{model_ciip_path} and {model_path}."
+        )
+
+    package_name = "ciip._models_posenc_runtime"
+    if package_name not in sys.modules:
+        package = ModuleType(package_name)
+        package.__path__ = [str(posenc_dir)]  # type: ignore[attr-defined]
+        sys.modules[package_name] = package
+
+    # Reuse the existing lorentz implementation from the main ciip package.
+    import ciip.lorentz as _ciip_lorentz
+    import ciip.mae_decoder as _ciip_mae_decoder
+    import ciip.masking as _ciip_masking
+
+    sys.modules[f"{package_name}.lorentz"] = _ciip_lorentz
+    posenc_mae_decoder_path = posenc_dir / "mae_decoder.py"
+    if posenc_mae_decoder_path.exists():
+        if f"{package_name}.mae_decoder" not in sys.modules:
+            _load_module_from_file(f"{package_name}.mae_decoder", posenc_mae_decoder_path)
+    else:
+        # models-posenc imports ".mae_decoder"; map that import to the shared ciip module.
+        sys.modules[f"{package_name}.mae_decoder"] = _ciip_mae_decoder
+    posenc_masking_path = posenc_dir / "masking.py"
+    if posenc_masking_path.exists():
+        if f"{package_name}.masking" not in sys.modules:
+            _load_module_from_file(f"{package_name}.masking", posenc_masking_path)
+    else:
+        # models-posenc imports ".masking"; map that import to the shared ciip masking module.
+        sys.modules[f"{package_name}.masking"] = _ciip_masking
+    if f"{package_name}.model" not in sys.modules:
+        _load_module_from_file(f"{package_name}.model", model_path)
+    if f"{package_name}.model_ciip" not in sys.modules:
+        _load_module_from_file(f"{package_name}.model_ciip", model_ciip_path)
+
+    model_ciip_module = sys.modules[f"{package_name}.model_ciip"]
+    ciip_cls = getattr(model_ciip_module, "CIIP")
+    lorentz_cls = getattr(model_ciip_module, "LorentzCIIP")
+    classes = (ciip_cls, lorentz_cls)
+    _CIIP_CLASS_CACHE[source] = classes
+    return classes
 
 
 
@@ -112,6 +206,23 @@ def _load_galileo_module() -> ModuleType:
     return module
 
 
+def _load_galileo_normalization_values(path: Path) -> Dict[Any, Any]:
+    """Load Galileo normalization JSON using the same key casting as Dataset.load_normalization_values."""
+
+    if not path.exists():
+        raise FileNotFoundError(f"Galileo normalization file not found: {path}")
+    with path.open("r") as handle:
+        norm_dict = json.load(handle)
+
+    output: Dict[Any, Any] = {}
+    for key, value in norm_dict.items():
+        if isinstance(key, str) and "n" not in key:
+            output[int(key)] = value
+        else:
+            output[key] = value
+    return output
+
+
 def _load_pangaea_encoder_cfg(encoder_name: str) -> Dict[str, Any]:
     cfg_path = PANGAEA_CONFIG_ROOT / "encoder" / f"{encoder_name}.yaml"
     if not cfg_path.exists():
@@ -146,6 +257,81 @@ def _build_remoteclip_model() -> nn.Module:
     model.load_encoder_weights(logging.getLogger("remoteclip"))
     model.eval()
     return model
+
+
+def _resolve_pangaea_encoder_weights(encoder_name: str) -> Tuple[Dict[str, Any], Path]:
+    cfg = _load_pangaea_encoder_cfg(encoder_name)
+    encoder_weights = Path(cfg["encoder_weights"])
+    if not encoder_weights.is_absolute():
+        encoder_weights = PANGAEA_CONFIG_ROOT.parent / encoder_weights
+    return cfg, encoder_weights
+
+
+def _build_ssl4eo_mae_optical_model() -> nn.Module:
+    if str(PANGAEA_CONFIG_ROOT.parent) not in sys.path:
+        sys.path.append(str(PANGAEA_CONFIG_ROOT.parent))
+    from pangaea.encoders.ssl4eo_mae_encoder import SSL4EO_MAE_OPTICAL_Encoder
+
+    cfg, encoder_weights = _resolve_pangaea_encoder_weights("ssl4eo_mae_optical")
+    model = SSL4EO_MAE_OPTICAL_Encoder(
+        encoder_weights=encoder_weights,
+        input_bands=cfg["input_bands"],
+        input_size=cfg["input_size"],
+        output_layers=cfg["output_layers"],
+        output_dim=cfg["output_dim"],
+        download_url=cfg.get("download_url", ""),
+        embed_dim=cfg["embed_dim"],
+        patch_size=cfg["patch_size"],
+        in_chans=cfg["in_chans"],
+        depth=cfg["depth"],
+        num_heads=cfg["num_heads"],
+        mlp_ratio=cfg["mlp_ratio"],
+    )
+    model.load_encoder_weights(logging.getLogger("ssl4eo_mae_optical"))
+    model.eval()
+    return model
+
+
+def _build_terramind_model(encoder_name: str) -> nn.Module:
+    if str(PANGAEA_CONFIG_ROOT.parent) not in sys.path:
+        sys.path.append(str(PANGAEA_CONFIG_ROOT.parent))
+    from pangaea.encoders import terramind_encoder
+
+    cfg, encoder_weights = _resolve_pangaea_encoder_weights(encoder_name)
+    optical_bands = cfg.get("input_bands", {}).get("optical")
+    if not optical_bands:
+        raise ValueError(f"{encoder_name} config must define optical input_bands.")
+    target = str(cfg.get("_target_", "")).strip()
+    builder_name = target.rsplit(".", 1)[-1] if target else "terramind_v1_base"
+    builder = getattr(terramind_encoder, builder_name, None)
+    if builder is None:
+        raise ValueError(
+            f"Unable to resolve TerraMind builder '{builder_name}' from _target_='{target}'."
+        )
+    # Keep TerraMind aligned to optical-only downstream evaluation.
+    terramind_input_bands = {"optical": optical_bands}
+    terramind_modalities = ["S2L2A"]
+    model = builder(
+        encoder_weights=encoder_weights,
+        input_size=cfg["input_size"],
+        input_bands=terramind_input_bands,
+        output_layers=cfg["output_layers"],
+        output_dim=cfg["output_dim"],
+        download_url=cfg.get("download_url", ""),
+        patch_size=cfg["patch_size"],
+        merge_method=cfg.get("merge_method", "mean"),
+        modalities=terramind_modalities,
+    )
+    model.eval()
+    return model
+
+
+def _build_terramind_base_model() -> nn.Module:
+    return _build_terramind_model("terramind_base")
+
+
+def _build_terramind_large_model() -> nn.Module:
+    return _build_terramind_model("terramind_large")
 
 
 class EvaluationAdapter(nn.Module):
@@ -700,6 +886,53 @@ class RemoteClipEvaluationAdapter(EvaluationAdapter):
         return None
 
 
+class PangaeaOpticalEvaluationAdapter(EvaluationAdapter):
+    """Adapter for Pangaea optical encoders returning spatial feature maps."""
+
+    supports_ssl4eo = True
+    supports_multimodal_dict = True
+
+    def __init__(self, model: nn.Module) -> None:
+        super().__init__()
+        self.base_model = model.eval()
+        self.encoder_s2 = model
+        self.encoder_s1 = None
+        try:
+            self.dtype_s2 = next(self.encoder_s2.parameters()).dtype
+        except StopIteration:
+            self.dtype_s2 = torch.float32
+        self.dtype_s1 = self.dtype_s2
+
+    def prepare_inputs(self, batch: Any, *, device: torch.device, modality: str = "s2") -> Dict[str, torch.Tensor]:
+        if isinstance(batch, dict):
+            tensor = batch.get("image") if "image" in batch else batch.get("data") or batch.get("optical")
+        else:
+            tensor = batch
+        if isinstance(tensor, torch.Tensor) and tensor.ndim == 3:
+            tensor = tensor.unsqueeze(0)
+        tensor = tensor.to(device=device, dtype=self.dtype_s2)
+        if isinstance(tensor, torch.Tensor) and tensor.ndim == 4:
+            tensor = tensor.unsqueeze(2)  # (B, C, 1, H, W)
+        return {"optical": tensor}
+
+    def compute_backbone(self, images: Dict[str, torch.Tensor], modality: str = "s2") -> torch.Tensor:
+        outputs = self.encoder_s2(images)
+        if isinstance(outputs, (tuple, list)) and outputs:
+            feats = outputs[-1]
+        else:
+            feats = outputs
+        if feats.ndim == 4:
+            feats = feats.mean(dim=(2, 3))
+        elif feats.ndim == 3:
+            feats = feats.mean(dim=1)
+        elif feats.ndim != 2:
+            raise RuntimeError(f"Unexpected feature shape from Pangaea encoder: {feats.shape}")
+        return feats
+
+    def compute_projected(self, images: Dict[str, torch.Tensor], modality: str = "s2") -> Optional[torch.Tensor]:
+        return None
+
+
 class GalileoS2Wrapper(nn.Module):
     """Thin wrapper around Galileo encoder for Sentinel-2-only evaluation."""
 
@@ -718,6 +951,8 @@ class GalileoS2Wrapper(nn.Module):
         "B11",
         "B12",
     ]
+    S2_BAND_ORDERING_12 = [band for band in S2_BAND_ORDERING if band != "B10"]
+    S2_BAND_ORDERING_10 = ["B2", "B3", "B4", "B5", "B6", "B7", "B8", "B8A", "B11", "B12"]
 
     def __init__(
         self,
@@ -752,19 +987,100 @@ class GalileoS2Wrapper(nn.Module):
         self._time_band_groups_idx = module.TIME_BAND_GROUPS_IDX
         self._static_band_groups_idx = module.STATIC_BAND_GROUPS_IDX
         self._s2_bands = module.S2_BANDS
+        self.expected_s2_channels = len(self._s2_bands)
 
-        kept_s2_band_names = [val for val in self.S2_BAND_ORDERING if val in self._s2_bands]
-        self._kept_s2_band_idx = [
-            i for i, v in enumerate(self.S2_BAND_ORDERING) if v in self._s2_bands
-        ]
-        self._to_galileo_s2_map = [
-            self._space_time_bands.index(val) for val in kept_s2_band_names
-        ]
         self._s2_group_indices = [
             idx for idx, key in enumerate(self._space_time_groups_idx) if "S2" in key
         ]
 
-    def _preprocess_s2(self, s2: torch.Tensor):
+        normalizing_dict = _load_galileo_normalization_values(GALILEO_NORMALIZATION_JSON)
+        stats = normalizing_dict.get(len(self._space_time_bands))
+        if not isinstance(stats, dict) or "mean" not in stats or "std" not in stats:
+            raise ValueError(
+                "Galileo normalization stats are missing space-time entries "
+                f"for {len(self._space_time_bands)} channels."
+            )
+        mean = torch.as_tensor(stats["mean"], dtype=torch.float32)
+        std = torch.as_tensor(stats["std"], dtype=torch.float32)
+        if mean.numel() != len(self._space_time_bands) or std.numel() != len(self._space_time_bands):
+            raise ValueError(
+                "Galileo normalization stats have unexpected length: "
+                f"mean={mean.numel()}, std={std.numel()}, expected={len(self._space_time_bands)}."
+            )
+
+        # Replicate Normalizer(std=True) behavior for space-time bands:
+        # mean +/- 2*std for all dynamic channels except NDVI.
+        shift = mean - (2.0 * std)
+        div = 4.0 * std
+        ndvi_idx = self._space_time_bands.index("NDVI") if "NDVI" in self._space_time_bands else None
+        if ndvi_idx is not None:
+            shift[ndvi_idx] = 0.0
+            div[ndvi_idx] = 1.0
+        div = torch.where(div == 0, torch.ones_like(div), div)
+        self.register_buffer("_space_time_shift", shift, persistent=False)
+        self.register_buffer("_space_time_div", div, persistent=False)
+
+    def _resolve_s2_channel_layout(self, c_s2: int) -> tuple[list[int], list[int]]:
+        if c_s2 == len(self.S2_BAND_ORDERING):
+            input_bands = self.S2_BAND_ORDERING
+        elif c_s2 == len(self.S2_BAND_ORDERING_12):
+            input_bands = self.S2_BAND_ORDERING_12
+        elif c_s2 == len(self.S2_BAND_ORDERING_10):
+            input_bands = self.S2_BAND_ORDERING_10
+        else:
+            raise ValueError(
+                "Galileo expects one of 10/12/13 Sentinel-2 channels in known order; "
+                f"got {c_s2}."
+            )
+
+        source_indices: list[int] = []
+        target_indices: list[int] = []
+        for source_idx, band_name in enumerate(input_bands):
+            if band_name in self._s2_bands:
+                source_indices.append(source_idx)
+                target_indices.append(self._space_time_bands.index(band_name))
+
+        if len(source_indices) != len(self._s2_bands):
+            raise ValueError(
+                "Unable to map input Sentinel-2 channels to Galileo space-time bands "
+                f"(mapped={len(source_indices)}, expected={len(self._s2_bands)})."
+            )
+        return source_indices, target_indices
+
+    def _build_months(
+        self,
+        *,
+        b: int,
+        t: int,
+        device: torch.device,
+        months: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        if months is None:
+            month_idx = int(self.month)
+            months = torch.full((b, t), fill_value=month_idx, dtype=torch.long, device=device)
+        else:
+            if months.ndim == 1:
+                if b != 1 or months.shape[0] != t:
+                    raise ValueError(
+                        f"Galileo months must have shape (B, T)=({b}, {t}) or (T,) for B=1; got {tuple(months.shape)}"
+                    )
+                months = months.unsqueeze(0)
+            if months.shape != (b, t):
+                raise ValueError(
+                    f"Galileo months must have shape (B, T)=({b}, {t}); got {tuple(months.shape)}."
+                )
+            months = months.to(device=device, dtype=torch.long)
+
+        if torch.any(months < 0) or torch.any(months > 11):
+            raise ValueError("Galileo months must be 0-indexed and within [0, 11].")
+        return months
+
+    def _normalize_space_time(self, s_t_x: torch.Tensor) -> torch.Tensor:
+        shift = self._space_time_shift.to(device=s_t_x.device, dtype=s_t_x.dtype).view(1, 1, 1, 1, -1)
+        div = self._space_time_div.to(device=s_t_x.device, dtype=s_t_x.dtype).view(1, 1, 1, 1, -1)
+        return (s_t_x - shift) / div
+
+    def _preprocess_s2(self, s2: torch.Tensor, months: Optional[torch.Tensor] = None):
         if s2.ndim == 4:
             b, h, w, c_s2 = s2.shape
             t = 1
@@ -773,11 +1089,7 @@ class GalileoS2Wrapper(nn.Module):
         else:
             raise ValueError(f"Expected Galileo input with 4 or 5 dims, got {s2.shape}")
 
-        if c_s2 != len(self.S2_BAND_ORDERING):
-            raise ValueError(
-                f"Galileo expects {len(self.S2_BAND_ORDERING)} S2 channels (L1C order); "
-                f"got {c_s2}."
-            )
+        source_indices, target_indices = self._resolve_s2_channel_layout(c_s2)
 
         s_t_x = torch.zeros(
             (b, h, w, t, len(self._space_time_bands)),
@@ -785,9 +1097,10 @@ class GalileoS2Wrapper(nn.Module):
             device=s2.device,
         )
         if s2.ndim == 4:
-            s_t_x[:, :, :, 0, self._to_galileo_s2_map] = s2[:, :, :, self._kept_s2_band_idx]
+            s_t_x[:, :, :, 0, target_indices] = s2[:, :, :, source_indices]
         else:
-            s_t_x[:, :, :, :, self._to_galileo_s2_map] = s2[:, :, :, :, self._kept_s2_band_idx]
+            s_t_x[:, :, :, :, target_indices] = s2[:, :, :, :, source_indices]
+        s_t_x = self._normalize_space_time(s_t_x)
 
         s_t_m = torch.ones(
             (b, h, w, t, len(self._space_time_groups_idx)),
@@ -796,7 +1109,7 @@ class GalileoS2Wrapper(nn.Module):
         )
         s_t_m[:, :, :, :, self._s2_group_indices] = 0
 
-        months = torch.ones((b, t), dtype=s2.dtype, device=s2.device) * self.month
+        months = self._build_months(b=b, t=t, device=s2.device, months=months)
 
         return (
             s_t_x,
@@ -807,10 +1120,10 @@ class GalileoS2Wrapper(nn.Module):
             torch.ones((b, h, w, len(self._space_band_groups_idx)), dtype=s2.dtype, device=s2.device),
             torch.ones((b, t, len(self._time_band_groups_idx)), dtype=s2.dtype, device=s2.device),
             torch.ones((b, len(self._static_band_groups_idx)), dtype=s2.dtype, device=s2.device),
-            months.long(),
+            months,
         )
 
-    def forward(self, s2: torch.Tensor) -> torch.Tensor:
+    def forward(self, s2: torch.Tensor, months: Optional[torch.Tensor] = None) -> torch.Tensor:
         (
             s_t_x,
             sp_x,
@@ -821,7 +1134,7 @@ class GalileoS2Wrapper(nn.Module):
             t_m,
             st_m,
             month,
-        ) = self._preprocess_s2(s2)
+        ) = self._preprocess_s2(s2, months=months)
 
         output = self.encoder(
             s_t_x,
@@ -848,6 +1161,7 @@ class GalileoEvaluationAdapter(EvaluationAdapter):
     """Adapter around the Galileo base encoder for Sentinel-2."""
 
     supports_ssl4eo = True
+    supports_temporal_months = True
 
     def __init__(self, model: nn.Module) -> None:
         super().__init__()
@@ -856,23 +1170,51 @@ class GalileoEvaluationAdapter(EvaluationAdapter):
         self.encoder_s1 = None
         self.dtype_s2 = torch.float32
         self.dtype_s1 = torch.float32
+        self.expected_s2_channels = getattr(model, "expected_s2_channels", None)
 
-    def prepare_inputs(self, batch: Any, *, device: torch.device, modality: str = "s2") -> torch.Tensor:
+    def prepare_inputs(self, batch: Any, *, device: torch.device, modality: str = "s2") -> Any:
         if modality.lower() != "s2":
             raise ValueError("Galileo adapter only supports Sentinel-2 inputs.")
-        tensor = super().prepare_inputs(batch, device=device, modality=modality)
+
+        months: Optional[torch.Tensor] = None
+        tensor_input = batch
+        if isinstance(batch, dict):
+            tensor_input = batch.get("pixels", batch.get("image", batch.get("data")))
+            months = batch.get("months")
+            if tensor_input is None:
+                raise ValueError("Galileo adapter expected 'pixels'/'image'/'data' in input dict.")
+
+        tensor = super().prepare_inputs(tensor_input, device=device, modality=modality)
         if isinstance(tensor, torch.Tensor) and tensor.ndim == 3:
             tensor = tensor.unsqueeze(0)
         if isinstance(tensor, torch.Tensor) and tensor.ndim == 4:
-            tensor = tensor.permute(0, 2, 3, 1)
+            tensor = tensor.permute(0, 2, 3, 1).unsqueeze(3)
         elif isinstance(tensor, torch.Tensor) and tensor.ndim == 5:
             tensor = tensor.permute(0, 3, 4, 1, 2)
+        if months is not None:
+            months = months.to(device=device, dtype=torch.long, non_blocking=True)
+            return {"s2": tensor, "months": months}
         return tensor
 
-    def compute_backbone(self, images: torch.Tensor, modality: str = "s2") -> torch.Tensor:
+    def compute_backbone(self, images: Any, modality: str = "s2") -> torch.Tensor:
         if modality.lower() != "s2":
             raise ValueError("Galileo adapter only supports Sentinel-2 inputs.")
-        features = self.encoder_s2(images)
+
+        months: Optional[torch.Tensor] = None
+        tensor = images
+        if isinstance(images, dict):
+            tensor = images.get("s2")
+            months = images.get("months")
+            if tensor is None:
+                raise ValueError("Galileo adapter expected 's2' tensor in prepared inputs.")
+
+        if tensor.ndim != 5:
+            raise ValueError(f"Galileo adapter expects [B, H, W, T, C] inputs, got {tuple(tensor.shape)}.")
+        b, _, _, t, _ = tensor.shape
+        if months is None:
+            month_idx = int(getattr(self.encoder_s2, "month", 6))
+            months = torch.full((b, t), fill_value=month_idx, dtype=torch.long, device=tensor.device)
+        features = self.encoder_s2(tensor, months=months)
         if isinstance(features, (tuple, list)):
             features = features[0]
         if features.ndim > 2:
@@ -1228,6 +1570,7 @@ def build_model_from_checkpoint(
     checkpoint: Path,
     *,
     framework: Optional[str] = None,
+    ciip_model_source: Optional[str] = "current",
 ) -> Tuple[nn.Module, bool]:
     """Instantiate a CIIP or LorentzCIIP model from a checkpoint path."""
     ckpt = torch.load(checkpoint, map_location="cpu",  weights_only=False)
@@ -1278,12 +1621,19 @@ def build_model_from_checkpoint(
         framework=framework,
     )
 
+    ciip_cls, lorentz_cls = _load_ciip_classes(ciip_model_source)
     if is_lorentz:
-        model: nn.Module = LorentzCIIP(**kwargs)
+        model = lorentz_cls(**kwargs)
     else:
-        model = CIIP(**kwargs)
+        model = ciip_cls(**kwargs)
 
     missing, unexpected = model.load_state_dict(cleaned, strict=False)
+    if "encoder_s2.positional_embedding" in missing:
+        raise RuntimeError(
+            "Failed to load CIIP checkpoint: missing required key "
+            "'encoder_s2.positional_embedding'. "
+            "This usually indicates a model architecture/source mismatch."
+        )
     if missing or unexpected:
         logging.warning("Checkpoint loaded with missing=%s, unexpected=%s", missing, unexpected)
 
@@ -1291,14 +1641,17 @@ def build_model_from_checkpoint(
     return model, is_lorentz
 
 
-def _resolve_resnet_weights(name: Optional[str]) -> Optional[ResNet50_Weights]:
+def _resolve_resnet_weights(
+    name: Optional[str],
+) -> Tuple[Optional[ResNet50_Weights], Optional[ResNet50_Weights]]:
     if name is None:
-        return None
+        return None, None
     normalized = name.lower()
     if normalized == "dino":
         return None, ResNet50_Weights.SENTINEL2_ALL_DINO
     if normalized == "moco":
-        return ResNet50_Weights.SENTINEL1_GRD_MOCO, ResNet50_Weights.SENTINEL2_ALL_MOCO
+        # Use only the Sentinel-2 MOCO weights.
+        return None, ResNet50_Weights.SENTINEL2_ALL_MOCO
     raise ValueError(f"Unsupported ResNet50 weights '{name}'. Expected 'dino' or 'moco'.")
 
 
@@ -1436,6 +1789,12 @@ def _build_backbone_adapter(model_weights: Optional[str]) -> EvaluationAdapter:
         return _build_llama3_ms_clip_adapter()
     elif normalized == "remoteclip":
         return RemoteClipEvaluationAdapter(_build_remoteclip_model())
+    elif normalized == "ssl4eo_mae_optical":
+        return PangaeaOpticalEvaluationAdapter(_build_ssl4eo_mae_optical_model())
+    elif normalized == "terramind_base":
+        return PangaeaOpticalEvaluationAdapter(_build_terramind_base_model())
+    elif normalized == "terramind_large":
+        return PangaeaOpticalEvaluationAdapter(_build_terramind_large_model())
     else:
         raise ValueError(f"Unsupported backbone-only weights '{model_weights}'.")
 
@@ -1452,6 +1811,7 @@ def build_evaluation_adapter(
     croma_weights: Optional[Path] = None,
     croma_image_resolution: int = 120,
     ciip_framework: Optional[str] = None,
+    ciip_model_source: str = "current",
     galileo_weights: Optional[Path] = None,
     enable_s1: bool = True,
 ) -> EvaluationAdapter:
@@ -1460,7 +1820,11 @@ def build_evaluation_adapter(
     if model_type == "ciip_checkpoint":
         if checkpoint is None:
             raise ValueError("checkpoint must be provided when using 'ciip_checkpoint'")
-        model, is_lorentz = build_model_from_checkpoint(checkpoint, framework=ciip_framework)
+        model, is_lorentz = build_model_from_checkpoint(
+            checkpoint,
+            framework=ciip_framework,
+            ciip_model_source=ciip_model_source,
+        )
         return CiipEvaluationAdapter(model, is_lorentz=is_lorentz)
 
     if model_type == "torchgeo_resnet50":
@@ -1500,6 +1864,7 @@ __all__ = [
     "BackboneOnlyAdapter",
     "OpenClipVisionAdapter",
     "RemoteClipEvaluationAdapter",
+    "PangaeaOpticalEvaluationAdapter",
     "GalileoEvaluationAdapter",
     "CromaEvaluationAdapter",
     "build_model_from_checkpoint",
