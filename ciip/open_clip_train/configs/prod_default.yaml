@@ -3,7 +3,7 @@
 # please use the exact name of the arg attribute as the name of the variable
 io:
   checkpoint_path: #/projects/bekj/jromero5/models/2026-01-28_22-51-25/2026_01_28-22_51_54-model_transformer-lr_0.000125-b_2-j_1-p_amp_bfloat16/checkpoints
-  save_frequency: 10
+  save_frequency: 20
   save_logs: True
   logs: 
   # /work/nvme/bekj/jromero5/ciip/logs/1node-4gpus/2026-01-28_22-51-25 #/home/juro4948/ciip/logs #base path for logs 
@@ -48,8 +48,8 @@ model:
     s2_weights: "MOCO" # Only support for resnet50. S2: MOCO, DINO
   embed_dim: 512 #1024 # transformer: 512 #1024
   # pre_projection_dim: 2048
-  s1_layers: 12 #[3, 4, 6, 3] #12 #[3, 4, 6, 3] # transformer:12
-  s2_layers: 12 #[3, 4, 6, 3] #12 #[3, 4, 6, 3] # transformer:12
+  s1_layers: 12 #[3, 4, 6, 3] # transformer:12
+  s2_layers: 12 #[3, 4, 6, 3] # transformer:12
 
   width: 768 # 32 # transformer:768
   s2_ciip_checkpoint: #/local/ms-data/SSL4EO/model/2025_11_29-20_57_06-model_resnet50-lr_0.001-b_6-j_6-p_amp_bfloat16/checkpoints/epoch_20.pt  # optional path to CIIP checkpoint; when set with encoder_pair=s2_text, only S2 weights are loaded
@@ -104,11 +104,8 @@ loss:
   entail_weight: 0.0
 
 recon:
-  lambda: 1
-  warmup_epochs: 15
-  normalize_targets: False
-  grad_log_enabled: True
-  grad_log_interval: 100
+  lambda: 0.1
+  warmup_epochs: 5
 
 datamodule:
   batch_size: 4 #2 #6 # batch size per GPU # 4 x 2 x 64 x 45 = 
@@ -135,13 +132,10 @@ dataset:
   root: /work/nvme/bekj/jromero5/SSL4EOv1.1/train #/local/ms-data/SSL4EO/ #TODO: documentation about proper directory to run from
   s2_tier: S2L2A # TOA data from Sentinel-2 tier 1C; s2a for BOA corrections
   use_transforms: False
-  pair_random_flip: True
-  pair_hflip_prob: 0.5
-  pair_vflip_prob: 0.5
   # transforms are automatically used and defined in data.py get_transforms() and SSL4EO dataset
   
 train:
-  name: "2_11_2026_resnet" #12_27_2025 #12_14_2025_joint_ciip_s1s2_text
+  name: "2_07_2026" #12_27_2025 #12_14_2025_joint_ciip_s1s2_text
   # fraction of data to use for validation
   # device: cuda
   use_val: False
@@ -156,7 +150,7 @@ train:
   beta2: 0.999
   eps: 1.0e-8
   val_frequency: 1
-  accum_freq: 8
+  accum_freq: 12
   save_logs: True
   
   delete_previous_checkpoint: False

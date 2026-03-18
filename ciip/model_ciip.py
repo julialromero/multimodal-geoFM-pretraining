@@ -548,14 +548,10 @@ class CIIP(nn.Module):
     ) -> torch.Tensor:
         patch_dim = decoder.pred.out_features
         patch_size = int(round(math.sqrt(patch_dim / images.shape[1])))
-        normalize_targets = True
-        if self.recon_cfg is not None:
-            normalize_targets = bool(getattr(self.recon_cfg, "normalize_targets", True))
         targets = prepare_reconstruction_targets(
             images,
             patch_size=patch_size,
             clip_range=clip_range,
-            normalize_per_patch=normalize_targets,
         )
         preds = decoder(token_info["patch_tokens"], token_info["ids_restore"])
         mask = token_info["mask"]

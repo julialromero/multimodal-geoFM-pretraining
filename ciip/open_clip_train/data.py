@@ -21,6 +21,7 @@ import xarray as xr
 from zarr.storage import ZipStore
 from torchvision import transforms
 import torchvision
+import torchvision.transforms.functional as F
 ### band statistics: mean & std
 # calculated from 50k data
 ### OLD SSL4EO v1.0 STATS
@@ -119,91 +120,6 @@ from torch.utils.data import Dataset
 
 import torchvision.transforms as T
 
-
-def _apply_aligned_random_flips(
-    s1: torch.Tensor,
-    s2: torch.Tensor,
-    hflip_prob: float,
-    vflip_prob: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Apply identical random flips to aligned S1/S2 tensors of shape (P, C, H, W)."""
-    if s1.dim() != 4 or s2.dim() != 4:
-        raise ValueError(f"Expected 4D tensors (P,C,H,W), got {s1.shape} and {s2.shape}")
-    if s1.shape[0] != s2.shape[0] or s1.shape[-2:] != s2.shape[-2:]:
-        raise ValueError(f"S1/S2 must have matching batch and spatial shape, got {s1.shape} and {s2.shape}")
-
-    if hflip_prob <= 0.0 and vflip_prob <= 0.0:
-        return s1, s2
-
-    s1_out = s1.clone()
-    s2_out = s2.clone()
-    batch_size = s1_out.shape[0]
-
-    if hflip_prob > 0.0:
-        do_hflip = torch.rand(batch_size, device=s1_out.device) < hflip_prob
-        if bool(do_hflip.any()):
-            s1_out[do_hflip] = torch.flip(s1_out[do_hflip], dims=[-1])
-            s2_out[do_hflip] = torch.flip(s2_out[do_hflip], dims=[-1])
-
-    if vflip_prob > 0.0:
-        do_vflip = torch.rand(batch_size, device=s1_out.device) < vflip_prob
-        if bool(do_vflip.any()):
-            s1_out[do_vflip] = torch.flip(s1_out[do_vflip], dims=[-2])
-            s2_out[do_vflip] = torch.flip(s2_out[do_vflip], dims=[-2])
-
-    return s1_out, s2_out
-
-
-def _sample_time_index(seasons: Sequence[int], num_timestamps: int) -> int:
-    """Sample a season slot, then map it to the underlying zarr time index."""
-    season_slot = np.random.randint(0, len(seasons))
-    time_idx = int(seasons[season_slot])
-    if time_idx < 0 or time_idx >= num_timestamps:
-        raise ValueError(
-            f"Sampled time index {time_idx} from seasons={list(seasons)} "
-            f"but num_timestamps={num_timestamps}"
-        )
-    return time_idx
-
-
-def _select_captions_for_time(
-    captions_df: pd.DataFrame,
-    caption_column: str,
-    num_samples_per_file: int,
-    num_timestamps: int,
-    time_idx: int,
-) -> list[str]:
-    """
-    Support both caption layouts:
-    1) non-seasonal: one caption per patch (num_samples_per_file rows)
-    2) seasonal: one caption per patch per time (num_samples_per_file * num_timestamps rows)
-    """
-    captions_raw = captions_df[caption_column].to_numpy()
-    total = int(captions_raw.shape[0])
-    expected_static = int(num_samples_per_file)
-    expected_seasonal = int(num_samples_per_file * num_timestamps)
-
-    if total == expected_static:
-        return captions_raw.tolist()
-
-    if total == expected_seasonal:
-        captions = captions_raw.reshape(num_samples_per_file, num_timestamps)
-        return captions[:, time_idx].tolist()
-
-    if total % num_samples_per_file == 0:
-        num_caption_variants = total // num_samples_per_file
-        captions = captions_raw.reshape(num_samples_per_file, num_caption_variants)
-        # Fallback for uncommon layouts: keep deterministic and avoid out-of-range indexing.
-        col_idx = time_idx if time_idx < num_caption_variants else 0
-        return captions[:, col_idx].tolist()
-
-    raise ValueError(
-        f"Unexpected caption rows={total}. Expected {expected_static} (non-seasonal) "
-        f"or {expected_seasonal} (seasonal), with num_samples_per_file={num_samples_per_file} "
-        f"and num_timestamps={num_timestamps}."
-    )
-
-
 class SSL4EODataset(Dataset):
     def __init__(
         self,
@@ -216,9 +132,6 @@ class SSL4EODataset(Dataset):
         is_train: bool = True,
         temporal_agg: str | None = None,
         return_all_timestamps: bool = False,
-        pair_random_flip: bool = False,
-        pair_hflip_prob: float = 0.5,
-        pair_vflip_prob: float = 0.5,
     ):
         self.root = Path(root)
         self.is_train = is_train
@@ -226,9 +139,6 @@ class SSL4EODataset(Dataset):
         self.transforms = transforms
         self.temporal_agg = temporal_agg
         self.s2_jitter = BandwiseJitter(sigma=0.02, kind="multiplicative", p=0.8)
-        self.pair_random_flip = bool(pair_random_flip)
-        self.pair_hflip_prob = float(pair_hflip_prob)
-        self.pair_vflip_prob = float(pair_vflip_prob)
         # New behavior: optionally return all timestamps so downstream can run the
         # model per-season and average embeddings. Keep backward compatibility by
         # honoring temporal_agg="mean" as a request to return all timestamps
@@ -348,7 +258,8 @@ class SSL4EODataset(Dataset):
     def __getitem__(self, file_idx: int) -> Dict[str, Any]:
         """Index by file: return all 64 samples for one random season or all seasons."""
         # Random time index (shared across modalities for this file)
-        time_idx = _sample_time_index(self.seasons, self.num_timestamps)
+        time_idx = np.random.randint(0, self.num_timestamps)
+        season_name = self.seasons[time_idx]
 
         ds_s1, ds_s2 = self._open_zarr_pair(file_idx)
 
@@ -389,13 +300,6 @@ class SSL4EODataset(Dataset):
                         [self.s2_jitter(s2_t[p]) for p in range(P)],
                         dim=0,
                     )
-                    if self.pair_random_flip:
-                        s1_t, s2_t = _apply_aligned_random_flips(
-                            s1_t,
-                            s2_t,
-                            self.pair_hflip_prob,
-                            self.pair_vflip_prob,
-                        )
 
                 s1_t, s2_t = self._apply_transforms(s1_t, s2_t)
                 s1_list.append(s1_t)
@@ -422,13 +326,6 @@ class SSL4EODataset(Dataset):
                     [self.s2_jitter(s2[p]) for p in range(P)],
                     dim=0,
                 )
-                if self.pair_random_flip:
-                    s1, s2 = _apply_aligned_random_flips(
-                        s1,
-                        s2,
-                        self.pair_hflip_prob,
-                        self.pair_vflip_prob,
-                    )
 
             s1, s2 = self._apply_transforms(s1, s2)
 
@@ -528,48 +425,45 @@ class SSL4EOTextDataset(Dataset):
         return s2_out
 
     def __getitem__(self, file_idx: int) -> Dict[str, Any]:
-        time_idx = _sample_time_index(self.seasons, self.num_timestamps)
+        time_idx = np.random.randint(0, self.num_timestamps)
         base_name = self.file_basenames[file_idx]
 
         ds_s2, captions_df = self._open_zarr_and_captions(base_name)
-        try:
-            arr_s2 = ds_s2["bands"].values
-            P, T, C_s2, H, W = arr_s2.shape
-            assert P == self.num_samples_per_file, f"Expected {self.num_samples_per_file} samples/file, got {P}"
-            assert T == self.num_timestamps, f"Unexpected number of timestamps: {T}"
 
-            captions_for_time = _select_captions_for_time(
-                captions_df=captions_df,
-                caption_column=self.caption_column,
-                num_samples_per_file=self.num_samples_per_file,
-                num_timestamps=self.num_timestamps,
-                time_idx=time_idx,
+        arr_s2 = ds_s2["bands"].values
+        P, T, C_s2, H, W = arr_s2.shape
+        assert P == self.num_samples_per_file, f"Expected {self.num_samples_per_file} samples/file, got {P}"
+        assert T == self.num_timestamps, f"Unexpected number of timestamps: {T}"
+
+        captions_raw = captions_df[self.caption_column].to_numpy()
+        try:
+            captions = captions_raw.reshape(self.num_samples_per_file, self.num_timestamps)
+        except ValueError:
+            captions = captions_raw.reshape(self.num_samples_per_file, -1)
+        captions_for_time = captions[:, time_idx].tolist()
+
+        s2_np = arr_s2[:, time_idx]
+        s2 = torch.from_numpy(s2_np.astype("float32"))
+
+        if self.is_rgb:
+            if s2.ndim == 4 and s2.shape[1] >= 4:
+                s2 = s2[:, [3, 2, 1], ...]
+
+        if self.is_train:
+            s2 = torch.stack(
+                [self.s2_jitter(s2[p]) for p in range(P)],
+                dim=0,
             )
 
-            s2_np = arr_s2[:, time_idx]
-            s2 = torch.from_numpy(s2_np.astype("float32"))
+        s2 = self._apply_s2_only_transforms(s2)
+        text_tokens = self.tokenize(captions_for_time)
+        if isinstance(text_tokens, list):
+            text_tokens = torch.stack(text_tokens)
 
-            if self.is_rgb:
-                if s2.ndim == 4 and s2.shape[1] >= 4:
-                    s2 = s2[:, [3, 2, 1], ...]
-
-            if self.is_train:
-                s2 = torch.stack(
-                    [self.s2_jitter(s2[p]) for p in range(P)],
-                    dim=0,
-                )
-
-            s2 = self._apply_s2_only_transforms(s2)
-            text_tokens = self.tokenize(captions_for_time)
-            if isinstance(text_tokens, list):
-                text_tokens = torch.stack(text_tokens)
-
-            return {
-                "s2": s2,
-                "text": text_tokens,
-            }
-        finally:
-            ds_s2.close()
+        return {
+            "s2": s2,
+            "text": text_tokens,
+        }
 
 
 class SSL4EOAlignedTrioDataset(Dataset):
@@ -584,9 +478,6 @@ class SSL4EOAlignedTrioDataset(Dataset):
         caption_column: str = "caption",
         tokenizer: Optional[Callable[[list[str]], torch.Tensor]] = None,
         is_train: bool = True,
-        pair_random_flip: bool = False,
-        pair_hflip_prob: float = 0.5,
-        pair_vflip_prob: float = 0.5,
     ):
         self.root = Path(root)
         self.is_train = is_train
@@ -595,9 +486,6 @@ class SSL4EOAlignedTrioDataset(Dataset):
         self.caption_column = caption_column
         self.tokenize = tokenizer or partial(clip_tokenize, context_length=77)
         self.s2_jitter = BandwiseJitter(sigma=0.02, kind="multiplicative", p=0.8)
-        self.pair_random_flip = bool(pair_random_flip)
-        self.pair_hflip_prob = float(pair_hflip_prob)
-        self.pair_vflip_prob = float(pair_vflip_prob)
         if transforms is not None:
             self.s1_transforms = transforms.get("s1")
             self.s2_transforms = transforms.get("s2")
@@ -677,64 +565,53 @@ class SSL4EOAlignedTrioDataset(Dataset):
         return s1_out, s2_out
 
     def __getitem__(self, file_idx: int) -> Dict[str, Any]:
-        time_idx = _sample_time_index(self.seasons, self.num_timestamps)
+        time_idx = np.random.randint(0, self.num_timestamps)
         base_name = self.file_basenames[file_idx]
 
         ds_s1, ds_s2, captions_df = self._open_triplet(base_name)
-        try:
-            arr_s1 = ds_s1["bands"].values
-            arr_s2 = ds_s2["bands"].values
-            P, T, C_s1, H, W = arr_s1.shape
-            P2, T2, C_s2, H2, W2 = arr_s2.shape
-            assert P == self.num_samples_per_file, f"Expected {self.num_samples_per_file} samples/file, got {P}"
-            assert P2 == P and T2 == T and (H2, W2) == (H, W)
-            assert C_s1 == 2, f"Unexpected S1 channel count: {C_s1}"
-            assert C_s2 in (3, 12, 13), f"Unexpected S2 channel count: {C_s2}"
 
-            captions_for_time = _select_captions_for_time(
-                captions_df=captions_df,
-                caption_column=self.caption_column,
-                num_samples_per_file=self.num_samples_per_file,
-                num_timestamps=self.num_timestamps,
-                time_idx=time_idx,
+        arr_s1 = ds_s1["bands"].values
+        arr_s2 = ds_s2["bands"].values
+        P, T, C_s1, H, W = arr_s1.shape
+        P2, T2, C_s2, H2, W2 = arr_s2.shape
+        assert P == self.num_samples_per_file, f"Expected {self.num_samples_per_file} samples/file, got {P}"
+        assert P2 == P and T2 == T and (H2, W2) == (H, W)
+        assert C_s1 == 2, f"Unexpected S1 channel count: {C_s1}"
+        assert C_s2 in (3, 12, 13), f"Unexpected S2 channel count: {C_s2}"
+
+        captions_raw = captions_df[self.caption_column].to_numpy()
+        try:
+            captions = captions_raw.reshape(self.num_samples_per_file, self.num_timestamps)
+        except ValueError:
+            captions = captions_raw.reshape(self.num_samples_per_file, -1)
+        captions_for_time = captions[:, time_idx].tolist()
+
+        s1_np = arr_s1[:, time_idx]
+        s2_np = arr_s2[:, time_idx]
+
+        s1 = torch.from_numpy(s1_np.astype("float32"))
+        s2 = torch.from_numpy(s2_np.astype("float32"))
+
+        if self.is_rgb and s2.ndim == 4 and s2.shape[1] >= 4:
+            s2 = s2[:, [3, 2, 1], ...]
+
+        if self.is_train:
+            s2 = torch.stack(
+                [self.s2_jitter(s2[p]) for p in range(P)],
+                dim=0,
             )
 
-            s1_np = arr_s1[:, time_idx]
-            s2_np = arr_s2[:, time_idx]
+        s1, s2 = self._apply_transforms(s1, s2)
 
-            s1 = torch.from_numpy(s1_np.astype("float32"))
-            s2 = torch.from_numpy(s2_np.astype("float32"))
+        text_tokens = self.tokenize(captions_for_time)
+        if isinstance(text_tokens, list):
+            text_tokens = torch.stack(text_tokens)
 
-            if self.is_rgb and s2.ndim == 4 and s2.shape[1] >= 4:
-                s2 = s2[:, [3, 2, 1], ...]
-
-            if self.is_train:
-                s2 = torch.stack(
-                    [self.s2_jitter(s2[p]) for p in range(P)],
-                    dim=0,
-                )
-                if self.pair_random_flip:
-                    s1, s2 = _apply_aligned_random_flips(
-                        s1,
-                        s2,
-                        self.pair_hflip_prob,
-                        self.pair_vflip_prob,
-                    )
-
-            s1, s2 = self._apply_transforms(s1, s2)
-
-            text_tokens = self.tokenize(captions_for_time)
-            if isinstance(text_tokens, list):
-                text_tokens = torch.stack(text_tokens)
-
-            return {
-                "s1": s1,
-                "s2": s2,
-                "text": text_tokens,
-            }
-        finally:
-            ds_s1.close()
-            ds_s2.close()
+        return {
+            "s1": s1,
+            "s2": s2,
+            "text": text_tokens,
+        }
 
 
 from torch.utils.data._utils.collate import default_collate
@@ -1055,9 +932,6 @@ def get_ssl4eo_dataset(args, is_train, transforms, tokenizer=None):
 
     model_cfg = getattr(args, "model", None)
     encoder_pair = getattr(model_cfg, "encoder_pair", "s1s2")
-    pair_random_flip = bool(getattr(args.dataset, "pair_random_flip", False))
-    pair_hflip_prob = float(getattr(args.dataset, "pair_hflip_prob", 0.5))
-    pair_vflip_prob = float(getattr(args.dataset, "pair_vflip_prob", 0.5))
     if encoder_pair == "s2_text":
         dataset = SSL4EOTextDataset(
             root,
@@ -1075,9 +949,6 @@ def get_ssl4eo_dataset(args, is_train, transforms, tokenizer=None):
             s2_tier=args.dataset.s2_tier,
             tokenizer=tokenizer,
             is_train=is_train,
-            pair_random_flip=pair_random_flip,
-            pair_hflip_prob=pair_hflip_prob,
-            pair_vflip_prob=pair_vflip_prob,
         )
     else:
         dataset = SSL4EODataset(
@@ -1085,10 +956,7 @@ def get_ssl4eo_dataset(args, is_train, transforms, tokenizer=None):
             seasons=[0,1,2,3],
             transforms=transforms,  
             s2_tier = args.dataset.s2_tier,
-            is_train=is_train,
-            pair_random_flip=pair_random_flip,
-            pair_hflip_prob=pair_hflip_prob,
-            pair_vflip_prob=pair_vflip_prob,
+            is_train=is_train
         )
 
     # # sample 2000 samples to plot pixel distribution
@@ -1124,7 +992,6 @@ def dataset_to_datainfo(args, dataset, is_train):
         num_workers=num_workers,
         pin_memory=True,
         sampler=sampler,
-        persistent_workers=True,
         # drop_last=is_train,
         drop_last=True,
         collate_fn=collate_fn,
@@ -1209,10 +1076,13 @@ class BandwiseJitter(torch.nn.Module):
             return x + eps
         
 class Clamp_S1:
+    """
+    Normalizes image tensor for DINO: scales to [0,1] range by dividing by 10000.
+    """
 
     def __call__(self, img: torch.Tensor) -> torch.Tensor:
         img = torch.clamp(img, -25.0, 0.0)
-        return (img + 25.0) / 25.0
+        return img + 25.0 / 25.0
 
 
 class SentinelNormalize:
@@ -1255,7 +1125,7 @@ class SSL4EOTransform(torch.nn.Module):
         self,
         mean: Sequence[float],
         std: Sequence[float],
-        size: int | Tuple[int, int] = (224, 224),
+        size: int | Tuple[int, int] = (120, 120),
         interpol_mode: T.InterpolationMode = T.InterpolationMode.BICUBIC,
     ):
         super().__init__()
@@ -1273,12 +1143,11 @@ class SSL4EOTransform(torch.nn.Module):
             x = x.unsqueeze(0)
             squeeze_batch = True
 
-        # Keep interpolation in floating point, then apply bandwise normalization.
-        x = self.resize(x.float())
         x = self.normalize(x)
         if isinstance(x, np.ndarray):
             x = torch.from_numpy(x)
         x = x.float().div(255.0)
+        x = self.resize(x)
 
         if squeeze_batch:
             x = x.squeeze(0)
@@ -1288,15 +1157,9 @@ class SSL4EOTransform(torch.nn.Module):
 
 def get_transform(modality, is_train):
     if modality == "s1":
-        return transforms.Compose([
-            T.Resize((224, 224), interpolation=T.InterpolationMode.BICUBIC),
-            Clamp_S1(),
-        ])
+        return SSL4EOTransform(mean=S1GRD_MEAN, std=S1GRD_STD, size=(224, 224))
     elif modality.lower() == "s2a" or modality.lower() == "s2l2a":
-        return transforms.Compose([
-            T.Resize((224, 224), interpolation=T.InterpolationMode.BICUBIC),
-            Divideby10000Normalize(),
-        ])
+        return SSL4EOTransform(mean=S2L2A_MEAN, std=S2L2A_STD, size=(224, 224))
     elif modality.lower() == "s2c" or modality.lower() == "s2l1c":
         return SSL4EOTransform(mean=S2L1C_MEAN, std=S2L1C_STD, size=(224, 224))
     elif modality=='rgb':

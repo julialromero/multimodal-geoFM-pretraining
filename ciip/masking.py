@@ -62,15 +62,12 @@ def prepare_reconstruction_targets(
     images: torch.Tensor,
     patch_size: int,
     clip_range: Optional[Tuple[float, float]] = None,
-    normalize_per_patch: bool = True,
     eps: float = 1e-6,
 ) -> torch.Tensor:
     if clip_range is not None:
         images = images.clamp(min=clip_range[0], max=clip_range[1])
     patches = patchify(images, patch_size)
-    if normalize_per_patch:
-        return per_patch_normalize(patches, eps=eps)
-    return patches
+    return per_patch_normalize(patches, eps=eps)
 
 
 def random_masking(
