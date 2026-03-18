@@ -104,6 +104,7 @@ def main(args: DictConfig, start_epoch=0):
 
     resume_latest = args.io.resume == 'latest'
     resume_specified = bool(args.io.resume) and not resume_latest
+    experiment = None
 
     # get the name of the experiments
     if resume_specified:
@@ -142,19 +143,18 @@ def main(args: DictConfig, start_epoch=0):
             )
             return -1
 
-        #setup comet_ml logging
-        if(args.io.comet_ml):
-            experiment = Experiment(
-                api_key=args.comet.api_key,
-                project_name=args.comet.project_name,
-                workspace=args.comet.workspace
-            )
-        
-
-      
     # Setup text logger
     args.log_level = logging.DEBUG if args.train.debug else logging.INFO
     setup_logging(args.log_path, args.log_level)
+
+    # Setup comet logging (single rank to avoid duplicate metric streams)
+    if args.io.comet_ml and is_master(args):
+        experiment = Experiment(
+            api_key=args.comet.api_key,
+            project_name=args.comet.project_name,
+            workspace=args.comet.workspace
+        )
+        experiment.set_name(args.train.name)
 
     # Setup wandb, tensorboard, checkpoint logging
     args.wandb = False #'wandb' in args.report_to or 'all' in args.report_to
@@ -168,6 +168,7 @@ def main(args: DictConfig, start_epoch=0):
     else:
         args.io.checkpoint_path = os.path.join(log_base_path, "checkpoints")
     if is_master(args):
+        logging.info(f'Constructed checkpoint path: {args.io.checkpoint_path}')
         args.tensorboard_path = os.path.join(log_base_path, "tensorboard") if args.tensorboard else ''
         for dirname in [args.tensorboard_path, args.io.checkpoint_path]:
             if dirname:
@@ -561,10 +562,28 @@ def main(args: DictConfig, start_epoch=0):
 
     for epoch in range(start_epoch, args.train.epochs):
         if is_master(args):
-            logging.debug(f'Start epoch {epoch}')
+            logging.info(f'Start epoch {epoch}')
 
-        train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist_model, args, tb_writer=writer)
+        train_one_epoch(
+            model,
+            data,
+            loss,
+            epoch,
+            optimizer,
+            scaler,
+            scheduler,
+            dist_model,
+            args,
+            tb_writer=writer,
+            comet_experiment=experiment,
+        )
         completed_epoch = epoch + 1
+
+        logging.info(
+            "Rank %s: finished train_one_epoch for epoch %s",
+            args.datamodule.rank,
+            epoch,
+        )
 
         # if any(v in data for v in ('val', 'imagenet-val', 'imagenet-v2')):
         #     evaluate(model, data, completed_epoch, args, tb_writer=writer, tokenizer=tokenizer)
@@ -581,6 +600,8 @@ def main(args: DictConfig, start_epoch=0):
             }
             if scaler is not None:
                 checkpoint_dict["scaler"] = scaler.state_dict()
+            if is_master(args):
+                logging.info("Rank0: constructed checkpoint dict")
 
         if args.io.save_logs and is_master(args):
             should_save_epoch = (
@@ -603,6 +624,7 @@ def main(args: DictConfig, start_epoch=0):
                 #     log_model(experiment, model=original_model, model_name="CIIP!")
 
         if args.train.delete_previous_checkpoint and args.io.save_logs and is_master(args):
+            logging.info(f"Rank0: Removing previous checkpoint: epoch_{completed_epoch - 1}.pt")
             previous_checkpoint = os.path.join(args.io.checkpoint_path, f"epoch_{completed_epoch - 1}.pt")
             if os.path.exists(previous_checkpoint):
                 os.remove(previous_checkpoint)
@@ -621,6 +643,8 @@ def main(args: DictConfig, start_epoch=0):
 
     if args.wandb and is_master(args):
         wandb.finish()
+    if experiment is not None:
+        experiment.end()
 
     # run a final sync.
     if remote_sync_process is not None:

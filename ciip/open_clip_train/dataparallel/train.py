@@ -13,6 +13,10 @@ from ciip.open_clip_train.precision import get_autocast
 from ciip.open_clip_train.train import (
     AverageMeter,
     _accumulate_vc_metrics,
+    _collect_optimizer_trainable_params,
+    _compute_component_grad_metrics,
+    _should_log_component_grads,
+    _update_vc_metric_meter,
     backward,
     unwrap_model,
 )
@@ -56,6 +60,8 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
 
     losses_m = {}
     vc_metrics_m: Dict[str, AverageMeter] = {}
+    grad_metrics_m: Dict[str, AverageMeter] = {}
+    grad_logging_params = _collect_optimizer_trainable_params(optimizer)
     batch_time_m = AverageMeter()
     data_time_m = AverageMeter()
     end = time.time()
@@ -63,6 +69,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
     for i, batch in enumerate(dataloader):
         i_accum = i // args.train.accum_freq
         step = num_batches_per_epoch * epoch + i_accum
+        should_log_component_grads = is_master(args) and _should_log_component_grads(args, step)
 
         if not args.model.skip_scheduler:
             scheduler(step)
@@ -102,10 +109,22 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                         dist_model_out = dist_model(s1, s2)
                     model_out.update({f"dist_{k}": v for k, v in dist_model_out.items()})
                 losses = loss(**model_out, output_dict=True)
+                contrastive_term = losses.get("contrastive_loss")
+                if contrastive_term is None:
+                    contrastive_term = sum(losses.values())
                 recon_loss = model_out.get("recon_loss")
                 recon_lambda = _compute_recon_lambda(args, epoch, step)
                 recon_scaled = recon_loss * recon_lambda if recon_loss is not None else 0.0
                 total_loss = sum(losses.values()) + recon_scaled
+                if should_log_component_grads:
+                    recon_term = recon_scaled if (torch.is_tensor(recon_scaled) and recon_lambda != 0.0) else None
+                    grad_metrics = _compute_component_grad_metrics(
+                        contrastive_term,
+                        recon_term,
+                        grad_logging_params,
+                    )
+                    for name, value in grad_metrics.items():
+                        _update_vc_metric_meter(grad_metrics_m, name, value, s1.shape[0])
                 if recon_loss is not None:
                     losses["recon_loss"] = recon_scaled
                     losses["recon_loss_raw"] = recon_loss
@@ -189,10 +208,22 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                             curv_scalar = float(model_out["curv"].detach().item())
 
                         losses = loss(**inputs, **inputs_no_accum, output_dict=True)
+                        contrastive_term = losses.get("contrastive_loss")
+                        if contrastive_term is None:
+                            contrastive_term = sum(losses.values())
                         recon_loss = model_out.get("recon_loss")
                         recon_lambda = _compute_recon_lambda(args, epoch, step)
                         recon_scaled = recon_loss * recon_lambda if recon_loss is not None else 0.0
                         raw_total_loss = sum(losses.values()) + recon_scaled
+                        if should_log_component_grads and j == 0:
+                            recon_term = recon_scaled if (torch.is_tensor(recon_scaled) and recon_lambda != 0.0) else None
+                            grad_metrics = _compute_component_grad_metrics(
+                                contrastive_term,
+                                recon_term,
+                                grad_logging_params,
+                            )
+                            for name, value in grad_metrics.items():
+                                _update_vc_metric_meter(grad_metrics_m, name, value, s1.shape[0])
                         if recon_loss is not None:
                             losses["recon_loss"] = recon_scaled
                             losses["recon_loss_raw"] = recon_loss
@@ -254,6 +285,11 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                     f"{name}: {meter.val:#.5g} ({meter.avg:#.5g})"
                     for name, meter in vc_metrics_m.items()
                 )
+            if grad_metrics_m:
+                metrics_log_parts.extend(
+                    f"{name}: {meter.val:#.5g} ({meter.avg:#.5g})"
+                    for name, meter in grad_metrics_m.items()
+                )
             if loss_param_state:
                 metrics_log_parts.extend(
                     f"[ParamState]{name}: {value:#.5g}" for name, value in loss_param_state.items()
@@ -278,6 +314,13 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 f"Logit Scale: {logit_scale_scalar:.3f} "
                 f"Loss: {metrics_log}"
             )
+
+            batch_time_m.reset()
+            data_time_m.reset()
+            for meter in vc_metrics_m.values():
+                meter.reset()
+            for meter in grad_metrics_m.values():
+                meter.reset()
 
 
 __all__ = ["train_one_epoch"]

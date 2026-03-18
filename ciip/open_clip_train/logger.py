@@ -24,4 +24,3 @@ def setup_logging(log_file, level, include_host=False):
         file_handler = logging.FileHandler(filename=log_file, mode='a')
         file_handler.setFormatter(formatter)
         logging.root.addHandler(file_handler)
-

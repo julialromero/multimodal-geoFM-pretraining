@@ -199,6 +199,93 @@ def _compute_recon_lambda(args, epoch: int, step: int) -> float:
         return 0.0
     return base_lambda
 
+
+def _collect_optimizer_trainable_params(optimizer) -> list[torch.nn.Parameter]:
+    params: list[torch.nn.Parameter] = []
+    seen: set[int] = set()
+    for group in optimizer.param_groups:
+        for param in group.get("params", []):
+            if param is None or not param.requires_grad:
+                continue
+            pid = id(param)
+            if pid in seen:
+                continue
+            seen.add(pid)
+            params.append(param)
+    return params
+
+
+def _grad_l2_norm(grads) -> float:
+    sq_sum = 0.0
+    for grad in grads:
+        if grad is None:
+            continue
+        grad_f = grad.detach().float()
+        sq_sum += float(torch.sum(grad_f * grad_f).item())
+    return math.sqrt(sq_sum)
+
+
+def _grad_dot(grads_a, grads_b) -> float:
+    dot = 0.0
+    for grad_a, grad_b in zip(grads_a, grads_b):
+        if grad_a is None or grad_b is None:
+            continue
+        dot += float(torch.sum(grad_a.detach().float() * grad_b.detach().float()).item())
+    return dot
+
+
+def _should_log_component_grads(args, step: int) -> bool:
+    recon_cfg = getattr(args, "recon", None)
+    if recon_cfg is None:
+        return False
+    if not bool(getattr(recon_cfg, "grad_log_enabled", False)):
+        return False
+    interval = max(1, int(getattr(recon_cfg, "grad_log_interval", 100)))
+    return (step % interval) == 0
+
+
+def _compute_component_grad_metrics(
+    contrastive_term: torch.Tensor,
+    recon_term: Optional[torch.Tensor],
+    params: list[torch.nn.Parameter],
+) -> Dict[str, float]:
+    if not torch.is_tensor(contrastive_term) or not params:
+        return {}
+
+    grad_contrastive = torch.autograd.grad(
+        contrastive_term,
+        params,
+        retain_graph=True,
+        allow_unused=True,
+    )
+    contrastive_norm = _grad_l2_norm(grad_contrastive)
+
+    metrics: Dict[str, float] = {
+        "grad_norm_contrastive": contrastive_norm,
+    }
+
+    if recon_term is None or not torch.is_tensor(recon_term):
+        return metrics
+
+    grad_recon = torch.autograd.grad(
+        recon_term,
+        params,
+        retain_graph=True,
+        allow_unused=True,
+    )
+    recon_norm = _grad_l2_norm(grad_recon)
+    metrics["grad_norm_recon"] = recon_norm
+    metrics["grad_norm_ratio_recon_to_contrastive"] = recon_norm / max(contrastive_norm, 1e-12)
+
+    if contrastive_norm > 0.0 and recon_norm > 0.0:
+        dot = _grad_dot(grad_contrastive, grad_recon)
+        metrics["grad_cosine_recon_vs_contrastive"] = dot / max(contrastive_norm * recon_norm, 1e-12)
+    else:
+        metrics["grad_cosine_recon_vs_contrastive"] = float("nan")
+
+    return metrics
+
+
 TIME_FORMAT_STR: str = "%b_%d_%H_%M_%S"
 from datetime import datetime, timedelta
 def trace_handler(prof: torch.profiler.profile):
@@ -213,7 +300,19 @@ def trace_handler(prof: torch.profiler.profile):
    prof.export_memory_timeline(f"{file_prefix}.html", device="cuda:0")
 
 
-def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist_model, args, tb_writer=None):
+def train_one_epoch(
+    model,
+    data,
+    loss,
+    epoch,
+    optimizer,
+    scaler,
+    scheduler,
+    dist_model,
+    args,
+    tb_writer=None,
+    comet_experiment=None,
+):
     # TODO: figure out what dist_model is
     device = torch.device(args.datamodule.device)
     autocast = get_autocast(args.model.precision)
@@ -349,6 +448,8 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
     model.train()
     losses_m = {}
     vc_metrics_m: Dict[str, AverageMeter] = {}
+    grad_metrics_m: Dict[str, AverageMeter] = {}
+    grad_logging_params = _collect_optimizer_trainable_params(optimizer)
     batch_time_m = AverageMeter()
     data_time_m = AverageMeter()
     end = time.time()
@@ -357,6 +458,8 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
             logging.debug("Rank0: fetched batch 0 from dataloader")
         i_accum = i // args.train.accum_freq
         step = num_batches_per_epoch * epoch + i_accum
+        should_compute_component_grads = _should_log_component_grads(args, step)
+        should_record_component_grads = is_master(args) and should_compute_component_grads
         if hasattr(loss, "set_gather_context"):
             loss.set_gather_context(
                 {
@@ -400,14 +503,35 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                         dist_model_out = dist_model(s1, s2)
                     model_out.update({f'dist_{k}': v for k, v in dist_model_out.items()})
                 losses = loss(**model_out, output_dict=True)
+                contrastive_term = losses.get("contrastive_loss")
+                if contrastive_term is None:
+                    contrastive_term = sum(losses.values())
 
                 recon_loss = model_out.get("recon_loss")
+                recon_loss_s1 = model_out.get("recon_loss_s1")
+                recon_loss_s2 = model_out.get("recon_loss_s2")
                 recon_lambda = _compute_recon_lambda(args, epoch, step)
                 recon_scaled = recon_loss * recon_lambda if recon_loss is not None else 0.0
                 total_loss = sum(losses.values()) + recon_scaled
+                if should_compute_component_grads:
+                    recon_term = recon_scaled if (torch.is_tensor(recon_scaled) and recon_lambda != 0.0) else None
+                    grad_metrics = _compute_component_grad_metrics(
+                        contrastive_term,
+                        recon_term,
+                        grad_logging_params,
+                    )
+                    if should_record_component_grads:
+                        for name, value in grad_metrics.items():
+                            _update_vc_metric_meter(grad_metrics_m, name, value, s1.shape[0])
                 if recon_loss is not None:
                     losses["recon_loss"] = recon_scaled
                     losses["recon_loss_raw"] = recon_loss
+                if recon_loss_s1 is not None:
+                    losses["recon_loss_s1"] = recon_loss_s1 * recon_lambda
+                    losses["recon_loss_s1_raw"] = recon_loss_s1
+                if recon_loss_s2 is not None:
+                    losses["recon_loss_s2"] = recon_loss_s2 * recon_lambda
+                    losses["recon_loss_s2_raw"] = recon_loss_s2
                 losses["loss"] = total_loss
 
             if "curv" in model_out:
@@ -509,13 +633,34 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                                 }
                             )
                         losses = loss(**inputs, **inputs_no_accum, output_dict=True)
+                        contrastive_term = losses.get("contrastive_loss")
+                        if contrastive_term is None:
+                            contrastive_term = sum(losses.values())
                         recon_loss = model_out.get("recon_loss")
+                        recon_loss_s1 = model_out.get("recon_loss_s1")
+                        recon_loss_s2 = model_out.get("recon_loss_s2")
                         recon_lambda = _compute_recon_lambda(args, epoch, step)
                         recon_scaled = recon_loss * recon_lambda if recon_loss is not None else 0.0
                         raw_total_loss = sum(losses.values()) + recon_scaled
+                        if should_compute_component_grads and j == 0:
+                            recon_term = recon_scaled if (torch.is_tensor(recon_scaled) and recon_lambda != 0.0) else None
+                            grad_metrics = _compute_component_grad_metrics(
+                                contrastive_term,
+                                recon_term,
+                                grad_logging_params,
+                            )
+                            if should_record_component_grads:
+                                for name, value in grad_metrics.items():
+                                    _update_vc_metric_meter(grad_metrics_m, name, value, s1.shape[0])
                         if recon_loss is not None:
                             losses["recon_loss"] = recon_scaled
                             losses["recon_loss_raw"] = recon_loss
+                        if recon_loss_s1 is not None:
+                            losses["recon_loss_s1"] = recon_loss_s1 * recon_lambda
+                            losses["recon_loss_s1_raw"] = recon_loss_s1
+                        if recon_loss_s2 is not None:
+                            losses["recon_loss_s2"] = recon_loss_s2 * recon_lambda
+                            losses["recon_loss_s2_raw"] = recon_loss_s2
                         losses["loss"] = raw_total_loss
 
                     scaled_loss = raw_total_loss / args.train.accum_freq
@@ -549,7 +694,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
 
         # Note: we clamp to 4.6052 = ln(100), as in the original paper.
         with torch.no_grad():
-            unwrap_model(model).logit_scale.clamp_(0, math.log(100))
+            unwrap_model(model).logit_scale.clamp_(0, math.log(50))
 
         batch_time_m.update(time.time() - end)
         end = time.time()
@@ -583,6 +728,11 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 metrics_log_parts.extend(
                     f"{name}: {meter.val:#.5g} ({meter.avg:#.5g})"
                     for name, meter in vc_metrics_m.items()
+                )
+            if grad_metrics_m:
+                metrics_log_parts.extend(
+                    f"{name}: {meter.val:#.5g} ({meter.avg:#.5g})"
+                    for name, meter in grad_metrics_m.items()
                 )
             if loss_param_state:
                 metrics_log_parts.extend(
@@ -618,6 +768,8 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
             log_data.update({name:val.val for name,val in losses_m.items()})
             if vc_metrics_m:
                 log_data.update({name: meter.val for name, meter in vc_metrics_m.items()})
+            if grad_metrics_m:
+                log_data.update({name: meter.val for name, meter in grad_metrics_m.items()})
             if loss_param_state:
                 log_data.update({f"loss/{name}": value for name, value in loss_param_state.items()})
             if curv_scalar is not None:
@@ -633,10 +785,18 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 log_data['step'] = step  # for backwards compatibility
                 wandb.log(log_data, step=step)
 
+            if comet_experiment is not None:
+                try:
+                    comet_experiment.log_metrics(log_data, step=step, epoch=epoch)
+                except Exception:
+                    logging.exception("Failed to log train metrics to Comet")
+
             # resetting batch / data time meters per log window
             batch_time_m.reset()
             data_time_m.reset()
             for meter in vc_metrics_m.values():
+                meter.reset()
+            for meter in grad_metrics_m.values():
                 meter.reset()
     # end for
 
