@@ -455,7 +455,7 @@ def main(args: DictConfig, start_epoch=0):
         logging.info(f"=> no checkpoint found at '{args.io.resume}', starting from scratch.")
         # save the omegaconf config to a yaml file
         if is_master(args):
-            config_file = os.path.join(args.io.logs, "prod_default.yaml")
+            config_file = os.path.join(log_base_path, f"{CONF}.yaml")
             with open(config_file, "w") as f:
                 OmegaConf.save(args, f)
             logging.info(f"Saved config to {config_file}")
