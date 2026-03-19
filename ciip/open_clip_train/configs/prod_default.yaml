@@ -26,7 +26,7 @@ io:
 
 
 comet: #personal
-  api_key: 3g8Rfgff8N5UNWQ1CdGvgEO9n
+  api_key: 
   project_name: general
   workspace:
 
@@ -55,7 +55,7 @@ model:
   s2_ciip_checkpoint: #/local/ms-data/SSL4EO/model/2025_11_29-20_57_06-model_resnet50-lr_0.001-b_6-j_6-p_amp_bfloat16/checkpoints/epoch_20.pt  # optional path to CIIP checkpoint; when set with encoder_pair=s2_text, only S2 weights are loaded
   s1_patch_size: 16 # TODO: test 32
   s2_patch_size: 16
-  patch_masking: True
+  patch_masking: False
   patch_mask_ratio: 0.7
   s1_resolution: 224
   s2_resolution: 224
@@ -68,7 +68,7 @@ model:
     transformer_heads: 8
     transformer_layers: 12
     load_ms_clip: True
-  #TODO we should use mixed prevision
+  #TODO we should use mixed precision
   precision: 'amp_bfloat16' #'amp' #
   grad_clip_norm: 1 #set to 1 when training with amp
   skip_scheduler: False
@@ -104,7 +104,8 @@ loss:
   entail_weight: 0.0
 
 recon:
-  lambda: 0.1
+  lambda: 1
+  warmup_steps:
   warmup_epochs: 5
 
 datamodule:
@@ -144,6 +145,7 @@ train:
   lr: 0.000125
   curvature_lr: 0.2
   wd: 0.01 #0.2
+  total_steps:
   warmup: 0
   warmup_epochs: 15
   beta1: 0.9

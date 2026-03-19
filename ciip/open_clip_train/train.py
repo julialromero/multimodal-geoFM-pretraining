@@ -233,10 +233,14 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
     data['train'].set_epoch(epoch)  # set epoch in process safe manner via sampler or shared_epoch
     dataloader = data['train'].dataloader
     num_batches_per_epoch = dataloader.num_batches // args.train.accum_freq
+    max_train_steps = getattr(args.train, "total_steps", None)
+    if max_train_steps is not None:
+        max_train_steps = max(int(max_train_steps), 1)
     sample_digits = math.ceil(math.log(dataloader.num_samples + 1, 10))
     rank0 = args.datamodule.rank == 0
     logged_accum_boundary = False
     logged_first_backward = False
+    stop_training = False
 
     if rank0:
         logging.debug(
@@ -357,6 +361,9 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
             logging.debug("Rank0: fetched batch 0 from dataloader")
         i_accum = i // args.train.accum_freq
         step = num_batches_per_epoch * epoch + i_accum
+        if max_train_steps is not None and step >= max_train_steps:
+            stop_training = True
+            break
         if hasattr(loss, "set_gather_context"):
             loss.set_gather_context(
                 {
@@ -638,7 +645,11 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
             data_time_m.reset()
             for meter in vc_metrics_m.values():
                 meter.reset()
+        if max_train_steps is not None and (step + 1) >= max_train_steps:
+            stop_training = True
+            break
     # end for
+    return stop_training
 
 
 def evaluate(model, data, epoch, args, tb_writer=None, tokenizer=None):

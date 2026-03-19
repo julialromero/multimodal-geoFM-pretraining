@@ -1,5 +1,6 @@
 import glob
 import logging
+import math
 import os
 import random
 import re
@@ -485,12 +486,31 @@ def main(args: DictConfig, start_epoch=0):
     scheduler = None
     if 'train' in data and optimizer is not None:
         steps_per_epoch = data["train"].dataloader.num_batches // args.train.accum_freq
-        total_steps = steps_per_epoch * args.train.epochs
+        if steps_per_epoch < 1:
+            raise ValueError(
+                f"Need at least one optimizer step per epoch, got num_batches={data['train'].dataloader.num_batches} "
+                f"with accum_freq={args.train.accum_freq}."
+            )
+        requested_total_steps = getattr(args.train, "total_steps", None)
+        if requested_total_steps is not None:
+            total_steps = max(int(requested_total_steps), 1)
+            args.train.epochs = max(int(math.ceil(total_steps / steps_per_epoch)), 1)
+        else:
+            total_steps = steps_per_epoch * args.train.epochs
         warmup_steps = resolve_warmup_steps(
             args.train.warmup,
             getattr(args.train, "warmup_epochs", None),
             steps_per_epoch,
         )
+        warmup_steps = min(warmup_steps, total_steps)
+        if requested_total_steps is not None:
+            logging.info(
+                "Resolved step schedule: total_steps=%s warmup_steps=%s planned_epochs=%s steps_per_epoch=%s",
+                total_steps,
+                warmup_steps,
+                args.train.epochs,
+                steps_per_epoch,
+            )
         # if args.lr_scheduler == "cosine":
         scheduler = cosine_lr(optimizer, args.train.lr, warmup_steps, total_steps)
         # elif args.lr_scheduler == "const":
@@ -563,7 +583,18 @@ def main(args: DictConfig, start_epoch=0):
         if is_master(args):
             logging.debug(f'Start epoch {epoch}')
 
-        train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist_model, args, tb_writer=writer)
+        reached_train_step_limit = train_one_epoch(
+            model,
+            data,
+            loss,
+            epoch,
+            optimizer,
+            scaler,
+            scheduler,
+            dist_model,
+            args,
+            tb_writer=writer,
+        )
         completed_epoch = epoch + 1
 
         # if any(v in data for v in ('val', 'imagenet-val', 'imagenet-v2')):
@@ -574,6 +605,7 @@ def main(args: DictConfig, start_epoch=0):
         if args.io.save_logs or args.train.save_most_recent:
             checkpoint_dict = {
                 "epoch": completed_epoch,
+                "step": min(completed_epoch * steps_per_epoch, total_steps),
                 "name": args.train.name,
                 "state_dict": original_model.state_dict(),
                 "optimizer": optimizer.state_dict(),
@@ -584,7 +616,8 @@ def main(args: DictConfig, start_epoch=0):
 
         if args.io.save_logs and is_master(args):
             should_save_epoch = (
-                completed_epoch == args.train.epochs
+                reached_train_step_limit
+                or completed_epoch == args.train.epochs
                 or (args.io.save_frequency > 0 and (completed_epoch % args.io.save_frequency) == 0)
                 or completed_epoch == 1
             )
@@ -617,6 +650,9 @@ def main(args: DictConfig, start_epoch=0):
         # Ensure all ranks wait for checkpointing before next epoch.
         if args.datamodule.distributed:
             dist.barrier()
+        if reached_train_step_limit:
+            logging.info("Reached requested total optimizer steps (%s).", args.train.total_steps)
+            break
 
 
     if args.wandb and is_master(args):
