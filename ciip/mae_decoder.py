@@ -51,7 +51,7 @@ class MAEDecoder(nn.Module):
     def forward(self, tokens: torch.Tensor, ids_restore: torch.Tensor) -> torch.Tensor:
         x = self.decoder_embed(tokens)
         b, num_keep, dim = x.shape
-        mask_tokens = self.mask_token.expand(b, self.num_patches - num_keep, 1)
+        mask_tokens = self.mask_token.expand(b, self.num_patches - num_keep, dim)
         x_ = torch.cat([x, mask_tokens], dim=1)
         x_ = torch.gather(x_, dim=1, index=ids_restore.unsqueeze(-1).expand(-1, -1, dim))
         x_ = x_ + self.pos_embed
