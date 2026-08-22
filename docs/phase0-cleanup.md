@@ -98,7 +98,9 @@ until construction, forward-pass, and checkpoint round-trip tests run with the
 declared ML dependencies and representative configurations.
 Dependency-backed baseline tests now live in `tools/test_phase2_runtime.py` and
 cover a small CLIP forward pass, state-dict and `build_model` compatibility,
-masking invariants, and a Lorentz exp/log round trip. They skip explicitly when
-PyTorch is unavailable.
+masking invariants, a Lorentz exp/log round trip, and a representative transformer
+CIIP forward/checkpoint round trip using the production two-band Sentinel-1 and
+twelve-band Sentinel-2 modality contract at smoke-test size. They skip explicitly
+when PyTorch—or TorchGeo for the CIIP checks—is unavailable.
 The baselines preserve the existing mixed-precision behavior of CLIP
 `build_model` and the four-value masking return contract, including `ids_keep`.

@@ -8,7 +8,7 @@ gate, and no file is removed before dependency and compatibility review.
 | --- | --- | --- | --- |
 | 0 — inventory | **Complete** | Remote refs/tags, tracked files, static imports, reverse edges, literal references, and reproducible fingerprints are inventoried. | Regenerate after repository or fetched-ref changes. |
 | 1 — runtime/config audit | **Complete for tracked and fetched Git content** | Python entry points, configs, notebooks, tracked launchers, remote-branch launchers, dynamic imports, and checkpoint calls are inventoried. | Repository operators must confirm whether untracked launchers exist on external HPC systems. |
-| 2 — compatibility baselines | **In progress** | Public API/checkpoint contracts are captured, and all five executable CLIP, masking, and Lorentz baselines pass in the declared HPC PyTorch environment. | Add representative CIIP configurations and checkpoint compatibility coverage. |
+| 2 — compatibility baselines | **In progress** | Public API/checkpoint contracts are captured, and all five executable CLIP, masking, and Lorentz baselines pass in the declared HPC PyTorch environment. Representative transformer CIIP forward and strict checkpoint round-trip baselines are now present. | Run the two CIIP baselines in the declared PyTorch/TorchGeo environment. |
 | 3 — non-destructive organization | **Blocked by Phase 2 gate** | No model-affecting reorganization has begun. | Phase 2 runtime and checkpoint baselines must pass first. |
 | 4 — audited removal | **Blocked by Phases 1–3** | No cleanup candidate has been removed. | Every candidate needs a completed dependency assessment and passing compatibility baselines. |
 
@@ -17,8 +17,10 @@ forward, checkpoint round-trip, and Lorentz tests. It also exposed two incorrect
 test assumptions—not model regressions: `build_model` intentionally converts
 applicable weights to float16, and `random_masking` returns `ids_keep` as its
 fourth result. After those expectations were corrected, the repository operator
-reported a clean HPC rerun with all five tests passing. Phase 2 therefore retains
-only the representative CIIP configuration and checkpoint coverage gate.
+reported a clean HPC rerun with all five tests passing. The remaining Phase 2
+gate is an HPC run of the representative CIIP transformer forward and strict
+checkpoint round-trip baselines, which preserve the production framework and
+two-band Sentinel-1/twelve-band Sentinel-2 modality contract at smoke-test size.
 
 ## Current safety posture
 

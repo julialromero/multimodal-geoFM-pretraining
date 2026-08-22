@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "source_fingerprint": "sha256:84f6c5a495f9fb72b3fd342f387b9367b03f065cdb89aee498831d14cf9da411",
+  "source_fingerprint": "sha256:b6997113c9fa2c45966e30b59f39f00d0352d3534129798ba6df8da1a77f7a9d",
   "remote_branches": [
     {
       "name": "origin/codex/add-alternate-model-training-implementation",
@@ -592,15 +592,15 @@
     },
     {
       "name": "origin/work",
-      "commit": "b4f599aeb37eb67fa2472873494191e44cf92e90",
-      "date": "2026-08-22T17:17:13+00:00",
-      "subject": "Complete tracked Phase 1 caller audit"
+      "commit": "6223e2a424b651d36662d453a5ca8d66e0edb339",
+      "date": "2026-08-22T17:48:54+00:00",
+      "subject": "Record successful Phase 2 HPC baselines"
     }
   ],
   "tags": [],
   "tracked_files": {
     "count": 257,
-    "bytes": 16283595,
+    "bytes": 16287107,
     "by_extension": {
       ".gz": 1,
       ".ini": 1,
@@ -3350,6 +3350,7 @@
           "sys",
           "tempfile",
           "torch",
+          "types",
           "unittest"
         ],
         "imported_by": [],
