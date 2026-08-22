@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "source_fingerprint": "sha256:31d8a51bd1405ae91cf3670e61cf651fac39065fc198d8397155977cc443b79b",
+  "source_fingerprint": "sha256:c183f41cdf213b4aff1dd4bd6aa0064b205e36ecf2868333f419370f4110ba22",
   "remote_branches": [
     {
       "name": "origin/codex/add-alternate-model-training-implementation",
@@ -586,9 +586,9 @@
     },
     {
       "name": "origin/phase3-organization",
-      "commit": "bb888cd9f800b6933465d7c760356cd5ae3ca3b6",
-      "date": "2026-08-22T18:03:15+00:00",
-      "subject": "Start non-destructive Phase 3 organization"
+      "commit": "b6a3d3b84040a4461e558f37881b2a999d7b8eb1",
+      "date": "2026-08-22T18:48:31+00:00",
+      "subject": "Add Phase 3 documentation indexes"
     },
     {
       "name": "origin/slurm-hpc",
@@ -611,14 +611,14 @@
   ],
   "tags": [],
   "tracked_files": {
-    "count": 260,
-    "bytes": 16293357,
+    "count": 261,
+    "bytes": 16296457,
     "by_extension": {
       ".gz": 1,
       ".ini": 1,
       ".ipynb": 3,
       ".json": 23,
-      ".md": 14,
+      ".md": 15,
       ".png": 1,
       ".py": 87,
       ".tif": 120,
@@ -710,6 +710,12 @@
           },
           {
             "path": "ciip/readMe.md",
+            "matched": [
+              "ciip"
+            ]
+          },
+          {
+            "path": "docs/phase3-runtime-config-assessment.md",
             "matched": [
               "ciip"
             ]
@@ -1884,7 +1890,14 @@
           "visualizations/ssl4eo/hyperbolic_visualization.py",
           "visualizations/ssl4eo/initialization_evaluation.py"
         ],
-        "literal_references": [],
+        "literal_references": [
+          {
+            "path": "docs/phase3-runtime-config-assessment.md",
+            "matched": [
+              "ciip/open_clip_train/data"
+            ]
+          }
+        ],
         "runtime_signals": {
           "main_guard": true,
           "argument_parser": true,
@@ -1998,7 +2011,15 @@
           "typing"
         ],
         "imported_by": [],
-        "literal_references": [],
+        "literal_references": [
+          {
+            "path": "docs/phase3-runtime-config-assessment.md",
+            "matched": [
+              "ciip/open_clip_train/dataparallel/run_train_val_dataparallel",
+              "ciip/open_clip_train/dataparallel/run_train_val_dataparallel.py"
+            ]
+          }
+        ],
         "runtime_signals": {
           "main_guard": true,
           "argument_parser": false,
@@ -2281,7 +2302,15 @@
           "torchvision.transforms"
         ],
         "imported_by": [],
-        "literal_references": [],
+        "literal_references": [
+          {
+            "path": "docs/phase3-runtime-config-assessment.md",
+            "matched": [
+              "ciip/open_clip_train/run_train_val",
+              "ciip/open_clip_train/run_train_val.py"
+            ]
+          }
+        ],
         "runtime_signals": {
           "main_guard": true,
           "argument_parser": false,
@@ -2331,7 +2360,15 @@
           "wandb"
         ],
         "imported_by": [],
-        "literal_references": [],
+        "literal_references": [
+          {
+            "path": "docs/phase3-runtime-config-assessment.md",
+            "matched": [
+              "ciip/open_clip_train/run_train_val_distributed",
+              "ciip/open_clip_train/run_train_val_distributed.py"
+            ]
+          }
+        ],
         "runtime_signals": {
           "main_guard": true,
           "argument_parser": false,
@@ -2667,6 +2704,12 @@
           },
           {
             "path": "data/yfcc100m.md",
+            "matched": [
+              "clip"
+            ]
+          },
+          {
+            "path": "docs/phase3-runtime-config-assessment.md",
             "matched": [
               "clip"
             ]

@@ -30,14 +30,14 @@ Organization will be split into independently reviewable batches:
 2. **Audit-tool discoverability (complete).** [`../tools/README.md`](../tools/README.md)
    documents the generators and tests while retaining every current command and
    module path.
-3. **Runtime package proposals.** Assess possible package boundaries for
-   training, evaluation, and model code. Apply no move until imports, configs,
-   notebooks, launchers, remote history, and checkpoints have been reviewed.
-4. **Configuration proposals.** Assess configuration grouping while retaining
-   Hydra search paths and override names through compatibility paths.
+3. **Runtime package assessment (complete).** The
+   [`runtime/configuration assessment`](phase3-runtime-config-assessment.md)
+   retains current training and evaluation paths because their callers and Hydra
+   behavior make moves compatibility-sensitive.
+4. **Configuration assessment (complete).** The same assessment retains the
+   current configuration tree, search paths, and override names.
 
-The first two path-preserving batches are complete. The latter two remain
-proposals until their dependency assessments are recorded.
+All four batches are complete and path-preserving; no existing file moved.
 
 ## Per-change evidence
 
@@ -56,6 +56,7 @@ any runtime or configuration path those launchers might invoke.
 
 ## Exit gate
 
-Phase 3 completes only after the approved path-preserving organization batches
-land, all generated audits reproduce, and all seven Phase 2 runtime baselines
-continue to pass. Phase 4 removals remain prohibited until then.
+Phase 3 is complete after the approved path-preserving organization batches, a
+reproducible audit regeneration, and the operator-reported passing Phase 2
+runtime baselines. Phase 4 removals remain individually gated by dependency
+assessment and the external-launcher limitation.

@@ -12,6 +12,8 @@ edited by hand.
   regeneration commands.
 - [`phase3-organization-plan.md`](phase3-organization-plan.md) — non-destructive
   organization invariants and review batches.
+- [`phase3-runtime-config-assessment.md`](phase3-runtime-config-assessment.md) —
+  path-preserving decisions for runtime and configuration boundaries.
 
 ## Generated evidence
 
