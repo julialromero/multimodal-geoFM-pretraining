@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "source_fingerprint": "sha256:c183f41cdf213b4aff1dd4bd6aa0064b205e36ecf2868333f419370f4110ba22",
+  "source_fingerprint": "sha256:cf528cb6277a7f5278418cee241b8569a4766eb0225de9510ab29c165416e463",
   "remote_branches": [
     {
       "name": "origin/codex/add-alternate-model-training-implementation",
@@ -586,9 +586,9 @@
     },
     {
       "name": "origin/phase3-organization",
-      "commit": "b6a3d3b84040a4461e558f37881b2a999d7b8eb1",
-      "date": "2026-08-22T18:48:31+00:00",
-      "subject": "Add Phase 3 documentation indexes"
+      "commit": "43311b3eeef0ab125b3399e3d76d6712bf52fff0",
+      "date": "2026-08-22T18:52:19+00:00",
+      "subject": "Complete path-preserving Phase 3 assessment"
     },
     {
       "name": "origin/slurm-hpc",
@@ -611,14 +611,14 @@
   ],
   "tags": [],
   "tracked_files": {
-    "count": 261,
-    "bytes": 16296457,
+    "count": 262,
+    "bytes": 16299011,
     "by_extension": {
       ".gz": 1,
       ".ini": 1,
       ".ipynb": 3,
       ".json": 23,
-      ".md": 15,
+      ".md": 16,
       ".png": 1,
       ".py": 87,
       ".tif": 120,

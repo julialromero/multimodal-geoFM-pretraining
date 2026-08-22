@@ -14,6 +14,8 @@ edited by hand.
   organization invariants and review batches.
 - [`phase3-runtime-config-assessment.md`](phase3-runtime-config-assessment.md) —
   path-preserving decisions for runtime and configuration boundaries.
+- [`phase4-removal-gate.md`](phase4-removal-gate.md) — per-candidate evidence
+  template, approval rules, and the current removal register.
 
 ## Generated evidence
 

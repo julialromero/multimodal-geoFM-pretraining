@@ -59,4 +59,5 @@ any runtime or configuration path those launchers might invoke.
 Phase 3 is complete after the approved path-preserving organization batches, a
 reproducible audit regeneration, and the operator-reported passing Phase 2
 runtime baselines. Phase 4 removals remain individually gated by dependency
-assessment and the external-launcher limitation.
+assessment and the external-launcher limitation documented in the
+[`Phase 4 removal gate`](phase4-removal-gate.md).
