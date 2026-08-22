@@ -1,0 +1,3607 @@
+{
+  "schema_version": 2,
+  "source_fingerprint": "sha256:29845f198deea455b5db03bf4be216ceb2340524950776f95b531197317a1e44",
+  "remote_branches": [
+    {
+      "name": "origin/codex/add-alternate-model-training-implementation",
+      "commit": "fb6d0b0eb02f69eaf9a404ebb9779c94c34f97a5",
+      "date": "2025-12-01T21:06:29-06:00",
+      "subject": "Add text encoder option to data-parallel CIIP builder"
+    },
+    {
+      "name": "origin/codex/add-checkpoint-handling-in-retry-loop",
+      "commit": "c5235f25d5f27dad5a673383c6e1f4ef919918c4",
+      "date": "2025-10-02T22:00:04-06:00",
+      "subject": "Refresh resume checkpoint before each retry"
+    },
+    {
+      "name": "origin/codex/add-checkpoint-loading-for-hyperparameters",
+      "commit": "5b65ac81a5ff697bb54dbb68961f441b87692da6",
+      "date": "2025-11-02T23:57:59-07:00",
+      "subject": "Load hyperbolic params for SSL4EO visualization"
+    },
+    {
+      "name": "origin/codex/add-checkpointing-and-error-handling-in-slurm-script",
+      "commit": "194df4e93de8cf8cbdda5a49df54cf2988fc58e2",
+      "date": "2025-10-02T21:34:32-06:00",
+      "subject": "Handle CUDA OOM recovery and resume"
+    },
+    {
+      "name": "origin/codex/add-consistent-output-format-for-evaluation",
+      "commit": "dd24c8d86ab7f2daa290ba833d35f32481bc2ff3",
+      "date": "2026-02-06T18:11:38-07:00",
+      "subject": "Standardize Pangaea batch output formatting"
+    },
+    {
+      "name": "origin/codex/add-croma-evaluation-to-unified_evaluation",
+      "commit": "855ec00f061ab19db80b37dfae07dac045954467",
+      "date": "2025-11-16T11:43:53-07:00",
+      "subject": "Merge branch 'distributed' into codex/add-croma-evaluation-to-unified_evaluation"
+    },
+    {
+      "name": "origin/codex/add-end-to-end-training-for-resnet50",
+      "commit": "e13b25a8657f5df33cc7548feb93bbfc6a32779a",
+      "date": "2025-08-26T11:13:05-06:00",
+      "subject": "Revert tokenizer exposure"
+    },
+    {
+      "name": "origin/codex/add-intrinsic-dimension-metrics-to-ssl4eo",
+      "commit": "0c5d6c44e837b17a1cbfdcd1f21f95a1d84677e8",
+      "date": "2025-11-23T18:48:09-07:00",
+      "subject": "Handle empty TLE estimates in ID metrics"
+    },
+    {
+      "name": "origin/codex/add-masked-patch-reconstruction-loss-to-clip",
+      "commit": "f9f6881dccaff3ec23b99427d6bf78fe01d61b8f",
+      "date": "2026-02-07T10:03:33-07:00",
+      "subject": "Change mask_token.repeat to mask_token.expand"
+    },
+    {
+      "name": "origin/codex/add-model-weights-to-unified_evaluation-pipeline",
+      "commit": "7d4abc56428276a3c24f2071848be735194df887",
+      "date": "2025-11-23T11:06:13-07:00",
+      "subject": "Correct epoch diagnostics plotting selection"
+    },
+    {
+      "name": "origin/codex/add-support-for-sentinel-1-images-in-evaluations",
+      "commit": "da7defc53bc826172f91142543427874193424d8",
+      "date": "2025-11-16T13:54:33-07:00",
+      "subject": "Add Sentinel-1 evaluation option"
+    },
+    {
+      "name": "origin/codex/add-svd-analysis-figure-with-4-panels",
+      "commit": "6dbae364f1ea976986243fd99503f303d2cddac2",
+      "date": "2025-10-31T13:09:34-06:00",
+      "subject": "Document linear CKA formula"
+    },
+    {
+      "name": "origin/codex/address-feedback-from-@codex",
+      "commit": "a90d90a6f9a28a375d2b862f7f3ac3eecf5322c2",
+      "date": "2025-09-26T13:28:20-06:00",
+      "subject": "Guard CiipLoss aggregation when loss terms disabled"
+    },
+    {
+      "name": "origin/codex/adjust-ciiploss-to-match-reference-implementation",
+      "commit": "13df655a82e483eb8034a5530f1b68fd6798915f",
+      "date": "2025-11-05T16:08:43-07:00",
+      "subject": "Clamp hyperbolic logit scale before loss"
+    },
+    {
+      "name": "origin/codex/adjust-dual-y-axes-for-metrics-plots",
+      "commit": "6b9c490e79440d4b544c42b55a3e18a07376eece",
+      "date": "2025-09-25T11:01:05-06:00",
+      "subject": "Add summary PDF export and dual-axis VC diagnostics"
+    },
+    {
+      "name": "origin/codex/adjust-resume-model-functionality-in-training",
+      "commit": "9c840fcb2835161dfcf51bca7cf9e2466459addd",
+      "date": "2025-11-24T10:51:42-07:00",
+      "subject": "Ensure resumed logs append to existing files"
+    },
+    {
+      "name": "origin/codex/adjust-unified_evaluation.py-for-band-selection",
+      "commit": "504cf1bed344682ad1f1bbae08496b4e1b9f0e27",
+      "date": "2025-11-16T11:35:07-07:00",
+      "subject": "Handle 12/13-band EuroSAT + NeuCo inputs"
+    },
+    {
+      "name": "origin/codex/call-plot_epoch_diagnostics-in-unified_evaluation",
+      "commit": "b6850d5ac6cb41f8b1c465d687bb273b9b0b4d27",
+      "date": "2025-11-12T13:43:12-07:00",
+      "subject": "Add epoch diagnostics plotting to SSL4EO pipeline"
+    },
+    {
+      "name": "origin/codex/check-distributed-training-and-slurm-scripts",
+      "commit": "dba0357b19102ced0a19d311b5c01f2f9abcfb25",
+      "date": "2025-10-08T09:36:54-06:00",
+      "subject": "Clarify and harden distributed CUDA OOM coordination"
+    },
+    {
+      "name": "origin/codex/check-hyperparameter-sweep-functionality",
+      "commit": "79b197db20a6957069166112713630cac3509836",
+      "date": "2026-03-19T11:07:50-06:00",
+      "subject": "Fix sweep config output path"
+    },
+    {
+      "name": "origin/codex/clean-up-embedding_collapse_diagnostics.py",
+      "commit": "1eb7ffa7472ffbb3cd0ec19a0ce741f37858ac49",
+      "date": "2025-10-14T11:43:29-06:00",
+      "subject": "Align SVD diagnostics with covariance analysis"
+    },
+    {
+      "name": "origin/codex/clean-up-embedding_collapse_diagnostics.py-1d10tp",
+      "commit": "61c0b3236577e87bc86fa954071b55448576b340",
+      "date": "2025-10-15T00:19:48-06:00",
+      "subject": "Merge branch 'distributed' into codex/clean-up-embedding_collapse_diagnostics.py-1d10tp"
+    },
+    {
+      "name": "origin/codex/clean-up-model-names-in-plots",
+      "commit": "0824c4b66d6296461a32b3e6f8db2ee7c713a5fa",
+      "date": "2026-02-07T20:10:06-07:00",
+      "subject": "Clean downstream model labels"
+    },
+    {
+      "name": "origin/codex/compare-compute_hyperbolic_context-in-files",
+      "commit": "54492158467ede073bdcbb8505039f06991654e7",
+      "date": "2025-11-10T09:52:23-07:00",
+      "subject": "Merge branch 'distributed' into codex/compare-compute_hyperbolic_context-in-files"
+    },
+    {
+      "name": "origin/codex/compare-contrastive-learning-pipelines",
+      "commit": "ba34094e6f6ac154b9ff74abe1cd221836fd82a6",
+      "date": "2025-09-05T13:22:27-06:00",
+      "subject": "Fix Sentinel-2 normalization ordering and stats"
+    },
+    {
+      "name": "origin/codex/create-embedding-extraction-script",
+      "commit": "da99aeee9b5a670023ca2dc21cc711f9f3495c62",
+      "date": "2025-11-07T15:54:11-07:00",
+      "subject": "Default embedding extraction parameters"
+    },
+    {
+      "name": "origin/codex/create-evaluation-pipeline-script",
+      "commit": "9c328c570c292825ae5baa105fe6c0f6a3501bb1",
+      "date": "2025-11-07T15:13:50-07:00",
+      "subject": "Add unified evaluation pipeline"
+    },
+    {
+      "name": "origin/codex/create-hyperbolic-embedding-visualization-script",
+      "commit": "0325d82e950c2bf7ea182068a826166439b2e376",
+      "date": "2025-11-02T11:19:58-07:00",
+      "subject": "Add CLI usage instructions for hyperbolic visualization"
+    },
+    {
+      "name": "origin/codex/create-jupyter-notebooks-for-ssl4eo",
+      "commit": "7114306795bf3b0351922d5542dc7284f1cdeeb9",
+      "date": "2025-11-07T10:04:14-07:00",
+      "subject": "Add SSL4EO visualization notebooks"
+    },
+    {
+      "name": "origin/codex/create-plotting-functions-for-evaluations",
+      "commit": "782b3de5477227db2ae08eb9a1a94f5b815cf82a",
+      "date": "2026-02-07T19:23:03-07:00",
+      "subject": "Add downstream plotting script"
+    },
+    {
+      "name": "origin/codex/create-ssl4eo-v1.1-dataset-class",
+      "commit": "bc4b610dea0066888a6b2ed58507f64127bcaa38",
+      "date": "2025-11-10T23:35:28-07:00",
+      "subject": "Add SSL4EO v1.1 zarr dataset using S2L2A tiles"
+    },
+    {
+      "name": "origin/codex/enhance-worker-id/count-handling-for-s1-and-s2",
+      "commit": "13e978ae5914585a7b98dd362b85132ad1069969",
+      "date": "2025-10-01T22:36:16-06:00",
+      "subject": "Ensure contiguous S1/S2 worker ids for data extraction"
+    },
+    {
+      "name": "origin/codex/filter-directories-by-run_manifest.json-presence",
+      "commit": "a0c4de432c2b32855e354b76544646a2e8b7ae8e",
+      "date": "2026-02-07T20:30:53-07:00",
+      "subject": "Filter plotting results by run manifests"
+    },
+    {
+      "name": "origin/codex/find-cause-of-valueerror-in-evaluation-script",
+      "commit": "c3d91e65b259ed17f3357fecc73bf3063e4eb44f",
+      "date": "2025-11-11T18:31:18-07:00",
+      "subject": "Refactor batch norm naming to zscore norm"
+    },
+    {
+      "name": "origin/codex/find-cuda-memory-changes-after-commit-e96a0f0",
+      "commit": "bd26889594a46ea93a6af7551e97578ff6ba710c",
+      "date": "2025-10-13T16:32:06-06:00",
+      "subject": "Avoid storing duplicate CIIP activations"
+    },
+    {
+      "name": "origin/codex/fix-attributeerror-in-ciiploss-class",
+      "commit": "f3a93646a4e85d8f576fbb4df631f83f65aef5e9",
+      "date": "2025-11-09T15:48:23-07:00",
+      "subject": "Restore hyperbolic helpers for visualization"
+    },
+    {
+      "name": "origin/codex/fix-circular-imports-in-evaluation-scripts",
+      "commit": "a81d1668aeb0b02811fcd657201ba52059b2c653",
+      "date": "2025-11-11T14:46:16-07:00",
+      "subject": "Support unified evaluation for TorchGeo ResNet encoders"
+    },
+    {
+      "name": "origin/codex/fix-croma-model-embedding-extraction",
+      "commit": "8380ed20799bc58f3560abd9e33e723497d8c6c6",
+      "date": "2025-11-19T10:16:44-07:00",
+      "subject": "Handle CROMA inputs in SSL4EO diagnostics"
+    },
+    {
+      "name": "origin/codex/fix-cuda-oom-error-during-training",
+      "commit": "109801f79e155b2e7dfd18a0a09954dd0fd46376",
+      "date": "2025-10-07T19:29:10-06:00",
+      "subject": "Fix CUDA OOM coordination to avoid collective mismatch"
+    },
+    {
+      "name": "origin/codex/fix-cuda-out-of-memory-error",
+      "commit": "afe6d2da2a07df9da38c8478ec6b0550d2693c6a",
+      "date": "2025-10-07T22:39:31-06:00",
+      "subject": "Handle distributed OOM sync errors"
+    },
+    {
+      "name": "origin/codex/fix-embedding-diagnostics-script",
+      "commit": "d14d9a1b0a4212a86338760d0721463c91e71d22",
+      "date": "2025-09-26T14:02:13-06:00",
+      "subject": "Refine embedding diagnostics metrics"
+    },
+    {
+      "name": "origin/codex/fix-filenotfounderror-during-training",
+      "commit": "3577041fbfe54195925e118ceed3a15f80b0d45f",
+      "date": "2025-10-07T10:38:57-06:00",
+      "subject": "Simplify checkpoint save gating"
+    },
+    {
+      "name": "origin/codex/fix-keyerror-for-dataset-s2c",
+      "commit": "a9cf4e2d4560e43ee4f0dc5fc796a6ce01d58c75",
+      "date": "2025-11-10T23:55:29-07:00",
+      "subject": "Simplify SSL4EO data-var fallback"
+    },
+    {
+      "name": "origin/codex/fix-logit-scale-clamping-issue",
+      "commit": "6a85dd06c3d7c7479f9dd147e91e918fcb9d6734",
+      "date": "2025-11-10T22:10:09-07:00",
+      "subject": "Remove redundant hyperbolic logit scale clamps"
+    },
+    {
+      "name": "origin/codex/fix-package-imports-across-the-repo",
+      "commit": "4261f9001da67ed19f09a0318ed4cad4f2b0d891",
+      "date": "2025-11-07T16:42:56-07:00",
+      "subject": "Fix package-qualified imports across CIIP modules"
+    },
+    {
+      "name": "origin/codex/fix-package-imports-across-the-repo-gfwxzo",
+      "commit": "95bea3e03f46653dd2527ac95f329272bd056625",
+      "date": "2025-11-07T16:43:22-07:00",
+      "subject": "Fix package-qualified imports across CIIP modules"
+    },
+    {
+      "name": "origin/codex/fix-top-level-oom-handler-in-distributed-training",
+      "commit": "11e3c50a3f8c9b246e7312928f4d281cf906b103",
+      "date": "2025-10-08T09:18:22-06:00",
+      "subject": "Remove top-level CUDA OOM abort logic"
+    },
+    {
+      "name": "origin/codex/fix-typo-in-the-codebase",
+      "commit": "eb078f3bea8e365efac3a0f030da0d0917f4f77a",
+      "date": "2025-08-15T11:58:07-06:00",
+      "subject": "Plot training vs validation loss"
+    },
+    {
+      "name": "origin/codex/generate-csv-of-pre-projection-layer-embeddings",
+      "commit": "3d0b011cbc21044f34ed430e058a523857627aa2",
+      "date": "2025-10-24T12:00:41-06:00",
+      "subject": "Add NeuCo-Bench embedding export script"
+    },
+    {
+      "name": "origin/codex/handle-cuda-oom-error-in-training",
+      "commit": "ec2011e7967c28b1d4a8e1785e27bee84a215aa8",
+      "date": "2025-10-02T13:47:57-06:00",
+      "subject": "Handle CUDA OOM during training"
+    },
+    {
+      "name": "origin/codex/identify-recent-changes-in-embedding-diagnostics-script",
+      "commit": "bb15a8c4cd3f227dbe13f69795badbbddf128834",
+      "date": "2025-09-26T11:57:37-06:00",
+      "subject": "Enhance embedding diagnostics metrics and projections"
+    },
+    {
+      "name": "origin/codex/implement-alphaearth-batch-uniformity-loss",
+      "commit": "4acc93be32393b7c1e726acb589d69bb9acbd8d4",
+      "date": "2025-10-24T08:46:01-06:00",
+      "subject": "Fix batch uniformity loss implementation"
+    },
+    {
+      "name": "origin/codex/implement-cuda-oom-handling-in-ddp",
+      "commit": "71e7113bd1558f9448c3d86ee0d1385a098770a9",
+      "date": "2025-10-08T15:16:02-06:00",
+      "subject": "Ensure deterministic OOM handling in DDP training loop"
+    },
+    {
+      "name": "origin/codex/implement-hyperbolic-geometry-loss-updates",
+      "commit": "141759965fd7227b94ba9db7e4f7d805bcc94104",
+      "date": "2025-11-03T11:28:54-07:00",
+      "subject": "Implement ATMG hyperbolic contrastive loss"
+    },
+    {
+      "name": "origin/codex/implement-hyperbolic-loss-for-ciip",
+      "commit": "d6a97fec826c4cc58256b2e6a5f7d5c4aba03da7",
+      "date": "2025-11-01T00:04:13-06:00",
+      "subject": "Enable hyperbolic loss in prod config"
+    },
+    {
+      "name": "origin/codex/implement-hyperbolic-loss-for-ciip-96d8w8",
+      "commit": "173d1a520ee5f3faa804b5e8026ec92e8a8f480e",
+      "date": "2025-11-01T09:56:54-06:00",
+      "subject": "Merge branch 'distributed' into codex/implement-hyperbolic-loss-for-ciip-96d8w8"
+    },
+    {
+      "name": "origin/codex/implement-training-with-vc-loss-only",
+      "commit": "c0665e7e8cc0edd92c767edc025391e43f157376",
+      "date": "2025-09-26T12:48:44-06:00",
+      "subject": "Allow training with VC-only loss"
+    },
+    {
+      "name": "origin/codex/increase-learning-rate-for-curvature-parameter",
+      "commit": "12fe99eaaab614555c4692d6192ce78036cc6dd7",
+      "date": "2025-11-10T22:33:13-07:00",
+      "subject": "Make curvature learning rate configurable"
+    },
+    {
+      "name": "origin/codex/investigate-cka-computation-in-unified_evaluation",
+      "commit": "17513f8a8d45fbda4f8a05d39c523f29bebee77c",
+      "date": "2025-11-22T13:12:26-07:00",
+      "subject": "Clarify hook lifetime during embedding extraction"
+    },
+    {
+      "name": "origin/codex/investigate-loss-parameters-during-training",
+      "commit": "37908e3be96bbbdcf4bdc010b3b439292f069840",
+      "date": "2025-11-03T23:21:19-07:00",
+      "subject": "Ensure loss parameters are optimized"
+    },
+    {
+      "name": "origin/codex/investigate-loss-parameters-during-training-stl37n",
+      "commit": "c4824b4d6a4d9e45b063bc14915beb0a6b515113",
+      "date": "2025-11-04T09:50:51-07:00",
+      "subject": "Ensure loss parameters optimized in distributed run"
+    },
+    {
+      "name": "origin/codex/investigate-masking-performance-in-prod_default.yaml",
+      "commit": "56bc9f31565acba2396c6c43338c859a237c22cb",
+      "date": "2026-02-05T12:00:31-07:00",
+      "subject": "Remove patch_mask_overlap from configs"
+    },
+    {
+      "name": "origin/codex/investigate-slow-data-extraction-in-slurm-hpc",
+      "commit": "f43ff12f623e1b22020788c92e69140970f37724",
+      "date": "2025-09-30T13:18:04-06:00",
+      "subject": "Improve parallel tar extraction locking"
+    },
+    {
+      "name": "origin/codex/merge-updates-into-slurm-hpc-branch",
+      "commit": "cb6ad10c603c0f4248354d859591c823f1b59296",
+      "date": "2025-09-25T11:35:58-06:00",
+      "subject": "Integrate VC regularization from distributed branch"
+    },
+    {
+      "name": "origin/codex/modify-diagnostics-to-use-_build_model",
+      "commit": "67f327d7ed27d762ee32ff84a73a09201ed6144d",
+      "date": "2025-11-09T15:41:16-07:00",
+      "subject": "Rely on unified evaluation to load collapse diagnostics checkpoint"
+    },
+    {
+      "name": "origin/codex/modify-embedding-dimensions-for-resnet50",
+      "commit": "6ad49d6f0f71e4d1b6faf319af954de2f535286c",
+      "date": "2025-10-23T23:18:18-06:00",
+      "subject": "Add configurable pre-projection heads for CIIP ResNet encoders"
+    },
+    {
+      "name": "origin/codex/modify-unified_evaluation.py-for-ssl4eo-embeddings",
+      "commit": "a13afe2ba2644379a8e09656e0eec90d871d23da",
+      "date": "2025-11-10T00:30:36-07:00",
+      "subject": "Use SSL4EO embeddings for diagnostics"
+    },
+    {
+      "name": "origin/codex/plot-svd-spectra-and-heatmap-over-epochs",
+      "commit": "b7daa4e1bcf164b3ff15d684edf9c45a4d70e15d",
+      "date": "2025-09-30T10:40:40-06:00",
+      "subject": "Organize per-epoch outputs into dedicated subdirectories"
+    },
+    {
+      "name": "origin/codex/plot-svd-spectra-and-heatmap-over-epochs-ybzadl",
+      "commit": "3083eae7fae62ce5202fab447cb414760d436e47",
+      "date": "2025-09-30T11:37:03-06:00",
+      "subject": "Merge branch 'distributed' into codex/plot-svd-spectra-and-heatmap-over-epochs-ybzadl"
+    },
+    {
+      "name": "origin/codex/refactor-config-loading-in-embedding_collapse_diagnostics.py",
+      "commit": "a965b763866247b97af38d304da5aca0b7dd1246",
+      "date": "2025-11-10T00:03:20-07:00",
+      "subject": "Align diagnostics script with unified eval config"
+    },
+    {
+      "name": "origin/codex/refactor-data-extraction-scripts-for-sharding",
+      "commit": "5a574a06dcce274d0a48f7e88858656ea2b2292c",
+      "date": "2025-10-01T18:56:25-06:00",
+      "subject": "Shard tarball extraction across SLURM workers"
+    },
+    {
+      "name": "origin/codex/refactor-extract_data.sh-for-dynamic-s1/s2-split",
+      "commit": "2ea4192a8e53e0b0f754beace107c86d8c3b3971",
+      "date": "2025-10-01T18:57:30-06:00",
+      "subject": "Derive S1/S2 split from task counts"
+    },
+    {
+      "name": "origin/codex/refactor-hyperbolic_visualization.py-for-readability",
+      "commit": "0e6917637e1bdf97ff8538792619ff6c6f583518",
+      "date": "2025-11-03T10:08:59-07:00",
+      "subject": "Simplify hyperbolic visualization script"
+    },
+    {
+      "name": "origin/codex/refactor-masking-in-visiontransformer",
+      "commit": "882664e1bb115358295ec5b76242284cc73e5861",
+      "date": "2026-02-05T16:29:33-07:00",
+      "subject": "Avoid nonzero ordering in patch masking"
+    },
+    {
+      "name": "origin/codex/refactor-model-utils-and-normalization-code",
+      "commit": "06afac91c0cb4ef273e55ef7c7638d8a9ec6b7f0",
+      "date": "2026-02-06T17:40:01-07:00",
+      "subject": "Add example script args"
+    },
+    {
+      "name": "origin/codex/refactor-node-processing-in-script",
+      "commit": "4b7d9ea46a203348b7c1d4179c48c9086e8d6bec",
+      "date": "2025-09-30T10:10:50-06:00",
+      "subject": "Streamline allocation polling"
+    },
+    {
+      "name": "origin/codex/remove-unused-code-and-parameters",
+      "commit": "a665224f34696064a7b6ce3fe145c37d537be8d8",
+      "date": "2025-09-30T11:37:37-06:00",
+      "subject": "Merge branch 'distributed' of https://github.com/julialromero/new-ciip into distributed merge`"
+    },
+    {
+      "name": "origin/codex/remove-unused-code-and-parameters-9iki0z",
+      "commit": "898b133ff23e2ecc98d072dc0f6cff40b29fa2e2",
+      "date": "2025-10-10T10:47:49-06:00",
+      "subject": "Remove diagnostics config"
+    },
+    {
+      "name": "origin/codex/review-boolean-indexing-in-masking-code",
+      "commit": "41eebfdb26332865aea679d755fd02d1553123a9",
+      "date": "2026-02-05T16:17:12-07:00",
+      "subject": "Revert CLS token addition in patch masking"
+    },
+    {
+      "name": "origin/codex/review-error-handling-changes",
+      "commit": "62ce3c4634a164ac7f181f99524f246e161506dd",
+      "date": "2025-10-08T08:50:49-06:00",
+      "subject": "Remove VC diagnostic accumulation from training loop"
+    },
+    {
+      "name": "origin/codex/revise-embedding-collapse-diagnostics-plots",
+      "commit": "d2e5c3b96ce1c0537d8d5e01200760257c6dc0af",
+      "date": "2025-09-29T12:45:25-06:00",
+      "subject": "Refine VC collapse diagnostics"
+    },
+    {
+      "name": "origin/codex/separate-s1-and-s2-into-different-figures",
+      "commit": "8b0bbea06ff04ab1df3377578c1837efefbe21b6",
+      "date": "2025-09-28T09:10:52-06:00",
+      "subject": "Split modality VC diagnostics plots and simplify spectrum legends"
+    },
+    {
+      "name": "origin/codex/simplify-embedding_collapse_diagnostics.py-script",
+      "commit": "5b8310c3b242af53ecdf98afa1c01f5d54032a2e",
+      "date": "2025-11-09T14:49:20-07:00",
+      "subject": "Stop locally normalizing embeddings"
+    },
+    {
+      "name": "origin/codex/task-title",
+      "commit": "f1e50aacb63cb7595f72b88e3d5084b1d5259fc0",
+      "date": "2025-09-29T13:31:50-06:00",
+      "subject": "Revert non-dataset optional dependency changes"
+    },
+    {
+      "name": "origin/codex/temporarily-disable-handle-hook-for-encoder",
+      "commit": "072e2eca18da4952f72ea485311600a10d49a3fe",
+      "date": "2025-11-12T14:05:35-07:00",
+      "subject": "Gate layer activation capture during secondary encoder pass"
+    },
+    {
+      "name": "origin/codex/update-data-extraction-scripts-for-chunk-handling",
+      "commit": "b449c82ebe4e87d55787fe6ca2c84b2703312399",
+      "date": "2025-09-29T16:13:46-06:00",
+      "subject": "Preserve staged shard contents during extraction"
+    },
+    {
+      "name": "origin/codex/update-extract_data-scripts-for-per-node-workers",
+      "commit": "d486f31ae80a8a937af38509d578e06f632b3e9e",
+      "date": "2025-10-01T22:52:37-06:00",
+      "subject": "Update extract scripts to use per-node worker settings"
+    },
+    {
+      "name": "origin/codex/update-extract_data-scripts-for-pigz-threading",
+      "commit": "e1e06be6b8d20574eb425fcbeced96c343ab9fcd",
+      "date": "2025-10-01T18:56:58-06:00",
+      "subject": "Configure pigz threads for extraction scripts"
+    },
+    {
+      "name": "origin/codex/update-extract_data.sh-for-s2-worker-counts",
+      "commit": "328fdd5bd80b57eb32d2af94b3825457e04e1fdf",
+      "date": "2025-10-01T23:11:32-06:00",
+      "subject": "Fix worker split derivation for step scoped launches"
+    },
+    {
+      "name": "origin/codex/update-extract_data.sh-for-slurm-variable-sanitization",
+      "commit": "f2fd68b4777dd2c9486d452e306983d91455322c",
+      "date": "2025-10-01T23:12:30-06:00",
+      "subject": "Sanitize SLURM task counts before arithmetic"
+    },
+    {
+      "name": "origin/codex/update-extract_data_s1-and-s2-scripts",
+      "commit": "9c32d922374d55154486dfa23edb9ca613f1d87e",
+      "date": "2025-10-01T00:05:57-06:00",
+      "subject": "Refactor extraction coordination directories"
+    },
+    {
+      "name": "origin/codex/update-hyperbolic_visualization.py-for-ciiploss",
+      "commit": "51109bc510b3bbad8390996ff27c41279d2220a4",
+      "date": "2025-11-04T15:54:19-07:00",
+      "subject": "Update hyperbolic visualization for new CiipLoss"
+    },
+    {
+      "name": "origin/codex/update-prod_default.yaml-and-ciiploss",
+      "commit": "b7c8704feffddc17f001d8fc9502e9298a9c710a",
+      "date": "2025-11-03T12:10:46-07:00",
+      "subject": "Log CiipLoss learnable parameters"
+    },
+    {
+      "name": "origin/codex/update-unified_evaluation-for-model-feature-handling",
+      "commit": "039d55577dbd1e2171bb5131b96c339463bcef19",
+      "date": "2025-11-19T12:00:06-07:00",
+      "subject": "Isolate evaluation outputs per model label"
+    },
+    {
+      "name": "origin/codex/update-unified_evaluation-pipeline-for-cka-support",
+      "commit": "e47909369cca224c9227a37e448f069a6bc64989",
+      "date": "2025-11-23T12:18:56-07:00",
+      "subject": "Fix S1 encoder detection in hook registration"
+    },
+    {
+      "name": "origin/distributed",
+      "commit": "4355d34a753f35f1f8551fca984b04b7bf24de5b",
+      "date": "2026-03-19T11:08:17-06:00",
+      "subject": "Merge pull request #113 from julialromero/codex/check-hyperparameter-sweep-functionality"
+    },
+    {
+      "name": "origin/slurm-hpc",
+      "commit": "37bcd09c15c86e5117ce63d36a8e12a8ac39ae6d",
+      "date": "2025-10-24T00:42:43-05:00",
+      "subject": "Add configurable pre-projection heads for CIIP ResNet encoders"
+    },
+    {
+      "name": "origin/uniformity-loss",
+      "commit": "6a5f73b9fd99740478f489e9fbb84745e802537b",
+      "date": "2025-10-17T09:58:07-06:00",
+      "subject": "added transforms"
+    },
+    {
+      "name": "origin/work",
+      "commit": "697b3df0fb08eab9da00e170bce90e8bf5e354db",
+      "date": "2026-08-22T16:55:11+00:00",
+      "subject": "Audit Hydra training configuration contracts"
+    }
+  ],
+  "tags": [],
+  "tracked_files": {
+    "count": 257,
+    "bytes": 16281937,
+    "by_extension": {
+      ".gz": 1,
+      ".ini": 1,
+      ".ipynb": 3,
+      ".json": 23,
+      ".md": 11,
+      ".png": 1,
+      ".py": 87,
+      ".tif": 120,
+      ".yaml": 5,
+      ".yml": 2,
+      "[no extension]": 3
+    },
+    "excluded_generated_paths": [
+      "docs/phase0-inventory.json",
+      "docs/phase1-config-contracts.json",
+      "docs/phase1-external-audit.json",
+      "docs/phase1-runtime-audit.md",
+      "docs/phase2-model-contracts.json"
+    ]
+  },
+  "python": {
+    "file_count": 87,
+    "parse_errors": [],
+    "files": [
+      {
+        "path": "ciip/__init__.py",
+        "module": "ciip",
+        "internal_imports": [
+          "ciip.ciip",
+          "ciip.dataset"
+        ],
+        "external_imports": [],
+        "imported_by": [
+          "ciip/evaluation/sen12ms_hyperbolic_radii.py",
+          "ciip/loss.py",
+          "ciip/model_ciip.py",
+          "visualizations/ssl4eo/hyperbolic_retrieval.py",
+          "visualizations/ssl4eo/hyperbolic_visualization.py"
+        ],
+        "literal_references": [
+          {
+            "path": "README.md",
+            "matched": [
+              "ciip"
+            ]
+          },
+          {
+            "path": "ciip/evaluation/eurosat_fewshot_models.json",
+            "matched": [
+              "ciip"
+            ]
+          },
+          {
+            "path": "ciip/evaluation/examples/script_args_eurosat_fewshot_1nn.json",
+            "matched": [
+              "ciip"
+            ]
+          },
+          {
+            "path": "ciip/evaluation/examples/script_args_neuco_fewshot_benchmark.json",
+            "matched": [
+              "ciip"
+            ]
+          },
+          {
+            "path": "ciip/evaluation/examples/script_args_neuco_fewshot_episodic.json",
+            "matched": [
+              "ciip"
+            ]
+          },
+          {
+            "path": "ciip/evaluation/examples/script_args_unified_evaluation.json",
+            "matched": [
+              "ciip"
+            ]
+          },
+          {
+            "path": "ciip/open_clip_train/config_train.ini",
+            "matched": [
+              "ciip"
+            ]
+          },
+          {
+            "path": "ciip/open_clip_train/configs/local_default.yaml",
+            "matched": [
+              "ciip"
+            ]
+          },
+          {
+            "path": "ciip/open_clip_train/configs/prod_default.yaml",
+            "matched": [
+              "ciip"
+            ]
+          },
+          {
+            "path": "ciip/readMe.md",
+            "matched": [
+              "ciip"
+            ]
+          },
+          {
+            "path": "environment.yml",
+            "matched": [
+              "ciip"
+            ]
+          },
+          {
+            "path": "temp.yml",
+            "matched": [
+              "ciip"
+            ]
+          }
+        ],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/ciip.py",
+        "module": "ciip.ciip",
+        "internal_imports": [
+          "ciip.model"
+        ],
+        "external_imports": [
+          "PIL",
+          "hashlib",
+          "os",
+          "packaging",
+          "torch",
+          "torchvision.transforms",
+          "tqdm",
+          "typing",
+          "urllib",
+          "warnings"
+        ],
+        "imported_by": [
+          "ciip/__init__.py"
+        ],
+        "literal_references": [
+          {
+            "path": "ciip/open_clip_train/configs/prod_default.yaml",
+            "matched": [
+              "ciip/ciip"
+            ]
+          },
+          {
+            "path": "ciip/readMe.md",
+            "matched": [
+              "ciip/ciip"
+            ]
+          }
+        ],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [
+            "torch.load"
+          ],
+          "checkpoint_save_calls": [
+            "model.state_dict"
+          ]
+        }
+      },
+      {
+        "path": "ciip/dataset.py",
+        "module": "ciip.dataset",
+        "internal_imports": [],
+        "external_imports": [
+          "logging",
+          "numpy",
+          "os",
+          "rasterio",
+          "torch.utils.data"
+        ],
+        "imported_by": [
+          "ciip/__init__.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/eurosat.py",
+        "module": "ciip.eurosat",
+        "internal_imports": [
+          "ciip.eval_utils",
+          "ciip.model_ciip"
+        ],
+        "external_imports": [
+          "collections",
+          "datetime",
+          "os",
+          "sklearn.metrics",
+          "torch",
+          "torch.utils.data",
+          "torchgeo.datasets",
+          "torchgeo.models",
+          "torchvision.transforms",
+          "warnings"
+        ],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": [
+            "model.state_dict",
+            "torch.save"
+          ]
+        }
+      },
+      {
+        "path": "ciip/eval_utils.py",
+        "module": "ciip.eval_utils",
+        "internal_imports": [
+          "ciip.model_ciip"
+        ],
+        "external_imports": [
+          "collections",
+          "torch",
+          "torch.nn",
+          "torch.nn.functional"
+        ],
+        "imported_by": [
+          "ciip/eurosat.py",
+          "ciip/evaluation/eurosat_fewshot_1nn.py",
+          "ciip/evaluation/export_neuco_embeddings.py",
+          "ciip/evaluation/linearprobe_comparison.py",
+          "ciip/evaluation/unified_evaluation.py",
+          "ciip/evaluation/utils.py",
+          "ciip/few_shot_comparison.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [
+            "model.load_state_dict",
+            "torch.load"
+          ],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/evaluation/eurosat_fewshot_1nn.py",
+        "module": "ciip.evaluation.eurosat_fewshot_1nn",
+        "internal_imports": [
+          "ciip.eval_utils",
+          "ciip.evaluation.model_utils",
+          "ciip.evaluation.normalization_utils",
+          "ciip.evaluation.output_utils",
+          "ciip.evaluation.unified_evaluation",
+          "ciip.open_clip_train.data"
+        ],
+        "external_imports": [
+          "__future__",
+          "argparse",
+          "math",
+          "numpy",
+          "pathlib",
+          "torch",
+          "torch.utils.data",
+          "torchgeo.datasets",
+          "torchvision",
+          "typing"
+        ],
+        "imported_by": [
+          "ciip/evaluation/eurosat_fewshot_1nn_multi.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": true,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/evaluation/eurosat_fewshot_1nn_multi.py",
+        "module": "ciip.evaluation.eurosat_fewshot_1nn_multi",
+        "internal_imports": [
+          "ciip.evaluation.eurosat_fewshot_1nn"
+        ],
+        "external_imports": [
+          "__future__",
+          "argparse",
+          "copy",
+          "gc",
+          "json",
+          "pathlib",
+          "torch",
+          "typing"
+        ],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": true,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/evaluation/export_neuco_embeddings.py",
+        "module": "ciip.evaluation.export_neuco_embeddings",
+        "internal_imports": [
+          "ciip.eval_utils",
+          "ciip.evaluation.normalization_utils"
+        ],
+        "external_imports": [
+          "__future__",
+          "argparse",
+          "contextlib",
+          "csv",
+          "dataclasses",
+          "glob",
+          "logging",
+          "numpy",
+          "os",
+          "pandas",
+          "pathlib",
+          "torch",
+          "torch.nn",
+          "torch.nn.functional",
+          "torch.utils.data",
+          "torchvision",
+          "tqdm",
+          "typing",
+          "xarray",
+          "zarr.storage"
+        ],
+        "imported_by": [
+          "ciip/evaluation/neuco_layerwise_probes.py",
+          "ciip/evaluation/unified_evaluation.py",
+          "comparison/CROMA-main/extract_croma_embeddings.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": true,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [
+            "enc.load_state_dict",
+            "model.load_state_dict",
+            "torch.load"
+          ],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/evaluation/id_metrics.py",
+        "module": "ciip.evaluation.id_metrics",
+        "internal_imports": [],
+        "external_imports": [
+          "__future__",
+          "logging",
+          "numpy",
+          "pathlib",
+          "skdim.id",
+          "torch",
+          "typing"
+        ],
+        "imported_by": [
+          "ciip/evaluation/unified_evaluation.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/evaluation/linearprobe_comparison.py",
+        "module": "ciip.evaluation.linearprobe_comparison",
+        "internal_imports": [
+          "ciip.eval_utils",
+          "ciip.evaluation.model_utils",
+          "ciip.evaluation.output_utils",
+          "ciip.evaluation.utils"
+        ],
+        "external_imports": [
+          "copy",
+          "csv",
+          "datetime",
+          "hashlib",
+          "json",
+          "logging",
+          "matplotlib.pyplot",
+          "numpy",
+          "os",
+          "pathlib",
+          "pytorch_lightning",
+          "pytorch_lightning.callbacks",
+          "sklearn.metrics",
+          "torch",
+          "torch.nn",
+          "torch.utils.data",
+          "torchgeo.datasets",
+          "torchgeo.models",
+          "torchvision",
+          "tqdm",
+          "typing"
+        ],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/evaluation/model_utils.py",
+        "module": "ciip.evaluation.model_utils",
+        "internal_imports": [
+          "ciip.model_ciip"
+        ],
+        "external_imports": [
+          "__future__",
+          "importlib.util",
+          "logging",
+          "open_clip",
+          "pangaea.encoders.remoteclip_encoder",
+          "pathlib",
+          "sys",
+          "torch",
+          "torch.nn.functional",
+          "torchgeo.models",
+          "torchvision.models",
+          "types",
+          "typing",
+          "yaml"
+        ],
+        "imported_by": [
+          "ciip/evaluation/eurosat_fewshot_1nn.py",
+          "ciip/evaluation/linearprobe_comparison.py",
+          "ciip/evaluation/neuco_fewshot_benchmark.py",
+          "ciip/evaluation/neuco_fewshot_episodic.py",
+          "ciip/evaluation/neuco_layerwise_probes.py",
+          "ciip/evaluation/sen12ms_hyperbolic_radii.py",
+          "ciip/evaluation/unified_evaluation.py",
+          "intrinsic-dimension/compute_id.py",
+          "intrinsic-dimension/compute_intrinsic_dimension_ssl4eo_val.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [
+            "backbone.load_state_dict",
+            "model.load_state_dict",
+            "s1_backbone.load_state_dict",
+            "torch.load"
+          ],
+          "checkpoint_save_calls": [
+            "model.state_dict"
+          ]
+        }
+      },
+      {
+        "path": "ciip/evaluation/neuco_fewshot_benchmark.py",
+        "module": "ciip.evaluation.neuco_fewshot_benchmark",
+        "internal_imports": [
+          "ciip.evaluation.model_utils",
+          "ciip.evaluation.normalization_utils",
+          "ciip.evaluation.output_utils",
+          "ciip.evaluation.unified_evaluation"
+        ],
+        "external_imports": [
+          "__future__",
+          "argparse",
+          "copy",
+          "csv",
+          "gc",
+          "json",
+          "numpy",
+          "os",
+          "pathlib",
+          "subprocess",
+          "sys",
+          "torch",
+          "typing"
+        ],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": true,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/evaluation/neuco_fewshot_benchmark_multi.py",
+        "module": "ciip.evaluation.neuco_fewshot_benchmark_multi",
+        "internal_imports": [
+          "ciip.evaluation.neuco_fewshot_episodic"
+        ],
+        "external_imports": [
+          "__future__",
+          "argparse",
+          "copy",
+          "gc",
+          "json",
+          "pathlib",
+          "torch",
+          "typing"
+        ],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": true,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/evaluation/neuco_fewshot_episodic.py",
+        "module": "ciip.evaluation.neuco_fewshot_episodic",
+        "internal_imports": [
+          "ciip.evaluation.model_utils",
+          "ciip.evaluation.normalization_utils",
+          "ciip.evaluation.output_utils",
+          "ciip.evaluation.unified_evaluation"
+        ],
+        "external_imports": [
+          "__future__",
+          "argparse",
+          "csv",
+          "numpy",
+          "pathlib",
+          "torch",
+          "typing"
+        ],
+        "imported_by": [
+          "ciip/evaluation/neuco_fewshot_benchmark_multi.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": true,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/evaluation/neuco_layerwise_probes.py",
+        "module": "ciip.evaluation.neuco_layerwise_probes",
+        "internal_imports": [
+          "ciip.evaluation.export_neuco_embeddings",
+          "ciip.evaluation.model_utils",
+          "ciip.evaluation.normalization_utils",
+          "ciip.evaluation.unified_evaluation"
+        ],
+        "external_imports": [
+          "__future__",
+          "argparse",
+          "json",
+          "logging",
+          "matplotlib.pyplot",
+          "numpy",
+          "os",
+          "pathlib",
+          "sklearn.linear_model",
+          "sklearn.metrics",
+          "sklearn.neighbors",
+          "subprocess",
+          "torch",
+          "torch.nn",
+          "torch.utils.data",
+          "torchvision",
+          "tqdm",
+          "typing"
+        ],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": true,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/evaluation/normalization_utils.py",
+        "module": "ciip.evaluation.normalization_utils",
+        "internal_imports": [
+          "ciip.open_clip_train.data"
+        ],
+        "external_imports": [
+          "__future__",
+          "torch",
+          "torch.nn",
+          "torchvision",
+          "typing"
+        ],
+        "imported_by": [
+          "ciip/evaluation/eurosat_fewshot_1nn.py",
+          "ciip/evaluation/export_neuco_embeddings.py",
+          "ciip/evaluation/neuco_fewshot_benchmark.py",
+          "ciip/evaluation/neuco_fewshot_episodic.py",
+          "ciip/evaluation/neuco_layerwise_probes.py",
+          "ciip/evaluation/unified_evaluation.py",
+          "intrinsic-dimension/compute_id.py",
+          "intrinsic-dimension/compute_intrinsic_dimension_ssl4eo_val.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/evaluation/output_utils.py",
+        "module": "ciip.evaluation.output_utils",
+        "internal_imports": [],
+        "external_imports": [
+          "__future__",
+          "dataclasses",
+          "datetime",
+          "json",
+          "pathlib",
+          "typing"
+        ],
+        "imported_by": [
+          "ciip/evaluation/eurosat_fewshot_1nn.py",
+          "ciip/evaluation/linearprobe_comparison.py",
+          "ciip/evaluation/neuco_fewshot_benchmark.py",
+          "ciip/evaluation/neuco_fewshot_episodic.py",
+          "ciip/evaluation/pangaea-results/run_pangaea_batch_eval.py",
+          "ciip/evaluation/pangaea-results/run_pangaea_batch_eval_fewshot.py",
+          "ciip/evaluation/plot_downstream.py",
+          "ciip/evaluation/unified_evaluation.py",
+          "intrinsic-dimension/compute_id.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/evaluation/pangaea-results/run_pangaea_batch_eval.py",
+        "module": "ciip.evaluation.pangaea-results.run_pangaea_batch_eval",
+        "internal_imports": [
+          "ciip.evaluation.output_utils"
+        ],
+        "external_imports": [
+          "__future__",
+          "argparse",
+          "csv",
+          "dataclasses",
+          "matplotlib.pyplot",
+          "numpy",
+          "os",
+          "pathlib",
+          "re",
+          "socket",
+          "subprocess",
+          "time",
+          "typing"
+        ],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": true,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/evaluation/pangaea-results/run_pangaea_batch_eval_fewshot.py",
+        "module": "ciip.evaluation.pangaea-results.run_pangaea_batch_eval_fewshot",
+        "internal_imports": [
+          "ciip.evaluation.output_utils"
+        ],
+        "external_imports": [
+          "__future__",
+          "argparse",
+          "csv",
+          "dataclasses",
+          "matplotlib.pyplot",
+          "numpy",
+          "os",
+          "pathlib",
+          "re",
+          "socket",
+          "subprocess",
+          "time",
+          "typing"
+        ],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": true,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/evaluation/pangaea-results/visualize_batch_results.py",
+        "module": "ciip.evaluation.pangaea-results.visualize_batch_results",
+        "internal_imports": [],
+        "external_imports": [
+          "__future__",
+          "argparse",
+          "collections",
+          "csv",
+          "datetime",
+          "glob",
+          "matplotlib.pyplot",
+          "os",
+          "typing"
+        ],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": true,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/evaluation/plot_downstream.py",
+        "module": "ciip.evaluation.plot_downstream",
+        "internal_imports": [
+          "ciip.evaluation.output_utils"
+        ],
+        "external_imports": [
+          "__future__",
+          "argparse",
+          "csv",
+          "dataclasses",
+          "json",
+          "matplotlib.pyplot",
+          "numpy",
+          "pathlib",
+          "re",
+          "typing"
+        ],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": true,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/evaluation/plot_sen12ms_retrieval.py",
+        "module": "ciip.evaluation.plot_sen12ms_retrieval",
+        "internal_imports": [],
+        "external_imports": [
+          "__future__",
+          "argparse",
+          "json",
+          "matplotlib.pyplot",
+          "pathlib",
+          "re",
+          "typing"
+        ],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": true,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/evaluation/run_downstream.py",
+        "module": "ciip.evaluation.run_downstream",
+        "internal_imports": [],
+        "external_imports": [
+          "__future__",
+          "argparse",
+          "json",
+          "pathlib",
+          "subprocess",
+          "sys",
+          "typing"
+        ],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": true,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/evaluation/sen12ms_hyperbolic_radii.py",
+        "module": "ciip.evaluation.sen12ms_hyperbolic_radii",
+        "internal_imports": [
+          "ciip",
+          "ciip.evaluation.model_utils",
+          "ciip.evaluation.sen12ms_retrieval",
+          "ciip.evaluation.unified_evaluation",
+          "ciip.model_ciip",
+          "visualizations.ssl4eo.embedding_collapse_diagnostics",
+          "visualizations.ssl4eo.hyperbolic_visualization"
+        ],
+        "external_imports": [
+          "__future__",
+          "argparse",
+          "contextlib",
+          "dataclasses",
+          "json",
+          "logging",
+          "math",
+          "matplotlib",
+          "matplotlib.pyplot",
+          "numpy",
+          "pathlib",
+          "pickle",
+          "random",
+          "scipy.cluster",
+          "scipy.spatial",
+          "scipy.stats",
+          "sklearn.decomposition",
+          "sklearn.manifold",
+          "torch",
+          "torch.utils.data",
+          "typing"
+        ],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": true,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [
+            "torch.load"
+          ],
+          "checkpoint_save_calls": [
+            "torch.save"
+          ]
+        }
+      },
+      {
+        "path": "ciip/evaluation/unified_evaluation.py",
+        "module": "ciip.evaluation.unified_evaluation",
+        "internal_imports": [
+          "ciip.eval_utils",
+          "ciip.evaluation.export_neuco_embeddings",
+          "ciip.evaluation.id_metrics",
+          "ciip.evaluation.model_utils",
+          "ciip.evaluation.normalization_utils",
+          "ciip.evaluation.output_utils",
+          "ciip.model_ciip",
+          "ciip.open_clip_train",
+          "ciip.open_clip_train.data",
+          "visualizations.ssl4eo.embedding_collapse_diagnostics",
+          "visualizations.ssl4eo.hyperbolic_retrieval",
+          "visualizations.ssl4eo.hyperbolic_visualization"
+        ],
+        "external_imports": [
+          "CKA",
+          "__future__",
+          "argparse",
+          "contextlib",
+          "dataclasses",
+          "json",
+          "logging",
+          "matplotlib.pyplot",
+          "numpy",
+          "os",
+          "pathlib",
+          "re",
+          "sklearn.decomposition",
+          "sklearn.linear_model",
+          "sklearn.manifold",
+          "sklearn.metrics",
+          "sklearn.multiclass",
+          "sklearn.neighbors",
+          "subprocess",
+          "tempfile",
+          "time",
+          "torch",
+          "torch.utils.data",
+          "torchgeo.datasets",
+          "torchvision",
+          "torchvision.models",
+          "torchvision.transforms",
+          "tqdm",
+          "typing"
+        ],
+        "imported_by": [
+          "ciip/evaluation/eurosat_fewshot_1nn.py",
+          "ciip/evaluation/neuco_fewshot_benchmark.py",
+          "ciip/evaluation/neuco_fewshot_episodic.py",
+          "ciip/evaluation/neuco_layerwise_probes.py",
+          "ciip/evaluation/sen12ms_hyperbolic_radii.py",
+          "visualizations/ssl4eo/embedding_collapse_diagnostics.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": true,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [
+            "torch.load"
+          ],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/evaluation/utils.py",
+        "module": "ciip.evaluation.utils",
+        "internal_imports": [
+          "ciip.eval_utils",
+          "ciip.model_ciip"
+        ],
+        "external_imports": [
+          "collections",
+          "csv",
+          "datetime",
+          "hashlib",
+          "json",
+          "matplotlib.pyplot",
+          "numpy",
+          "os",
+          "re",
+          "torch",
+          "torch.nn",
+          "torch.nn.functional",
+          "torchgeo.models"
+        ],
+        "imported_by": [
+          "ciip/evaluation/linearprobe_comparison.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/few_shot_comparison.py",
+        "module": "ciip.few_shot_comparison",
+        "internal_imports": [
+          "ciip.eval_utils",
+          "ciip.model"
+        ],
+        "external_imports": [
+          "collections",
+          "copy",
+          "csv",
+          "datetime",
+          "hashlib",
+          "json",
+          "matplotlib.pyplot",
+          "numpy",
+          "os",
+          "random",
+          "sklearn.metrics",
+          "torch",
+          "torch.nn",
+          "torch.optim",
+          "torch.utils.data",
+          "torchgeo.datasets",
+          "torchgeo.models",
+          "torchvision",
+          "tqdm"
+        ],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/lorentz.py",
+        "module": "ciip.lorentz",
+        "internal_imports": [],
+        "external_imports": [
+          "__future__",
+          "math",
+          "torch"
+        ],
+        "imported_by": [
+          "ciip/loss.py",
+          "ciip/model_ciip.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/loss.py",
+        "module": "ciip.loss",
+        "internal_imports": [
+          "ciip",
+          "ciip.lorentz"
+        ],
+        "external_imports": [
+          "contextlib",
+          "horovod.torch",
+          "logging",
+          "math",
+          "os",
+          "torch",
+          "torch.distributed.nn",
+          "torch.nn",
+          "typing"
+        ],
+        "imported_by": [
+          "ciip/open_clip_train/utils.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/mae_decoder.py",
+        "module": "ciip.mae_decoder",
+        "internal_imports": [
+          "ciip.masking",
+          "ciip.model"
+        ],
+        "external_imports": [
+          "__future__",
+          "torch",
+          "typing"
+        ],
+        "imported_by": [
+          "ciip/model_ciip.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/masking.py",
+        "module": "ciip.masking",
+        "internal_imports": [],
+        "external_imports": [
+          "__future__",
+          "torch",
+          "typing"
+        ],
+        "imported_by": [
+          "ciip/mae_decoder.py",
+          "ciip/model.py",
+          "ciip/model_ciip.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/model.py",
+        "module": "ciip.model",
+        "internal_imports": [
+          "ciip.masking"
+        ],
+        "external_imports": [
+          "collections",
+          "numpy",
+          "torch",
+          "torch.nn.functional",
+          "torchvision.models.resnet",
+          "typing"
+        ],
+        "imported_by": [
+          "ciip/ciip.py",
+          "ciip/few_shot_comparison.py",
+          "ciip/mae_decoder.py",
+          "ciip/model_ciip.py",
+          "ciip/open_clip_train/dataparallel/model_arch.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [
+            "model.load_state_dict"
+          ],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/model_ciip.py",
+        "module": "ciip.model_ciip",
+        "internal_imports": [
+          "ciip",
+          "ciip.lorentz",
+          "ciip.mae_decoder",
+          "ciip.masking",
+          "ciip.model"
+        ],
+        "external_imports": [
+          "collections",
+          "logging",
+          "math",
+          "numpy",
+          "torch",
+          "torch.nn.functional",
+          "torchgeo.models",
+          "typing"
+        ],
+        "imported_by": [
+          "ciip/eurosat.py",
+          "ciip/eval_utils.py",
+          "ciip/evaluation/model_utils.py",
+          "ciip/evaluation/sen12ms_hyperbolic_radii.py",
+          "ciip/evaluation/unified_evaluation.py",
+          "ciip/evaluation/utils.py",
+          "ciip/open_clip_train/dataparallel/model_arch.py",
+          "ciip/open_clip_train/run_train_val.py",
+          "ciip/open_clip_train/save_embeddings.py",
+          "ciip/open_clip_train/test_train_one_epoch.py",
+          "ciip/open_clip_train/utils.py",
+          "visualizations/ssl4eo/hyperbolic_visualization.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/open_clip_train/__init__.py",
+        "module": "ciip.open_clip_train",
+        "internal_imports": [],
+        "external_imports": [],
+        "imported_by": [
+          "ciip/evaluation/unified_evaluation.py",
+          "ciip/open_clip_train/test_train_one_epoch.py",
+          "intrinsic-dimension/compute_id.py"
+        ],
+        "literal_references": [
+          {
+            "path": "README.md",
+            "matched": [
+              "ciip.open_clip_train"
+            ]
+          }
+        ],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/open_clip_train/data.py",
+        "module": "ciip.open_clip_train.data",
+        "internal_imports": [],
+        "external_imports": [
+          "argparse",
+          "dataclasses",
+          "functools",
+          "glob",
+          "hydra",
+          "logging",
+          "matplotlib.pyplot",
+          "multiprocessing",
+          "numpy",
+          "open_clip",
+          "os",
+          "pandas",
+          "pathlib",
+          "random",
+          "rasterio",
+          "torch",
+          "torch.utils.data",
+          "torch.utils.data._utils.collate",
+          "torch.utils.data.distributed",
+          "torchvision",
+          "torchvision.transforms",
+          "torchvision.transforms.functional",
+          "typing",
+          "xarray",
+          "zarr.storage"
+        ],
+        "imported_by": [
+          "ciip/evaluation/eurosat_fewshot_1nn.py",
+          "ciip/evaluation/normalization_utils.py",
+          "ciip/evaluation/unified_evaluation.py",
+          "ciip/open_clip_train/dataparallel/run_train_val_dataparallel.py",
+          "ciip/open_clip_train/main.py",
+          "ciip/open_clip_train/run_train_val.py",
+          "ciip/open_clip_train/run_train_val_distributed.py",
+          "ciip/open_clip_train/save_embeddings.py",
+          "ciip/open_clip_train/save_ssl4eo_embeddings.py",
+          "ciip/open_clip_train/test_train_one_epoch.py",
+          "intrinsic-dimension/compute_id.py",
+          "intrinsic-dimension/compute_intrinsic_dimension_ssl4eo_val.py",
+          "visualizations/ssl4eo/embedding_collapse_diagnostics.py",
+          "visualizations/ssl4eo/hyperbolic_visualization.py",
+          "visualizations/ssl4eo/initialization_evaluation.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": true,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/open_clip_train/dataparallel/__init__.py",
+        "module": "ciip.open_clip_train.dataparallel",
+        "internal_imports": [],
+        "external_imports": [],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/open_clip_train/dataparallel/factory.py",
+        "module": "ciip.open_clip_train.dataparallel.factory",
+        "internal_imports": [
+          "ciip.open_clip_train.dataparallel.model_arch",
+          "ciip.open_clip_train.file_utils",
+          "ciip.open_clip_train.utils"
+        ],
+        "external_imports": [
+          "logging",
+          "omegaconf",
+          "os",
+          "torch",
+          "typing"
+        ],
+        "imported_by": [
+          "ciip/open_clip_train/dataparallel/run_train_val_dataparallel.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [
+            "model.load_state_dict"
+          ],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/open_clip_train/dataparallel/model_arch.py",
+        "module": "ciip.open_clip_train.dataparallel.model_arch",
+        "internal_imports": [
+          "ciip.model",
+          "ciip.model_ciip",
+          "ciip.open_clip_train.utils"
+        ],
+        "external_imports": [
+          "huggingface_hub",
+          "logging",
+          "numpy",
+          "omegaconf",
+          "torch",
+          "torch.nn",
+          "torch.nn.functional",
+          "torchgeo.models",
+          "typing"
+        ],
+        "imported_by": [
+          "ciip/open_clip_train/dataparallel/factory.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [
+            "encoder.load_state_dict",
+            "target.load_state_dict",
+            "torch.load"
+          ],
+          "checkpoint_save_calls": [
+            "encoder.state_dict",
+            "target.state_dict"
+          ]
+        }
+      },
+      {
+        "path": "ciip/open_clip_train/dataparallel/run_train_val_dataparallel.py",
+        "module": "ciip.open_clip_train.dataparallel.run_train_val_dataparallel",
+        "internal_imports": [
+          "ciip.open_clip_train.data",
+          "ciip.open_clip_train.dataparallel.factory",
+          "ciip.open_clip_train.dataparallel.train",
+          "ciip.open_clip_train.scheduler"
+        ],
+        "external_imports": [
+          "comet_ml",
+          "comet_ml.integration.pytorch",
+          "hydra",
+          "logging",
+          "numpy",
+          "omegaconf",
+          "os",
+          "torch",
+          "torch.cuda.amp",
+          "torchvision.transforms",
+          "typing"
+        ],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [
+            "load_state_dict",
+            "loss.load_state_dict",
+            "optimizer.load_state_dict",
+            "scaler.load_state_dict",
+            "torch.load"
+          ],
+          "checkpoint_save_calls": [
+            "loss.state_dict",
+            "optimizer.state_dict",
+            "scaler.state_dict",
+            "state_dict",
+            "torch.save"
+          ]
+        }
+      },
+      {
+        "path": "ciip/open_clip_train/dataparallel/train.py",
+        "module": "ciip.open_clip_train.dataparallel.train",
+        "internal_imports": [
+          "ciip.open_clip_train.distributed",
+          "ciip.open_clip_train.precision",
+          "ciip.open_clip_train.train"
+        ],
+        "external_imports": [
+          "contextlib",
+          "logging",
+          "math",
+          "open_clip",
+          "time",
+          "torch",
+          "torch.nn.functional",
+          "typing"
+        ],
+        "imported_by": [
+          "ciip/open_clip_train/dataparallel/run_train_val_dataparallel.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/open_clip_train/distributed.py",
+        "module": "ciip.open_clip_train.distributed",
+        "internal_imports": [],
+        "external_imports": [
+          "horovod.torch",
+          "os",
+          "torch",
+          "torch.distributed"
+        ],
+        "imported_by": [
+          "ciip/open_clip_train/dataparallel/train.py",
+          "ciip/open_clip_train/main.py",
+          "ciip/open_clip_train/run_train_val_distributed.py",
+          "ciip/open_clip_train/save_embeddings.py",
+          "ciip/open_clip_train/save_ssl4eo_embeddings.py",
+          "ciip/open_clip_train/train.py",
+          "visualizations/ssl4eo/initialization_evaluation.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/open_clip_train/file_utils.py",
+        "module": "ciip.open_clip_train.file_utils",
+        "internal_imports": [],
+        "external_imports": [
+          "fsspec",
+          "logging",
+          "multiprocessing",
+          "os",
+          "subprocess",
+          "time",
+          "torch",
+          "tqdm"
+        ],
+        "imported_by": [
+          "ciip/open_clip_train/dataparallel/factory.py",
+          "ciip/open_clip_train/main.py",
+          "ciip/open_clip_train/run_train_val_distributed.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [
+            "torch.load"
+          ],
+          "checkpoint_save_calls": [
+            "torch.save"
+          ]
+        }
+      },
+      {
+        "path": "ciip/open_clip_train/logger.py",
+        "module": "ciip.open_clip_train.logger",
+        "internal_imports": [],
+        "external_imports": [
+          "logging",
+          "socket"
+        ],
+        "imported_by": [
+          "ciip/open_clip_train/main.py",
+          "ciip/open_clip_train/run_train_val_distributed.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/open_clip_train/main.py",
+        "module": "ciip.open_clip_train.main",
+        "internal_imports": [
+          "ciip.open_clip_train.data",
+          "ciip.open_clip_train.distributed",
+          "ciip.open_clip_train.file_utils",
+          "ciip.open_clip_train.logger",
+          "ciip.open_clip_train.params",
+          "ciip.open_clip_train.scheduler",
+          "ciip.open_clip_train.train"
+        ],
+        "external_imports": [
+          "bitsandbytes",
+          "datetime",
+          "functools",
+          "glob",
+          "horovod.torch",
+          "logging",
+          "numpy",
+          "open_clip",
+          "open_clip.utils",
+          "os",
+          "random",
+          "re",
+          "shutil",
+          "subprocess",
+          "sys",
+          "torch",
+          "torch.cuda.amp",
+          "torch.utils.tensorboard",
+          "wandb"
+        ],
+        "imported_by": [],
+        "literal_references": [
+          {
+            "path": "README.md",
+            "matched": [
+              "ciip.open_clip_train.main"
+            ]
+          }
+        ],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [
+            "model.load_state_dict",
+            "optimizer.load_state_dict",
+            "scaler.load_state_dict"
+          ],
+          "checkpoint_save_calls": [
+            "loss.state_dict",
+            "model.state_dict",
+            "optimizer.state_dict",
+            "original_model.state_dict",
+            "scaler.state_dict",
+            "torch.save"
+          ]
+        }
+      },
+      {
+        "path": "ciip/open_clip_train/params.py",
+        "module": "ciip.open_clip_train.params",
+        "internal_imports": [],
+        "external_imports": [
+          "argparse",
+          "ast"
+        ],
+        "imported_by": [
+          "ciip/open_clip_train/main.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": true,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/open_clip_train/precision.py",
+        "module": "ciip.open_clip_train.precision",
+        "internal_imports": [],
+        "external_imports": [
+          "contextlib",
+          "torch"
+        ],
+        "imported_by": [
+          "ciip/open_clip_train/dataparallel/train.py",
+          "ciip/open_clip_train/save_embeddings.py",
+          "ciip/open_clip_train/save_ssl4eo_embeddings.py",
+          "ciip/open_clip_train/train.py",
+          "ciip/open_clip_train/zero_shot.py",
+          "visualizations/ssl4eo/embedding_collapse_diagnostics.py",
+          "visualizations/ssl4eo/initialization_evaluation.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/open_clip_train/profiler.py",
+        "module": "ciip.open_clip_train.profiler",
+        "internal_imports": [],
+        "external_imports": [
+          "argparse",
+          "fvcore",
+          "open_clip",
+          "pandas",
+          "torch",
+          "torch.utils.flop_counter",
+          "traceback"
+        ],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": true,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/open_clip_train/run_train_val.py",
+        "module": "ciip.open_clip_train.run_train_val",
+        "internal_imports": [
+          "ciip.model_ciip",
+          "ciip.open_clip_train.data",
+          "ciip.open_clip_train.train",
+          "ciip.open_clip_train.utils"
+        ],
+        "external_imports": [
+          "comet_ml",
+          "comet_ml.integration.pytorch",
+          "hydra",
+          "logging",
+          "numpy",
+          "omegaconf",
+          "os",
+          "torch",
+          "torchvision.transforms"
+        ],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": [
+            "optimizer.state_dict",
+            "original_model.state_dict",
+            "scaler.state_dict",
+            "torch.save"
+          ]
+        }
+      },
+      {
+        "path": "ciip/open_clip_train/run_train_val_distributed.py",
+        "module": "ciip.open_clip_train.run_train_val_distributed",
+        "internal_imports": [
+          "ciip.open_clip_train.data",
+          "ciip.open_clip_train.distributed",
+          "ciip.open_clip_train.file_utils",
+          "ciip.open_clip_train.logger",
+          "ciip.open_clip_train.scheduler",
+          "ciip.open_clip_train.train",
+          "ciip.open_clip_train.utils"
+        ],
+        "external_imports": [
+          "comet_ml",
+          "comet_ml.integration.pytorch",
+          "datetime",
+          "functools",
+          "glob",
+          "horovod.torch",
+          "hydra",
+          "logging",
+          "math",
+          "numpy",
+          "omegaconf",
+          "os",
+          "random",
+          "re",
+          "subprocess",
+          "torch",
+          "torch.cuda.amp",
+          "torch.distributed",
+          "torch.utils.tensorboard",
+          "torchvision.transforms",
+          "wandb"
+        ],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [
+            "loss.load_state_dict",
+            "model.load_state_dict",
+            "optimizer.load_state_dict",
+            "scaler.load_state_dict"
+          ],
+          "checkpoint_save_calls": [
+            "loss.state_dict",
+            "model.state_dict",
+            "optimizer.state_dict",
+            "original_model.state_dict",
+            "scaler.state_dict",
+            "torch.save"
+          ]
+        }
+      },
+      {
+        "path": "ciip/open_clip_train/save_embeddings.py",
+        "module": "ciip.open_clip_train.save_embeddings",
+        "internal_imports": [
+          "ciip.model_ciip",
+          "ciip.open_clip_train.data",
+          "ciip.open_clip_train.distributed",
+          "ciip.open_clip_train.precision",
+          "ciip.open_clip_train.train"
+        ],
+        "external_imports": [
+          "argparse",
+          "configparser",
+          "json",
+          "numpy",
+          "open_clip",
+          "os",
+          "torch",
+          "types"
+        ],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": true,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [
+            "model.load_state_dict",
+            "torch.load"
+          ],
+          "checkpoint_save_calls": [
+            "torch.save"
+          ]
+        }
+      },
+      {
+        "path": "ciip/open_clip_train/save_ssl4eo_embeddings.py",
+        "module": "ciip.open_clip_train.save_ssl4eo_embeddings",
+        "internal_imports": [
+          "ciip.open_clip_train.data",
+          "ciip.open_clip_train.distributed",
+          "ciip.open_clip_train.precision",
+          "ciip.open_clip_train.train"
+        ],
+        "external_imports": [
+          "argparse",
+          "configparser",
+          "json",
+          "numpy",
+          "open_clip",
+          "os",
+          "time",
+          "timm",
+          "torch",
+          "torchgeo.models",
+          "types"
+        ],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": true,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [
+            "model_s1.load_state_dict",
+            "model_s2.load_state_dict"
+          ],
+          "checkpoint_save_calls": [
+            "torch.save"
+          ]
+        }
+      },
+      {
+        "path": "ciip/open_clip_train/scheduler.py",
+        "module": "ciip.open_clip_train.scheduler",
+        "internal_imports": [],
+        "external_imports": [
+          "numpy"
+        ],
+        "imported_by": [
+          "ciip/open_clip_train/dataparallel/run_train_val_dataparallel.py",
+          "ciip/open_clip_train/main.py",
+          "ciip/open_clip_train/run_train_val_distributed.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/open_clip_train/test_train_one_epoch.py",
+        "module": "ciip.open_clip_train.test_train_one_epoch",
+        "internal_imports": [
+          "ciip.model_ciip",
+          "ciip.open_clip_train.data",
+          "ciip.open_clip_train.loss",
+          "ciip.open_clip_train.train"
+        ],
+        "external_imports": [
+          "torch",
+          "torch.cuda.amp",
+          "torch.nn",
+          "torch.optim"
+        ],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/open_clip_train/train.py",
+        "module": "ciip.open_clip_train.train",
+        "internal_imports": [
+          "ciip.open_clip_train.distributed",
+          "ciip.open_clip_train.precision",
+          "ciip.open_clip_train.zero_shot"
+        ],
+        "external_imports": [
+          "contextlib",
+          "datetime",
+          "json",
+          "logging",
+          "math",
+          "numpy",
+          "open_clip",
+          "os",
+          "random",
+          "time",
+          "torch",
+          "torch.autograd.profiler",
+          "torch.nn.functional",
+          "torch.nn.parallel.distributed",
+          "torch.utils.data",
+          "typing",
+          "wandb"
+        ],
+        "imported_by": [
+          "ciip/open_clip_train/dataparallel/train.py",
+          "ciip/open_clip_train/main.py",
+          "ciip/open_clip_train/run_train_val.py",
+          "ciip/open_clip_train/run_train_val_distributed.py",
+          "ciip/open_clip_train/save_embeddings.py",
+          "ciip/open_clip_train/save_ssl4eo_embeddings.py",
+          "ciip/open_clip_train/test_train_one_epoch.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": [
+            "model.state_dict",
+            "optimizer.state_dict",
+            "original_model.state_dict",
+            "scaler.state_dict",
+            "torch.save"
+          ]
+        }
+      },
+      {
+        "path": "ciip/open_clip_train/transforms.py",
+        "module": "ciip.open_clip_train.transforms",
+        "internal_imports": [],
+        "external_imports": [
+          "__future__",
+          "dataclasses",
+          "torch",
+          "torchvision",
+          "typing"
+        ],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/open_clip_train/utils.py",
+        "module": "ciip.open_clip_train.utils",
+        "internal_imports": [
+          "ciip.loss",
+          "ciip.model_ciip"
+        ],
+        "external_imports": [
+          "copy",
+          "dataclasses",
+          "json",
+          "logging",
+          "numpy",
+          "omegaconf",
+          "os",
+          "pathlib",
+          "re",
+          "torch",
+          "typing"
+        ],
+        "imported_by": [
+          "ciip/open_clip_train/dataparallel/factory.py",
+          "ciip/open_clip_train/dataparallel/model_arch.py",
+          "ciip/open_clip_train/run_train_val.py",
+          "ciip/open_clip_train/run_train_val_distributed.py",
+          "visualizations/ssl4eo/initialization_evaluation.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "ciip/open_clip_train/zero_shot.py",
+        "module": "ciip.open_clip_train.zero_shot",
+        "internal_imports": [
+          "ciip.open_clip_train.precision"
+        ],
+        "external_imports": [
+          "logging",
+          "open_clip",
+          "torch",
+          "tqdm"
+        ],
+        "imported_by": [
+          "ciip/open_clip_train/train.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "clip/__init__.py",
+        "module": "clip",
+        "internal_imports": [
+          "clip.clip"
+        ],
+        "external_imports": [],
+        "imported_by": [],
+        "literal_references": [
+          {
+            "path": "README.md",
+            "matched": [
+              "clip"
+            ]
+          },
+          {
+            "path": "ciip/evaluation/eurosat_fewshot_models.json",
+            "matched": [
+              "clip"
+            ]
+          },
+          {
+            "path": "ciip/open_clip_train/config_train.ini",
+            "matched": [
+              "clip"
+            ]
+          },
+          {
+            "path": "ciip/open_clip_train/configs/local_default.yaml",
+            "matched": [
+              "clip"
+            ]
+          },
+          {
+            "path": "ciip/open_clip_train/configs/prod_default.yaml",
+            "matched": [
+              "clip"
+            ]
+          },
+          {
+            "path": "ciip/readMe.md",
+            "matched": [
+              "clip"
+            ]
+          },
+          {
+            "path": "comparison/CROMA-main/README.md",
+            "matched": [
+              "clip"
+            ]
+          },
+          {
+            "path": "data/country211.md",
+            "matched": [
+              "clip"
+            ]
+          },
+          {
+            "path": "data/rendered-sst2.md",
+            "matched": [
+              "clip"
+            ]
+          },
+          {
+            "path": "data/yfcc100m.md",
+            "matched": [
+              "clip"
+            ]
+          },
+          {
+            "path": "environment.yml",
+            "matched": [
+              "clip"
+            ]
+          },
+          {
+            "path": "model-card.md",
+            "matched": [
+              "clip"
+            ]
+          },
+          {
+            "path": "temp.yml",
+            "matched": [
+              "clip"
+            ]
+          }
+        ],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "clip/clip.py",
+        "module": "clip.clip",
+        "internal_imports": [
+          "clip.model",
+          "clip.simple_tokenizer"
+        ],
+        "external_imports": [
+          "PIL",
+          "hashlib",
+          "os",
+          "packaging",
+          "torch",
+          "torchvision.transforms",
+          "tqdm",
+          "typing",
+          "urllib",
+          "warnings"
+        ],
+        "imported_by": [
+          "clip/__init__.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [
+            "torch.load"
+          ],
+          "checkpoint_save_calls": [
+            "model.state_dict"
+          ]
+        }
+      },
+      {
+        "path": "clip/dataset.py",
+        "module": "clip.dataset",
+        "internal_imports": [],
+        "external_imports": [
+          "PIL",
+          "ast",
+          "braceexpand",
+          "dataclasses",
+          "horovod.torch",
+          "imagenetv2_pytorch",
+          "json",
+          "logging",
+          "math",
+          "multiprocessing",
+          "numpy",
+          "os",
+          "pandas",
+          "random",
+          "sys",
+          "torch",
+          "torch.utils.data",
+          "torch.utils.data.distributed",
+          "torchvision.datasets",
+          "webdataset",
+          "webdataset.filters",
+          "webdataset.tariterators"
+        ],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "clip/model.py",
+        "module": "clip.model",
+        "internal_imports": [],
+        "external_imports": [
+          "collections",
+          "numpy",
+          "torch",
+          "torch.nn.functional",
+          "typing"
+        ],
+        "imported_by": [
+          "clip/clip.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [
+            "model.load_state_dict"
+          ],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "clip/simple_tokenizer.py",
+        "module": "clip.simple_tokenizer",
+        "internal_imports": [],
+        "external_imports": [
+          "ftfy",
+          "functools",
+          "gzip",
+          "html",
+          "os",
+          "regex"
+        ],
+        "imported_by": [
+          "clip/clip.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "comparison/CROMA-main/extract_croma_embeddings.py",
+        "module": "comparison.CROMA-main.extract_croma_embeddings",
+        "internal_imports": [
+          "ciip.evaluation.export_neuco_embeddings"
+        ],
+        "external_imports": [
+          "__future__",
+          "argparse",
+          "pathlib",
+          "torch",
+          "torch.nn.functional",
+          "torch.utils.data",
+          "torchvision",
+          "typing",
+          "use_croma"
+        ],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": true,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": [
+            "torch.save"
+          ]
+        }
+      },
+      {
+        "path": "comparison/CROMA-main/pretrain_croma.py",
+        "module": "comparison.CROMA-main.pretrain_croma",
+        "internal_imports": [],
+        "external_imports": [
+          "einops",
+          "itertools",
+          "math",
+          "numpy",
+          "torch",
+          "torch.nn.functional"
+        ],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "comparison/CROMA-main/use_croma.py",
+        "module": "comparison.CROMA-main.use_croma",
+        "internal_imports": [],
+        "external_imports": [
+          "collections",
+          "einops",
+          "itertools",
+          "math",
+          "torch",
+          "warnings"
+        ],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [
+            "self.GAP_FFN_s1.load_state_dict",
+            "self.GAP_FFN_s2.load_state_dict",
+            "self.cross_encoder.load_state_dict",
+            "self.s1_encoder.load_state_dict",
+            "self.s2_encoder.load_state_dict",
+            "torch.load"
+          ],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "diagnostics/global_id_table1/merge_global_id_downstream.py",
+        "module": "diagnostics.global_id_table1.merge_global_id_downstream",
+        "internal_imports": [],
+        "external_imports": [
+          "__future__",
+          "argparse",
+          "json",
+          "math",
+          "matplotlib",
+          "matplotlib.pyplot",
+          "numpy",
+          "pathlib",
+          "re",
+          "typing"
+        ],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": true,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "diagnostics/pangaea_limited_label_results.py",
+        "module": "diagnostics.pangaea_limited_label_results",
+        "internal_imports": [],
+        "external_imports": [
+          "argparse",
+          "json",
+          "matplotlib.pyplot",
+          "pandas",
+          "pathlib",
+          "typing"
+        ],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": true,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "diagnostics/unified_eval/plot_eurosat_knn_vs_linearprobe.py",
+        "module": "diagnostics.unified_eval.plot_eurosat_knn_vs_linearprobe",
+        "internal_imports": [],
+        "external_imports": [
+          "PIL",
+          "argparse",
+          "functools",
+          "imageio",
+          "json",
+          "math",
+          "matplotlib.pyplot",
+          "numpy",
+          "pathlib",
+          "re",
+          "typing"
+        ],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": true,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "diagnostics/unified_eval/plot_neuco_results.py",
+        "module": "diagnostics.unified_eval.plot_neuco_results",
+        "internal_imports": [],
+        "external_imports": [
+          "__future__",
+          "argparse",
+          "csv",
+          "evaluation.results",
+          "functools",
+          "json",
+          "math",
+          "matplotlib.pyplot",
+          "numpy",
+          "pathlib",
+          "re",
+          "sys",
+          "typing"
+        ],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": true,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "intrinsic-dimension/compute_id.py",
+        "module": "intrinsic-dimension.compute_id",
+        "internal_imports": [
+          "ciip.evaluation.model_utils",
+          "ciip.evaluation.normalization_utils",
+          "ciip.evaluation.output_utils",
+          "ciip.open_clip_train",
+          "ciip.open_clip_train.data",
+          "visualizations.ssl4eo.embedding_collapse_diagnostics"
+        ],
+        "external_imports": [
+          "__future__",
+          "contextlib",
+          "dataclasses",
+          "importlib.util",
+          "json",
+          "logging",
+          "numpy",
+          "open_clip",
+          "pangaea.encoders.remoteclip_encoder",
+          "pathlib",
+          "re",
+          "s2geo_dataset",
+          "skdim.id",
+          "sys",
+          "torch",
+          "torch.nn",
+          "torch.utils.data",
+          "torchgeo.models",
+          "torchvision",
+          "torchvision.models",
+          "types",
+          "typing",
+          "yaml"
+        ],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [
+            "model.load_state_dict",
+            "torch.load"
+          ],
+          "checkpoint_save_calls": [
+            "model.state_dict"
+          ]
+        }
+      },
+      {
+        "path": "intrinsic-dimension/compute_intrinsic_dimension_ssl4eo_val.py",
+        "module": "intrinsic-dimension.compute_intrinsic_dimension_ssl4eo_val",
+        "internal_imports": [
+          "ciip.evaluation.model_utils",
+          "ciip.evaluation.normalization_utils",
+          "ciip.open_clip_train.data",
+          "visualizations.ssl4eo.embedding_collapse_diagnostics"
+        ],
+        "external_imports": [
+          "__future__",
+          "argparse",
+          "contextlib",
+          "csv",
+          "dataclasses",
+          "google.cloud.storage",
+          "hydra.utils",
+          "importlib",
+          "importlib.util",
+          "json",
+          "logging",
+          "matplotlib",
+          "matplotlib.pyplot",
+          "neuco_downstream_loader",
+          "numpy",
+          "open_clip",
+          "os",
+          "pangaea.datasets.base",
+          "pangaea.encoders.remoteclip_encoder",
+          "pangaea.utils.collate_fn",
+          "pathlib",
+          "pyDataverse.api",
+          "re",
+          "skdim.id",
+          "sys",
+          "torch",
+          "torch.distributed",
+          "torch.multiprocessing",
+          "torch.nn",
+          "torch.utils.data",
+          "torchgeo.models",
+          "torchvision.models",
+          "torchvision.transforms",
+          "types",
+          "typing",
+          "yaml"
+        ],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": true,
+          "dynamic_import_calls": [
+            "importlib.import_module"
+          ],
+          "checkpoint_load_calls": [
+            "model.load_state_dict",
+            "torch.load"
+          ],
+          "checkpoint_save_calls": [
+            "model.state_dict"
+          ]
+        }
+      },
+      {
+        "path": "setup.py",
+        "module": "setup",
+        "internal_imports": [],
+        "external_imports": [
+          "os",
+          "pkg_resources",
+          "setuptools"
+        ],
+        "imported_by": [],
+        "literal_references": [
+          {
+            "path": "ciip/open_clip_train/configs/local_default.yaml",
+            "matched": [
+              "setup"
+            ]
+          },
+          {
+            "path": "ciip/readMe.md",
+            "matched": [
+              "setup"
+            ]
+          },
+          {
+            "path": "environment.yml",
+            "matched": [
+              "setup"
+            ]
+          },
+          {
+            "path": "temp.yml",
+            "matched": [
+              "setup"
+            ]
+          }
+        ],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "tools/phase0_inventory.py",
+        "module": "tools.phase0_inventory",
+        "internal_imports": [],
+        "external_imports": [
+          "__future__",
+          "argparse",
+          "ast",
+          "collections",
+          "hashlib",
+          "json",
+          "pathlib",
+          "subprocess"
+        ],
+        "imported_by": [
+          "tools/test_phase0_inventory.py"
+        ],
+        "literal_references": [
+          {
+            "path": "docs/phase0-cleanup.md",
+            "matched": [
+              "tools/phase0_inventory",
+              "tools/phase0_inventory.py"
+            ]
+          }
+        ],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": true,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "tools/phase1_config_contracts.py",
+        "module": "tools.phase1_config_contracts",
+        "internal_imports": [],
+        "external_imports": [
+          "__future__",
+          "argparse",
+          "ast",
+          "hashlib",
+          "json",
+          "pathlib"
+        ],
+        "imported_by": [
+          "tools/test_phase1_config_contracts.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": true,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "tools/phase1_external_audit.py",
+        "module": "tools.phase1_external_audit",
+        "internal_imports": [],
+        "external_imports": [
+          "__future__",
+          "argparse",
+          "collections",
+          "json",
+          "pathlib",
+          "re",
+          "subprocess"
+        ],
+        "imported_by": [
+          "tools/test_phase1_external_audit.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": true,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "tools/phase2_model_contracts.py",
+        "module": "tools.phase2_model_contracts",
+        "internal_imports": [],
+        "external_imports": [
+          "__future__",
+          "argparse",
+          "ast",
+          "hashlib",
+          "json",
+          "pathlib"
+        ],
+        "imported_by": [
+          "tools/test_phase2_model_contracts.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": true,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "tools/test_phase0_inventory.py",
+        "module": "tools.test_phase0_inventory",
+        "internal_imports": [
+          "tools.phase0_inventory"
+        ],
+        "external_imports": [
+          "ast",
+          "pathlib",
+          "unittest"
+        ],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "tools/test_phase1_config_contracts.py",
+        "module": "tools.test_phase1_config_contracts",
+        "internal_imports": [
+          "tools.phase1_config_contracts"
+        ],
+        "external_imports": [
+          "pathlib",
+          "tempfile",
+          "unittest"
+        ],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "tools/test_phase1_external_audit.py",
+        "module": "tools.test_phase1_external_audit",
+        "internal_imports": [
+          "tools.phase1_external_audit"
+        ],
+        "external_imports": [
+          "unittest"
+        ],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "tools/test_phase2_model_contracts.py",
+        "module": "tools.test_phase2_model_contracts",
+        "internal_imports": [
+          "tools.phase2_model_contracts"
+        ],
+        "external_imports": [
+          "ast",
+          "unittest"
+        ],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "tools/test_phase2_runtime.py",
+        "module": "tools.test_phase2_runtime",
+        "internal_imports": [],
+        "external_imports": [
+          "importlib.util",
+          "pathlib",
+          "sys",
+          "tempfile",
+          "torch",
+          "unittest"
+        ],
+        "imported_by": [],
+        "literal_references": [
+          {
+            "path": "docs/phase0-cleanup.md",
+            "matched": [
+              "tools/test_phase2_runtime",
+              "tools/test_phase2_runtime.py"
+            ]
+          }
+        ],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [
+            "restored.load_state_dict",
+            "torch.load"
+          ],
+          "checkpoint_save_calls": [
+            "restored.state_dict",
+            "source.state_dict",
+            "torch.save"
+          ]
+        }
+      },
+      {
+        "path": "visualizations/__init__.py",
+        "module": "visualizations",
+        "internal_imports": [],
+        "external_imports": [],
+        "imported_by": [],
+        "literal_references": [
+          {
+            "path": "ciip/readMe.md",
+            "matched": [
+              "visualizations"
+            ]
+          }
+        ],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "visualizations/ssl4eo/__init__.py",
+        "module": "visualizations.ssl4eo",
+        "internal_imports": [],
+        "external_imports": [],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "visualizations/ssl4eo/embedding_collapse_diagnostics.py",
+        "module": "visualizations.ssl4eo.embedding_collapse_diagnostics",
+        "internal_imports": [
+          "ciip.evaluation.unified_evaluation",
+          "ciip.open_clip_train.data",
+          "ciip.open_clip_train.precision"
+        ],
+        "external_imports": [
+          "CKA",
+          "__future__",
+          "contextlib",
+          "dataclasses",
+          "hydra.core",
+          "inspect",
+          "json",
+          "logging",
+          "matplotlib.pyplot",
+          "numpy",
+          "omegaconf",
+          "pathlib",
+          "re",
+          "sklearn.decomposition",
+          "sklearn.manifold",
+          "torch",
+          "torch.nn",
+          "torch.nn.functional",
+          "typing",
+          "umap"
+        ],
+        "imported_by": [
+          "ciip/evaluation/sen12ms_hyperbolic_radii.py",
+          "ciip/evaluation/unified_evaluation.py",
+          "intrinsic-dimension/compute_id.py",
+          "intrinsic-dimension/compute_intrinsic_dimension_ssl4eo_val.py",
+          "visualizations/ssl4eo/hyperbolic_retrieval.py",
+          "visualizations/ssl4eo/hyperbolic_visualization.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "visualizations/ssl4eo/hyperbolic_retrieval.py",
+        "module": "visualizations.ssl4eo.hyperbolic_retrieval",
+        "internal_imports": [
+          "ciip",
+          "visualizations.ssl4eo.embedding_collapse_diagnostics"
+        ],
+        "external_imports": [
+          "__future__",
+          "dataclasses",
+          "torch",
+          "typing"
+        ],
+        "imported_by": [
+          "ciip/evaluation/unified_evaluation.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": false,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [],
+          "checkpoint_save_calls": []
+        }
+      },
+      {
+        "path": "visualizations/ssl4eo/hyperbolic_visualization.py",
+        "module": "visualizations.ssl4eo.hyperbolic_visualization",
+        "internal_imports": [
+          "ciip",
+          "ciip.model_ciip",
+          "ciip.open_clip_train.data",
+          "visualizations.ssl4eo.embedding_collapse_diagnostics"
+        ],
+        "external_imports": [
+          "__future__",
+          "argparse",
+          "ast",
+          "configparser",
+          "csv",
+          "math",
+          "matplotlib",
+          "matplotlib.colors",
+          "matplotlib.pyplot",
+          "numpy",
+          "omegaconf",
+          "pathlib",
+          "random",
+          "torch",
+          "torch.nn.functional",
+          "typing"
+        ],
+        "imported_by": [
+          "ciip/evaluation/sen12ms_hyperbolic_radii.py",
+          "ciip/evaluation/unified_evaluation.py"
+        ],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": true,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [
+            "torch.load"
+          ],
+          "checkpoint_save_calls": [
+            "model.state_dict"
+          ]
+        }
+      },
+      {
+        "path": "visualizations/ssl4eo/initialization_evaluation.py",
+        "module": "visualizations.ssl4eo.initialization_evaluation",
+        "internal_imports": [
+          "ciip.open_clip_train.data",
+          "ciip.open_clip_train.distributed",
+          "ciip.open_clip_train.precision",
+          "ciip.open_clip_train.utils"
+        ],
+        "external_imports": [
+          "ast",
+          "geopy.distance",
+          "hydra",
+          "importlib",
+          "json",
+          "logging",
+          "matplotlib.pyplot",
+          "numpy",
+          "omegaconf",
+          "open_clip",
+          "os",
+          "pandas",
+          "plotly.express",
+          "plotly.graph_objects",
+          "pyproj",
+          "random",
+          "sklearn.decomposition",
+          "sklearn.linear_model",
+          "sklearn.manifold",
+          "sklearn.metrics",
+          "sklearn.metrics.pairwise",
+          "sklearn.model_selection",
+          "sklearn.preprocessing",
+          "torch",
+          "torch.nn",
+          "torch.nn.functional",
+          "torch.utils.data",
+          "umap"
+        ],
+        "imported_by": [],
+        "literal_references": [],
+        "runtime_signals": {
+          "main_guard": true,
+          "argument_parser": false,
+          "dynamic_import_calls": [],
+          "checkpoint_load_calls": [
+            "model.load_state_dict",
+            "torch.load"
+          ],
+          "checkpoint_save_calls": [
+            "model.state_dict",
+            "torch.save"
+          ]
+        }
+      }
+    ]
+  },
+  "audit_scope": {
+    "covered": [
+      "tracked files and sizes",
+      "fetched remote branches and tags",
+      "absolute and relative static Python imports",
+      "static inbound Python import relationships",
+      "literal module and path references in tracked text/configuration files",
+      "Python main guards, argument parsers, dynamic imports, and checkpoint calls",
+      "Python syntax parsing"
+    ],
+    "requires_manual_review": [
+      "dynamic imports and runtime path construction",
+      "Hydra targets and configuration composition",
+      "shell, Slurm, notebook, and documentation entry points",
+      "checkpoint and state-dict compatibility",
+      "runtime behavior for each model family"
+    ]
+  }
+}
