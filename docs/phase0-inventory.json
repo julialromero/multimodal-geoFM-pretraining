@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "source_fingerprint": "sha256:b6997113c9fa2c45966e30b59f39f00d0352d3534129798ba6df8da1a77f7a9d",
+  "source_fingerprint": "sha256:ef1bb45b0106dec8f1b8897333ab853e3bbadf03c9ccba64291823eabf64dbf9",
   "remote_branches": [
     {
       "name": "origin/codex/add-alternate-model-training-implementation",
@@ -471,6 +471,12 @@
       "subject": "Remove diagnostics config"
     },
     {
+      "name": "origin/codex/resume-multimodal-geofm-pretraining-cleanup",
+      "commit": "6d4de7657b1bc300fc7887aa4d78d8322a16bd30",
+      "date": "2026-08-22T12:00:19-06:00",
+      "subject": "Add representative CIIP runtime baselines"
+    },
+    {
       "name": "origin/codex/review-boolean-indexing-in-masking-code",
       "commit": "41eebfdb26332865aea679d755fd02d1553123a9",
       "date": "2026-02-05T16:17:12-07:00",
@@ -574,9 +580,9 @@
     },
     {
       "name": "origin/distributed",
-      "commit": "4355d34a753f35f1f8551fca984b04b7bf24de5b",
-      "date": "2026-03-19T11:08:17-06:00",
-      "subject": "Merge pull request #113 from julialromero/codex/check-hyperparameter-sweep-functionality"
+      "commit": "a388f21742916cc1f3fa78aa2375e81fba8bbf86",
+      "date": "2026-08-22T12:00:54-06:00",
+      "subject": "Merge pull request, cleanup code base"
     },
     {
       "name": "origin/slurm-hpc",
@@ -592,15 +598,15 @@
     },
     {
       "name": "origin/work",
-      "commit": "6223e2a424b651d36662d453a5ca8d66e0edb339",
-      "date": "2026-08-22T17:48:54+00:00",
-      "subject": "Record successful Phase 2 HPC baselines"
+      "commit": "90c8b8be4c9180eaf236d53545ec00f0842e55fe",
+      "date": "2026-08-22T17:53:40+00:00",
+      "subject": "Add representative CIIP runtime baselines"
     }
   ],
   "tags": [],
   "tracked_files": {
     "count": 257,
-    "bytes": 16287107,
+    "bytes": 16287271,
     "by_extension": {
       ".gz": 1,
       ".ini": 1,
