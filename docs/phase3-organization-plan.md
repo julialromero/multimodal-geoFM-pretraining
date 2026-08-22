@@ -25,18 +25,19 @@ move a file. No Phase 3 change may delete a file.
 
 Organization will be split into independently reviewable batches:
 
-1. **Documentation navigation.** Add indexes and cross-links without moving
-   existing documentation or changing generated audit artifacts.
-2. **Audit-tool discoverability.** Document the generators and tests under
-   `tools/`; retain every current command and module path.
+1. **Documentation navigation (complete).** [`README.md`](README.md) indexes the
+   maintained guides and generated evidence without moving existing files.
+2. **Audit-tool discoverability (complete).** [`../tools/README.md`](../tools/README.md)
+   documents the generators and tests while retaining every current command and
+   module path.
 3. **Runtime package proposals.** Assess possible package boundaries for
    training, evaluation, and model code. Apply no move until imports, configs,
    notebooks, launchers, remote history, and checkpoints have been reviewed.
 4. **Configuration proposals.** Assess configuration grouping while retaining
    Hydra search paths and override names through compatibility paths.
 
-The first two batches are path-preserving and may proceed now. The latter two
-remain proposals until their dependency assessments are recorded.
+The first two path-preserving batches are complete. The latter two remain
+proposals until their dependency assessments are recorded.
 
 ## Per-change evidence
 

@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "source_fingerprint": "sha256:ef1bb45b0106dec8f1b8897333ab853e3bbadf03c9ccba64291823eabf64dbf9",
+  "source_fingerprint": "sha256:31d8a51bd1405ae91cf3670e61cf651fac39065fc198d8397155977cc443b79b",
   "remote_branches": [
     {
       "name": "origin/codex/add-alternate-model-training-implementation",
@@ -585,6 +585,12 @@
       "subject": "Merge pull request, cleanup code base"
     },
     {
+      "name": "origin/phase3-organization",
+      "commit": "bb888cd9f800b6933465d7c760356cd5ae3ca3b6",
+      "date": "2026-08-22T18:03:15+00:00",
+      "subject": "Start non-destructive Phase 3 organization"
+    },
+    {
       "name": "origin/slurm-hpc",
       "commit": "37bcd09c15c86e5117ce63d36a8e12a8ac39ae6d",
       "date": "2025-10-24T00:42:43-05:00",
@@ -605,14 +611,14 @@
   ],
   "tags": [],
   "tracked_files": {
-    "count": 257,
-    "bytes": 16287271,
+    "count": 260,
+    "bytes": 16293357,
     "by_extension": {
       ".gz": 1,
       ".ini": 1,
       ".ipynb": 3,
       ".json": 23,
-      ".md": 11,
+      ".md": 14,
       ".png": 1,
       ".py": 87,
       ".tif": 120,
@@ -3176,7 +3182,21 @@
         ],
         "literal_references": [
           {
+            "path": "docs/README.md",
+            "matched": [
+              "tools/phase0_inventory",
+              "tools/phase0_inventory.py"
+            ]
+          },
+          {
             "path": "docs/phase0-cleanup.md",
+            "matched": [
+              "tools/phase0_inventory",
+              "tools/phase0_inventory.py"
+            ]
+          },
+          {
+            "path": "tools/README.md",
             "matched": [
               "tools/phase0_inventory",
               "tools/phase0_inventory.py"
@@ -3206,7 +3226,22 @@
         "imported_by": [
           "tools/test_phase1_config_contracts.py"
         ],
-        "literal_references": [],
+        "literal_references": [
+          {
+            "path": "docs/README.md",
+            "matched": [
+              "tools/phase1_config_contracts",
+              "tools/phase1_config_contracts.py"
+            ]
+          },
+          {
+            "path": "tools/README.md",
+            "matched": [
+              "tools/phase1_config_contracts",
+              "tools/phase1_config_contracts.py"
+            ]
+          }
+        ],
         "runtime_signals": {
           "main_guard": true,
           "argument_parser": true,
@@ -3232,7 +3267,22 @@
         "imported_by": [
           "tools/test_phase1_external_audit.py"
         ],
-        "literal_references": [],
+        "literal_references": [
+          {
+            "path": "docs/README.md",
+            "matched": [
+              "tools/phase1_external_audit",
+              "tools/phase1_external_audit.py"
+            ]
+          },
+          {
+            "path": "tools/README.md",
+            "matched": [
+              "tools/phase1_external_audit",
+              "tools/phase1_external_audit.py"
+            ]
+          }
+        ],
         "runtime_signals": {
           "main_guard": true,
           "argument_parser": true,
@@ -3256,7 +3306,22 @@
         "imported_by": [
           "tools/test_phase2_model_contracts.py"
         ],
-        "literal_references": [],
+        "literal_references": [
+          {
+            "path": "docs/README.md",
+            "matched": [
+              "tools/phase2_model_contracts",
+              "tools/phase2_model_contracts.py"
+            ]
+          },
+          {
+            "path": "tools/README.md",
+            "matched": [
+              "tools/phase2_model_contracts",
+              "tools/phase2_model_contracts.py"
+            ]
+          }
+        ],
         "runtime_signals": {
           "main_guard": true,
           "argument_parser": true,
