@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "source_fingerprint": "sha256:29845f198deea455b5db03bf4be216ceb2340524950776f95b531197317a1e44",
+  "source_fingerprint": "sha256:84f6c5a495f9fb72b3fd342f387b9367b03f065cdb89aee498831d14cf9da411",
   "remote_branches": [
     {
       "name": "origin/codex/add-alternate-model-training-implementation",
@@ -592,15 +592,15 @@
     },
     {
       "name": "origin/work",
-      "commit": "697b3df0fb08eab9da00e170bce90e8bf5e354db",
-      "date": "2026-08-22T16:55:11+00:00",
-      "subject": "Audit Hydra training configuration contracts"
+      "commit": "b4f599aeb37eb67fa2472873494191e44cf92e90",
+      "date": "2026-08-22T17:17:13+00:00",
+      "subject": "Complete tracked Phase 1 caller audit"
     }
   ],
   "tags": [],
   "tracked_files": {
     "count": 257,
-    "bytes": 16281937,
+    "bytes": 16283595,
     "by_extension": {
       ".gz": 1,
       ".ini": 1,
@@ -3216,6 +3216,7 @@
         "external_imports": [
           "__future__",
           "argparse",
+          "ast",
           "collections",
           "json",
           "pathlib",

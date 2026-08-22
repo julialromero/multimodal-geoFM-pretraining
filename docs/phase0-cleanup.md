@@ -100,3 +100,5 @@ Dependency-backed baseline tests now live in `tools/test_phase2_runtime.py` and
 cover a small CLIP forward pass, state-dict and `build_model` compatibility,
 masking invariants, and a Lorentz exp/log round trip. They skip explicitly when
 PyTorch is unavailable.
+The baselines preserve the existing mixed-precision behavior of CLIP
+`build_model` and the four-value masking return contract, including `ids_keep`.

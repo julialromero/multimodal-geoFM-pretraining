@@ -76,17 +76,22 @@ class ModelRuntimeBaselineTests(unittest.TestCase):
         restored = self.clip_model.build_model(dict(source.state_dict())).eval()
         self.assertEqual(set(restored.state_dict()), set(source.state_dict()))
         for expected, actual in zip(source.state_dict().values(), restored.state_dict().values()):
-            self.torch.testing.assert_close(actual, expected)
+            # build_model intentionally applies CLIP's mixed-precision conversion.
+            self.torch.testing.assert_close(actual, expected.to(dtype=actual.dtype))
+        self.assertEqual(restored.visual.conv1.weight.dtype, self.torch.float16)
 
     def test_masking_shapes_and_restore_indices(self) -> None:
         torch = self.torch
         torch.manual_seed(2)
         tokens = torch.randn(2, 16, 8)
-        visible, mask, ids_restore = self.masking.random_masking(tokens, mask_ratio=0.5)
+        visible, mask, ids_restore, ids_keep = self.masking.random_masking(tokens, mask_ratio=0.5)
         self.assertEqual(tuple(visible.shape), (2, 8, 8))
         self.assertEqual(tuple(mask.shape), (2, 16))
         self.assertEqual(tuple(ids_restore.shape), (2, 16))
+        self.assertEqual(tuple(ids_keep.shape), (2, 8))
         torch.testing.assert_close(mask.sum(dim=1), torch.tensor([8.0, 8.0]))
+        expected_visible = torch.gather(tokens, 1, ids_keep.unsqueeze(-1).expand(-1, -1, 8))
+        torch.testing.assert_close(visible, expected_visible)
 
     def test_lorentz_exp_log_round_trip(self) -> None:
         tangent = self.torch.tensor([[0.1, -0.2, 0.05]], dtype=self.torch.float64)

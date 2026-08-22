@@ -12,6 +12,13 @@ gate, and no file is removed before dependency and compatibility review.
 | 3 — non-destructive organization | **Blocked by Phase 2 gate** | No model-affecting reorganization has begun. | Phase 2 runtime and checkpoint baselines must pass first. |
 | 4 — audited removal | **Blocked by Phases 1–3** | No cleanup candidate has been removed. | Every candidate needs a completed dependency assessment and passing compatibility baselines. |
 
+The first HPC execution of the five Phase 2 runtime baselines passed the CLIP
+forward, checkpoint round-trip, and Lorentz tests. It also exposed two incorrect
+test assumptions—not model regressions: `build_model` intentionally converts
+applicable weights to float16, and `random_masking` returns `ids_keep` as its
+fourth result. The baselines now encode those existing contracts and require one
+clean HPC rerun before Phase 2 can pass its gate.
+
 ## Current safety posture
 
 - No existing model, training, evaluation, data, or configuration file has been
