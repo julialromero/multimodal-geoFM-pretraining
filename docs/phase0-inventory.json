@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "source_fingerprint": "sha256:d6766859ac009429eb4320e1a2d5c807a2597ac5315296ef376d338ee38949c2",
+  "source_fingerprint": "sha256:91c850b486f381a8f9e98227bc7adbd131cbc3e75978f4183c1894062d21fcf7",
   "remote_branches": [
     {
       "name": "origin/codex/add-alternate-model-training-implementation",
@@ -586,9 +586,9 @@
     },
     {
       "name": "origin/phase3-organization",
-      "commit": "36b1977c06aaf478278d321891b886fa7f8b4e06",
-      "date": "2026-08-22T18:55:35+00:00",
-      "subject": "Prepare audited Phase 4 removal gate"
+      "commit": "5be3b4ca0e0e9f0b85fb7f118b8d3c007d45c674",
+      "date": "2026-08-23T15:41:20+00:00",
+      "subject": "Record distributed and Slurm branch policy"
     },
     {
       "name": "origin/slurm-hpc",
@@ -611,14 +611,14 @@
   ],
   "tags": [],
   "tracked_files": {
-    "count": 262,
-    "bytes": 16299368,
+    "count": 263,
+    "bytes": 16302255,
     "by_extension": {
       ".gz": 1,
       ".ini": 1,
       ".ipynb": 3,
       ".json": 23,
-      ".md": 16,
+      ".md": 17,
       ".png": 1,
       ".py": 87,
       ".tif": 120,
@@ -715,7 +715,25 @@
             ]
           },
           {
+            "path": "docs/cleanup-progress.md",
+            "matched": [
+              "ciip"
+            ]
+          },
+          {
             "path": "docs/phase3-runtime-config-assessment.md",
+            "matched": [
+              "ciip"
+            ]
+          },
+          {
+            "path": "docs/phase4-candidate-transforms.md",
+            "matched": [
+              "ciip"
+            ]
+          },
+          {
+            "path": "docs/phase4-removal-gate.md",
             "matched": [
               "ciip"
             ]
@@ -1832,6 +1850,12 @@
             "matched": [
               "ciip.open_clip_train"
             ]
+          },
+          {
+            "path": "docs/phase4-candidate-transforms.md",
+            "matched": [
+              "ciip.open_clip_train"
+            ]
           }
         ],
         "runtime_signals": {
@@ -2570,7 +2594,29 @@
           "typing"
         ],
         "imported_by": [],
-        "literal_references": [],
+        "literal_references": [
+          {
+            "path": "docs/cleanup-progress.md",
+            "matched": [
+              "ciip/open_clip_train/transforms",
+              "ciip/open_clip_train/transforms.py"
+            ]
+          },
+          {
+            "path": "docs/phase4-candidate-transforms.md",
+            "matched": [
+              "ciip/open_clip_train/transforms",
+              "ciip/open_clip_train/transforms.py"
+            ]
+          },
+          {
+            "path": "docs/phase4-removal-gate.md",
+            "matched": [
+              "ciip/open_clip_train/transforms",
+              "ciip/open_clip_train/transforms.py"
+            ]
+          }
+        ],
         "runtime_signals": {
           "main_guard": false,
           "argument_parser": false,
@@ -2709,7 +2755,25 @@
             ]
           },
           {
+            "path": "docs/cleanup-progress.md",
+            "matched": [
+              "clip"
+            ]
+          },
+          {
             "path": "docs/phase3-runtime-config-assessment.md",
+            "matched": [
+              "clip"
+            ]
+          },
+          {
+            "path": "docs/phase4-candidate-transforms.md",
+            "matched": [
+              "clip"
+            ]
+          },
+          {
+            "path": "docs/phase4-removal-gate.md",
             "matched": [
               "clip"
             ]

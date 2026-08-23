@@ -55,7 +55,7 @@ requires `BLOCKED` or `RETAIN`, never approval.
 
 | Candidate | Status | Reason |
 | --- | --- | --- |
-| None | — | No removal candidate has completed the dependency gate. |
+| [`ciip/open_clip_train/transforms.py`](phase4-candidate-transforms.md) | **RETAIN** | A fetched development branch actively imports it, and deleting it would remove the public `PairGeom`/`PairAugmented` paths. |
 
 ## Implementation rules
 

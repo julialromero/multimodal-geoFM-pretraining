@@ -16,6 +16,8 @@ edited by hand.
   path-preserving decisions for runtime and configuration boundaries.
 - [`phase4-removal-gate.md`](phase4-removal-gate.md) — per-candidate evidence
   template, approval rules, and the current removal register.
+- [`phase4-candidate-transforms.md`](phase4-candidate-transforms.md) — completed
+  assessment retaining the paired-transform module based on remote consumers.
 
 ## Generated evidence
 
