@@ -27,8 +27,9 @@ Phase 3 proceeds according to [`phase3-organization-plan.md`](phase3-organizatio
 
 ## Current safety posture
 
-- No existing model, training, evaluation, data, or configuration file has been
-  deleted or relocated.
+- No model, training, evaluation, or configuration implementation has been
+  deleted or relocated. The sole removal is the audited, owner-approved legacy
+  `clip/dataset.py` module recorded in the Phase 4 register.
 - Static results are evidence for review, not proof that a file is unused.
 - Runtime tests skip explicitly when PyTorch is unavailable rather than passing
   silently; they execute automatically in the declared ML environment.
