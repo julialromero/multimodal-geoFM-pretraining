@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "source_fingerprint": "sha256:a8f3764c9ef9dc3865f991816a3e1cfe67befc4bd7851d169a562b33feb432f7",
+  "source_fingerprint": "sha256:c50c008a6181936bf20d1ec58258dd85402e51e32528030c2b4e1507ac3e509c",
   "remote_branches": [
     {
       "name": "origin/codex/add-alternate-model-training-implementation",
@@ -586,9 +586,9 @@
     },
     {
       "name": "origin/phase3-organization",
-      "commit": "128ec9d3bd0c64f4a66c44ae47bf9f16c9e356a8",
-      "date": "2026-08-23T15:58:22+00:00",
-      "subject": "Retain dependency-backed CIIP dataset API"
+      "commit": "fb1cb71bfd7ab9f0b80ee41f13de7076b7c3f669",
+      "date": "2026-08-23T16:03:31+00:00",
+      "subject": "Remove unused legacy CLIP dataset module"
     },
     {
       "name": "origin/slurm-hpc",
@@ -611,14 +611,14 @@
   ],
   "tags": [],
   "tracked_files": {
-    "count": 264,
-    "bytes": 16287193,
+    "count": 265,
+    "bytes": 16289995,
     "by_extension": {
       ".gz": 1,
       ".ini": 1,
       ".ipynb": 3,
       ".json": 23,
-      ".md": 19,
+      ".md": 20,
       ".png": 1,
       ".py": 86,
       ".tif": 120,
@@ -3015,7 +3015,22 @@
           "torch.nn.functional"
         ],
         "imported_by": [],
-        "literal_references": [],
+        "literal_references": [
+          {
+            "path": "docs/phase4-candidate-croma-pretrain.md",
+            "matched": [
+              "comparison/CROMA-main/pretrain_croma",
+              "comparison/CROMA-main/pretrain_croma.py"
+            ]
+          },
+          {
+            "path": "docs/phase4-removal-gate.md",
+            "matched": [
+              "comparison/CROMA-main/pretrain_croma",
+              "comparison/CROMA-main/pretrain_croma.py"
+            ]
+          }
+        ],
         "runtime_signals": {
           "main_guard": false,
           "argument_parser": false,
@@ -3037,7 +3052,15 @@
           "warnings"
         ],
         "imported_by": [],
-        "literal_references": [],
+        "literal_references": [
+          {
+            "path": "docs/phase4-candidate-croma-pretrain.md",
+            "matched": [
+              "comparison/CROMA-main/use_croma",
+              "comparison/CROMA-main/use_croma.py"
+            ]
+          }
+        ],
         "runtime_signals": {
           "main_guard": false,
           "argument_parser": false,

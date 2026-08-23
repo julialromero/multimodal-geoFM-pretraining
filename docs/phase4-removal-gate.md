@@ -58,6 +58,7 @@ requires `BLOCKED` or `RETAIN`, never approval.
 | [`ciip/open_clip_train/transforms.py`](phase4-candidate-transforms.md) | **RETAIN** | A fetched development branch actively imports it, and deleting it would remove the public `PairGeom`/`PairAugmented` paths. |
 | [`clip/dataset.py`](phase4-candidate-clip-dataset.md) | **REMOVED** | No current or fetched-ref caller was found; the repository owner explicitly approved removal after the path was clarified. |
 | [`ciip/dataset.py`](phase4-candidate-ciip-dataset.md) | **RETAIN** | `ciip/__init__.py` imports it and 28 fetched branches—including `slurm-hpc`—contain tests importing `S12Dataset` from it. |
+| [`comparison/CROMA-main/pretrain_croma.py`](phase4-candidate-croma-pretrain.md) | **RETAIN** | The vendored CROMA README documents it as required for from-scratch pretraining, and it contains the corresponding architecture/loss implementation. |
 
 ## Implementation rules
 

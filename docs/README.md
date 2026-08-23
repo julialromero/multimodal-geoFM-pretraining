@@ -22,6 +22,8 @@ edited by hand.
   assessment and owner-approved removal of the unreferenced legacy CLIP dataset.
 - [`phase4-candidate-ciip-dataset.md`](phase4-candidate-ciip-dataset.md) — CIIP
   dataset assessment retained because of package and remote-branch consumers.
+- [`phase4-candidate-croma-pretrain.md`](phase4-candidate-croma-pretrain.md) —
+  CROMA pretraining assessment retained because it supports a documented workflow.
 
 ## Generated evidence
 
