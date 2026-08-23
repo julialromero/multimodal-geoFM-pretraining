@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "source_fingerprint": "sha256:cf528cb6277a7f5278418cee241b8569a4766eb0225de9510ab29c165416e463",
+  "source_fingerprint": "sha256:d6766859ac009429eb4320e1a2d5c807a2597ac5315296ef376d338ee38949c2",
   "remote_branches": [
     {
       "name": "origin/codex/add-alternate-model-training-implementation",
@@ -586,9 +586,9 @@
     },
     {
       "name": "origin/phase3-organization",
-      "commit": "43311b3eeef0ab125b3399e3d76d6712bf52fff0",
-      "date": "2026-08-22T18:52:19+00:00",
-      "subject": "Complete path-preserving Phase 3 assessment"
+      "commit": "36b1977c06aaf478278d321891b886fa7f8b4e06",
+      "date": "2026-08-22T18:55:35+00:00",
+      "subject": "Prepare audited Phase 4 removal gate"
     },
     {
       "name": "origin/slurm-hpc",
@@ -612,7 +612,7 @@
   "tags": [],
   "tracked_files": {
     "count": 262,
-    "bytes": 16299011,
+    "bytes": 16299368,
     "by_extension": {
       ".gz": 1,
       ".ini": 1,

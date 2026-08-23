@@ -7,10 +7,10 @@ gate, and no file is removed before dependency and compatibility review.
 | Phase | Status | Completed | Remaining gate |
 | --- | --- | --- | --- |
 | 0 — inventory | **Complete** | Remote refs/tags, tracked files, static imports, reverse edges, literal references, and reproducible fingerprints are inventoried. | Regenerate after repository or fetched-ref changes. |
-| 1 — runtime/config audit | **Complete for tracked and fetched Git content** | Python entry points, configs, notebooks, tracked launchers, remote-branch launchers, dynamic imports, and checkpoint calls are inventoried. | Repository operators must confirm whether untracked launchers exist on external HPC systems. |
+| 1 — runtime/config audit | **Complete** | Python entry points, configs, notebooks, tracked launchers, remote-branch launchers, dynamic imports, and checkpoint calls are inventoried. The operator confirmed there are no untracked external HPC launchers. | Regenerate after caller or configuration changes. |
 | 2 — compatibility baselines | **Complete** | Public API/checkpoint contracts are captured. All seven executable CLIP, masking, Lorentz, and representative CIIP forward/checkpoint baselines pass in the declared HPC PyTorch/TorchGeo environment. | Rerun after model-facing changes. |
 | 3 — non-destructive organization | **Complete** | Documentation and tooling navigation landed; runtime and configuration boundaries were assessed and retained to preserve callers and Hydra behavior. No existing file moved. | Rerun the audits after future organization changes. |
-| 4 — audited removal | **Gate prepared; removals blocked by the Phase 1 external-launcher limitation** | The per-candidate evidence template and register are documented; no candidate is approved and nothing has been removed. | Confirm or inventory external-only HPC launchers, then assess each candidate and rerun applicable compatibility baselines. |
+| 4 — audited removal | **Ready for candidate assessment** | The operator confirmed there are no untracked external HPC launchers. The per-candidate evidence template and register are documented; no candidate is approved and nothing has been removed. | Assess each candidate independently and rerun applicable compatibility baselines before approval. |
 
 The first HPC execution of the five Phase 2 runtime baselines passed the CLIP
 forward, checkpoint round-trip, and Lorentz tests. It also exposed two incorrect

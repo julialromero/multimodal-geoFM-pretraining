@@ -17,8 +17,8 @@ paths relative to their current source locations:
   `config_path="../configs"`.
 
 Moving a runner would therefore change Hydra search behavior unless a wrapper or
-explicit compatibility path were retained. These paths are also plausible HPC
-launcher targets, while external-only launchers remain outside Git's visibility.
+explicit compatibility path were retained. The operator confirmed that no
+untracked external HPC launcher targets these paths.
 
 **Decision:** retain the current training package and runner paths. A directory
 move offers no behavior-preserving organization benefit large enough to offset
@@ -58,5 +58,11 @@ external launch commands.
 Phase 3 selected path-preserving documentation and discoverability improvements
 and rejected runtime/configuration moves whose compatibility cost exceeded their
 organizational value. No existing file was relocated or deleted. Phase 4 may
-only assess removals individually after the external-launcher limitation is
-resolved and each candidate passes the documented dependency gate.
+assess removals individually now that the operator has resolved the
+external-launcher limitation; each candidate must still pass the documented
+dependency gate.
+
+HPC and Slurm launchers remain tracked on the dedicated `slurm-hpc` branch. They
+will not be copied into `distributed`, whose training path remains the current
+PyTorch Distributed implementation. Remote-branch launcher evidence remains
+part of every relevant candidate assessment.

@@ -50,14 +50,14 @@ Each organization pull request must record:
 - exact static audit and Phase 2 test commands run; and
 - a rollback strategy.
 
-External-only HPC launchers remain outside Git's visibility. Operator
-confirmation or an explicit path inventory is still required before reorganizing
-any runtime or configuration path those launchers might invoke.
+The operator confirmed that no untracked external HPC launchers exist. Tracked
+HPC and Slurm code remains isolated on `slurm-hpc`; `distributed` retains its
+current PyTorch Distributed implementation.
 
 ## Exit gate
 
 Phase 3 is complete after the approved path-preserving organization batches, a
 reproducible audit regeneration, and the operator-reported passing Phase 2
 runtime baselines. Phase 4 removals remain individually gated by dependency
-assessment and the external-launcher limitation documented in the
+assessment under the
 [`Phase 4 removal gate`](phase4-removal-gate.md).

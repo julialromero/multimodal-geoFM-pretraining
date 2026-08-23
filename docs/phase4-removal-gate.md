@@ -6,9 +6,11 @@ completed evidence record and review approval before an implementation commit.
 
 ## Global prerequisite
 
-Repository operators must first confirm that no untracked external HPC launcher
-depends on a candidate, or provide those launchers for inventory. Until that
-happens, the candidate remains blocked even if every Git-visible check passes.
+This prerequisite is satisfied: the repository operator confirmed that no
+untracked external HPC launchers exist. HPC and Slurm scripts remain tracked on
+the dedicated `slurm-hpc` branch and must remain in the fetched-remote evidence
+for relevant candidates. They are intentionally not copied into `distributed`,
+which continues to use its current PyTorch Distributed training implementation.
 
 ## Candidate record
 
