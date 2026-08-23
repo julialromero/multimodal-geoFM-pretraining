@@ -20,7 +20,10 @@ python tools/phase0_inventory.py
 ```
 
 The generated [`phase0-inventory.json`](phase0-inventory.json) records every
-fetched remote branch and tag with its object ID, date, and subject. It also
+fetched remote branch and tag with its object ID, date, and subject, except that
+the current branch's upstream uses stable `CURRENT_CHECKOUT` revision fields. A
+push advances that upstream to the commit containing the report, so embedding
+its pre-push SHA would make the checked-in artifact stale immediately. It also
 records tracked-file counts and the static import edges for every tracked Python
 file. The report is deterministic for a given checkout and fetched-ref state.
 The generated report excludes its own path from file counts and byte totals so

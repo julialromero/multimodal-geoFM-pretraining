@@ -1,6 +1,6 @@
 {
-  "schema_version": 2,
-  "source_fingerprint": "sha256:393a9f599eee013373fb09e7785635f6e4d11e47de482fe3da52f834cfbe7095",
+  "schema_version": 3,
+  "source_fingerprint": "sha256:dcd89842c5e3e4c5c51190c17e91289a9aa46b88c7b4bb3bc9b8b86d4ef8c591",
   "remote_branches": [
     {
       "name": "origin/codex/add-alternate-model-training-implementation",
@@ -586,9 +586,9 @@
     },
     {
       "name": "origin/phase3-organization",
-      "commit": "5ce918c3c2b429a220a43c88118fb7e66d70a02a",
-      "date": "2026-08-23T16:11:20+00:00",
-      "subject": "Retain documented CROMA pretraining support"
+      "commit": "CURRENT_CHECKOUT",
+      "date": "CURRENT_CHECKOUT",
+      "subject": "CURRENT_CHECKOUT"
     },
     {
       "name": "origin/slurm-hpc",
@@ -612,7 +612,7 @@
   "tags": [],
   "tracked_files": {
     "count": 266,
-    "bytes": 16292209,
+    "bytes": 16293626,
     "by_extension": {
       ".gz": 1,
       ".ini": 1,
