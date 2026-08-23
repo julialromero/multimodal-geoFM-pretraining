@@ -24,6 +24,8 @@ edited by hand.
   dataset assessment retained because of package and remote-branch consumers.
 - [`phase4-candidate-croma-pretrain.md`](phase4-candidate-croma-pretrain.md) —
   CROMA pretraining assessment retained because it supports a documented workflow.
+- [`phase4-candidate-package-markers.md`](phase4-candidate-package-markers.md) —
+  package-marker assessment retaining import and package-discovery boundaries.
 
 ## Generated evidence
 

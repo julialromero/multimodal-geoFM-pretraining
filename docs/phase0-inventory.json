@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "source_fingerprint": "sha256:c50c008a6181936bf20d1ec58258dd85402e51e32528030c2b4e1507ac3e509c",
+  "source_fingerprint": "sha256:393a9f599eee013373fb09e7785635f6e4d11e47de482fe3da52f834cfbe7095",
   "remote_branches": [
     {
       "name": "origin/codex/add-alternate-model-training-implementation",
@@ -586,9 +586,9 @@
     },
     {
       "name": "origin/phase3-organization",
-      "commit": "fb1cb71bfd7ab9f0b80ee41f13de7076b7c3f669",
-      "date": "2026-08-23T16:03:31+00:00",
-      "subject": "Remove unused legacy CLIP dataset module"
+      "commit": "5ce918c3c2b429a220a43c88118fb7e66d70a02a",
+      "date": "2026-08-23T16:11:20+00:00",
+      "subject": "Retain documented CROMA pretraining support"
     },
     {
       "name": "origin/slurm-hpc",
@@ -611,14 +611,14 @@
   ],
   "tags": [],
   "tracked_files": {
-    "count": 265,
-    "bytes": 16289995,
+    "count": 266,
+    "bytes": 16292209,
     "by_extension": {
       ".gz": 1,
       ".ini": 1,
       ".ipynb": 3,
       ".json": 23,
-      ".md": 20,
+      ".md": 21,
       ".png": 1,
       ".py": 86,
       ".tif": 120,
@@ -721,12 +721,6 @@
             ]
           },
           {
-            "path": "docs/cleanup-progress.md",
-            "matched": [
-              "ciip"
-            ]
-          },
-          {
             "path": "docs/phase3-runtime-config-assessment.md",
             "matched": [
               "ciip"
@@ -742,6 +736,12 @@
           },
           {
             "path": "docs/phase4-candidate-clip-dataset.md",
+            "matched": [
+              "ciip"
+            ]
+          },
+          {
+            "path": "docs/phase4-candidate-package-markers.md",
             "matched": [
               "ciip"
             ]
@@ -843,13 +843,6 @@
           "ciip/__init__.py"
         ],
         "literal_references": [
-          {
-            "path": "docs/cleanup-progress.md",
-            "matched": [
-              "ciip/dataset",
-              "ciip/dataset.py"
-            ]
-          },
           {
             "path": "docs/phase4-candidate-ciip-dataset.md",
             "matched": [
@@ -1910,6 +1903,12 @@
             ]
           },
           {
+            "path": "docs/phase4-candidate-package-markers.md",
+            "matched": [
+              "ciip.open_clip_train"
+            ]
+          },
+          {
             "path": "docs/phase4-candidate-transforms.md",
             "matched": [
               "ciip.open_clip_train"
@@ -1984,6 +1983,19 @@
             "matched": [
               "ciip.open_clip_train.data"
             ]
+          },
+          {
+            "path": "docs/phase4-candidate-package-markers.md",
+            "matched": [
+              "ciip.open_clip_train.data",
+              "ciip/open_clip_train/data"
+            ]
+          },
+          {
+            "path": "docs/phase4-removal-gate.md",
+            "matched": [
+              "ciip/open_clip_train/data"
+            ]
           }
         ],
         "runtime_signals": {
@@ -2000,7 +2012,23 @@
         "internal_imports": [],
         "external_imports": [],
         "imported_by": [],
-        "literal_references": [],
+        "literal_references": [
+          {
+            "path": "docs/phase4-candidate-package-markers.md",
+            "matched": [
+              "ciip.open_clip_train.dataparallel",
+              "ciip/open_clip_train/dataparallel/__init__",
+              "ciip/open_clip_train/dataparallel/__init__.py"
+            ]
+          },
+          {
+            "path": "docs/phase4-removal-gate.md",
+            "matched": [
+              "ciip/open_clip_train/dataparallel/__init__",
+              "ciip/open_clip_train/dataparallel/__init__.py"
+            ]
+          }
+        ],
         "runtime_signals": {
           "main_guard": false,
           "argument_parser": false,
@@ -2027,7 +2055,14 @@
         "imported_by": [
           "ciip/open_clip_train/dataparallel/run_train_val_dataparallel.py"
         ],
-        "literal_references": [],
+        "literal_references": [
+          {
+            "path": "docs/phase4-candidate-package-markers.md",
+            "matched": [
+              "ciip.open_clip_train.dataparallel.factory"
+            ]
+          }
+        ],
         "runtime_signals": {
           "main_guard": false,
           "argument_parser": false,
@@ -2660,13 +2695,6 @@
         "imported_by": [],
         "literal_references": [
           {
-            "path": "docs/cleanup-progress.md",
-            "matched": [
-              "ciip/open_clip_train/transforms",
-              "ciip/open_clip_train/transforms.py"
-            ]
-          },
-          {
             "path": "docs/phase4-candidate-transforms.md",
             "matched": [
               "ciip/open_clip_train/transforms",
@@ -2848,6 +2876,12 @@
               "clip",
               "clip/__init__",
               "clip/__init__.py"
+            ]
+          },
+          {
+            "path": "docs/phase4-candidate-package-markers.md",
+            "matched": [
+              "clip"
             ]
           },
           {
@@ -3319,6 +3353,13 @@
             ]
           },
           {
+            "path": "docs/phase4-candidate-package-markers.md",
+            "matched": [
+              "setup",
+              "setup.py"
+            ]
+          },
+          {
             "path": "environment.yml",
             "matched": [
               "setup"
@@ -3637,6 +3678,18 @@
             "matched": [
               "visualizations"
             ]
+          },
+          {
+            "path": "docs/phase4-candidate-package-markers.md",
+            "matched": [
+              "visualizations"
+            ]
+          },
+          {
+            "path": "docs/phase4-removal-gate.md",
+            "matched": [
+              "visualizations"
+            ]
           }
         ],
         "runtime_signals": {
@@ -3653,7 +3706,23 @@
         "internal_imports": [],
         "external_imports": [],
         "imported_by": [],
-        "literal_references": [],
+        "literal_references": [
+          {
+            "path": "docs/phase4-candidate-package-markers.md",
+            "matched": [
+              "visualizations.ssl4eo",
+              "visualizations/ssl4eo/__init__",
+              "visualizations/ssl4eo/__init__.py"
+            ]
+          },
+          {
+            "path": "docs/phase4-removal-gate.md",
+            "matched": [
+              "visualizations/ssl4eo/__init__",
+              "visualizations/ssl4eo/__init__.py"
+            ]
+          }
+        ],
         "runtime_signals": {
           "main_guard": false,
           "argument_parser": false,
