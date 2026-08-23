@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "source_fingerprint": "sha256:a122667f94a7a91ed68a3bcab9b100eb2c4c199cfd97b9d718753b73a00bdb86",
+  "source_fingerprint": "sha256:a8f3764c9ef9dc3865f991816a3e1cfe67befc4bd7851d169a562b33feb432f7",
   "remote_branches": [
     {
       "name": "origin/codex/add-alternate-model-training-implementation",
@@ -586,9 +586,9 @@
     },
     {
       "name": "origin/phase3-organization",
-      "commit": "6f5dfa27849be45d22c1507bd359eec3a553cd64",
-      "date": "2026-08-23T15:51:50+00:00",
-      "subject": "Assess legacy CLIP dataset candidate"
+      "commit": "128ec9d3bd0c64f4a66c44ae47bf9f16c9e356a8",
+      "date": "2026-08-23T15:58:22+00:00",
+      "subject": "Retain dependency-backed CIIP dataset API"
     },
     {
       "name": "origin/slurm-hpc",
@@ -611,8 +611,8 @@
   ],
   "tags": [],
   "tracked_files": {
-    "count": 265,
-    "bytes": 16307659,
+    "count": 264,
+    "bytes": 16287193,
     "by_extension": {
       ".gz": 1,
       ".ini": 1,
@@ -620,7 +620,7 @@
       ".json": 23,
       ".md": 19,
       ".png": 1,
-      ".py": 87,
+      ".py": 86,
       ".tif": 120,
       ".yaml": 5,
       ".yml": 2,
@@ -635,7 +635,7 @@
     ]
   },
   "python": {
-    "file_count": 87,
+    "file_count": 86,
     "parse_errors": [],
     "files": [
       {
@@ -854,6 +854,13 @@
             "path": "docs/phase4-candidate-ciip-dataset.md",
             "matched": [
               "ciip.dataset",
+              "ciip/dataset",
+              "ciip/dataset.py"
+            ]
+          },
+          {
+            "path": "docs/phase4-candidate-clip-dataset.md",
+            "matched": [
               "ciip/dataset",
               "ciip/dataset.py"
             ]
@@ -2915,75 +2922,6 @@
           "checkpoint_save_calls": [
             "model.state_dict"
           ]
-        }
-      },
-      {
-        "path": "clip/dataset.py",
-        "module": "clip.dataset",
-        "internal_imports": [],
-        "external_imports": [
-          "PIL",
-          "ast",
-          "braceexpand",
-          "dataclasses",
-          "horovod.torch",
-          "imagenetv2_pytorch",
-          "json",
-          "logging",
-          "math",
-          "multiprocessing",
-          "numpy",
-          "os",
-          "pandas",
-          "random",
-          "sys",
-          "torch",
-          "torch.utils.data",
-          "torch.utils.data.distributed",
-          "torchvision.datasets",
-          "webdataset",
-          "webdataset.filters",
-          "webdataset.tariterators"
-        ],
-        "imported_by": [],
-        "literal_references": [
-          {
-            "path": "docs/cleanup-progress.md",
-            "matched": [
-              "clip/dataset",
-              "clip/dataset.py"
-            ]
-          },
-          {
-            "path": "docs/phase4-candidate-ciip-dataset.md",
-            "matched": [
-              "clip/dataset",
-              "clip/dataset.py"
-            ]
-          },
-          {
-            "path": "docs/phase4-candidate-clip-dataset.md",
-            "matched": [
-              "clip.dataset",
-              "clip/dataset",
-              "clip/dataset.py"
-            ]
-          },
-          {
-            "path": "docs/phase4-removal-gate.md",
-            "matched": [
-              "clip.dataset",
-              "clip/dataset",
-              "clip/dataset.py"
-            ]
-          }
-        ],
-        "runtime_signals": {
-          "main_guard": false,
-          "argument_parser": false,
-          "dynamic_import_calls": [],
-          "checkpoint_load_calls": [],
-          "checkpoint_save_calls": []
         }
       },
       {

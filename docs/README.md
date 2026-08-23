@@ -18,8 +18,8 @@ edited by hand.
   template, approval rules, and the current removal register.
 - [`phase4-candidate-transforms.md`](phase4-candidate-transforms.md) — completed
   assessment retaining the paired-transform module based on remote consumers.
-- [`phase4-candidate-clip-dataset.md`](phase4-candidate-clip-dataset.md) — legacy
-  CLIP dataset assessment awaiting an explicit owner retain/remove decision.
+- [`phase4-candidate-clip-dataset.md`](phase4-candidate-clip-dataset.md) — completed
+  assessment and owner-approved removal of the unreferenced legacy CLIP dataset.
 - [`phase4-candidate-ciip-dataset.md`](phase4-candidate-ciip-dataset.md) — CIIP
   dataset assessment retained because of package and remote-branch consumers.
 

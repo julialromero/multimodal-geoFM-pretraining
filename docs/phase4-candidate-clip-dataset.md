@@ -5,7 +5,7 @@
 - **Path:** `clip/dataset.py`
 - **Reason proposed:** the file duplicates generic CLIP/WebDataset loading
   utilities while active CIIP runners import `ciip.open_clip_train.data`.
-- **Decision:** **BLOCKED — repository-owner approval required before deletion**
+- **Decision:** **REMOVED — explicitly approved by the repository owner**
 
 ## Git-visible dependency evidence
 
@@ -40,17 +40,14 @@
   launchers exist. Fetched Slurm launchers remain isolated on `slurm-hpc`; exact
   remote-ref searches found no candidate reference.
 
-## Required owner decision
+## Owner decision and implementation
 
-The Git-visible evidence supports removal, but `clip.dataset` is a public import
-path and static analysis cannot rule out downstream users. Deletion therefore
-requires an explicit repository-owner decision.
+The repository owner explicitly approved removal of `clip/dataset.py` after the
+path was clarified against the separate, retained `ciip/dataset.py`. The file is
+removed in a dedicated implementation commit. `clip/__init__.py` is unchanged
+because it did not import or export this module.
 
-Choose one:
-
-1. **Approve removal** of `clip/dataset.py` in a dedicated commit, followed by
-   regenerated audits and the full applicable test suite.
-2. **Retain it** as a supported legacy/public CLIP data API.
-
-Until that decision is recorded, the file remains unchanged and the candidate
-status is `BLOCKED`.
+The audit artifacts are regenerated after staging the deletion, and the complete
+dependency-independent suite is required to pass. The rollback is to revert the
+removal commit, restoring the exact legacy module if an unknown downstream
+consumer is discovered.
