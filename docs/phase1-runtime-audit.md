@@ -4,7 +4,7 @@ This generated worklist summarizes static audit signals; it does not mark any fi
 as unused and does not authorize removal. Regenerate it with
 `python tools/phase0_inventory.py` after fetching remote refs.
 
-Source fingerprint: `sha256:3f71a9ff72fdaacafe6556adf5f49a9d0bde94dd223527e93c431619c4e70182`
+Source fingerprint: `sha256:a122667f94a7a91ed68a3bcab9b100eb2c4c199cfd97b9d718753b73a00bdb86`
 
 ## Executable entry points (48)
 

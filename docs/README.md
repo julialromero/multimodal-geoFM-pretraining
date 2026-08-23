@@ -20,6 +20,8 @@ edited by hand.
   assessment retaining the paired-transform module based on remote consumers.
 - [`phase4-candidate-clip-dataset.md`](phase4-candidate-clip-dataset.md) — legacy
   CLIP dataset assessment awaiting an explicit owner retain/remove decision.
+- [`phase4-candidate-ciip-dataset.md`](phase4-candidate-ciip-dataset.md) — CIIP
+  dataset assessment retained because of package and remote-branch consumers.
 
 ## Generated evidence
 

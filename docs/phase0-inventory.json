@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "source_fingerprint": "sha256:3f71a9ff72fdaacafe6556adf5f49a9d0bde94dd223527e93c431619c4e70182",
+  "source_fingerprint": "sha256:a122667f94a7a91ed68a3bcab9b100eb2c4c199cfd97b9d718753b73a00bdb86",
   "remote_branches": [
     {
       "name": "origin/codex/add-alternate-model-training-implementation",
@@ -586,9 +586,9 @@
     },
     {
       "name": "origin/phase3-organization",
-      "commit": "609ac3d644fd1637d627cc43647b5bd87e6b613b",
-      "date": "2026-08-23T15:45:17+00:00",
-      "subject": "Audit first Phase 4 removal candidate"
+      "commit": "6f5dfa27849be45d22c1507bd359eec3a553cd64",
+      "date": "2026-08-23T15:51:50+00:00",
+      "subject": "Assess legacy CLIP dataset candidate"
     },
     {
       "name": "origin/slurm-hpc",
@@ -611,14 +611,14 @@
   ],
   "tags": [],
   "tracked_files": {
-    "count": 264,
-    "bytes": 16305412,
+    "count": 265,
+    "bytes": 16307659,
     "by_extension": {
       ".gz": 1,
       ".ini": 1,
       ".ipynb": 3,
       ".json": 23,
-      ".md": 18,
+      ".md": 19,
       ".png": 1,
       ".py": 87,
       ".tif": 120,
@@ -715,6 +715,12 @@
             ]
           },
           {
+            "path": "docs/README.md",
+            "matched": [
+              "ciip"
+            ]
+          },
+          {
             "path": "docs/cleanup-progress.md",
             "matched": [
               "ciip"
@@ -724,6 +730,14 @@
             "path": "docs/phase3-runtime-config-assessment.md",
             "matched": [
               "ciip"
+            ]
+          },
+          {
+            "path": "docs/phase4-candidate-ciip-dataset.md",
+            "matched": [
+              "ciip",
+              "ciip/__init__",
+              "ciip/__init__.py"
             ]
           },
           {
@@ -741,7 +755,9 @@
           {
             "path": "docs/phase4-removal-gate.md",
             "matched": [
-              "ciip"
+              "ciip",
+              "ciip/__init__",
+              "ciip/__init__.py"
             ]
           },
           {
@@ -826,7 +842,30 @@
         "imported_by": [
           "ciip/__init__.py"
         ],
-        "literal_references": [],
+        "literal_references": [
+          {
+            "path": "docs/cleanup-progress.md",
+            "matched": [
+              "ciip/dataset",
+              "ciip/dataset.py"
+            ]
+          },
+          {
+            "path": "docs/phase4-candidate-ciip-dataset.md",
+            "matched": [
+              "ciip.dataset",
+              "ciip/dataset",
+              "ciip/dataset.py"
+            ]
+          },
+          {
+            "path": "docs/phase4-removal-gate.md",
+            "matched": [
+              "ciip/dataset",
+              "ciip/dataset.py"
+            ]
+          }
+        ],
         "runtime_signals": {
           "main_guard": false,
           "argument_parser": false,
@@ -2791,6 +2830,12 @@
             ]
           },
           {
+            "path": "docs/phase4-candidate-ciip-dataset.md",
+            "matched": [
+              "clip"
+            ]
+          },
+          {
             "path": "docs/phase4-candidate-clip-dataset.md",
             "matched": [
               "clip",
@@ -2904,6 +2949,13 @@
         "literal_references": [
           {
             "path": "docs/cleanup-progress.md",
+            "matched": [
+              "clip/dataset",
+              "clip/dataset.py"
+            ]
+          },
+          {
+            "path": "docs/phase4-candidate-ciip-dataset.md",
             "matched": [
               "clip/dataset",
               "clip/dataset.py"
