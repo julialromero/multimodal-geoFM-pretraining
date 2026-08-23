@@ -20,7 +20,10 @@ python tools/phase0_inventory.py
 ```
 
 The generated [`phase0-inventory.json`](phase0-inventory.json) records every
-fetched remote branch and tag with its object ID, date, and subject. It also
+fetched remote branch and tag with its object ID, date, and subject, except that
+the current branch's upstream uses stable `CURRENT_CHECKOUT` revision fields. A
+push advances that upstream to the commit containing the report, so embedding
+its pre-push SHA would make the checked-in artifact stale immediately. It also
 records tracked-file counts and the static import edges for every tracked Python
 file. The report is deterministic for a given checkout and fetched-ref state.
 The generated report excludes its own path from file counts and byte totals so
@@ -93,9 +96,11 @@ captures public function, model class, constructor, and forward-method signature
 for the core CIIP, CLIP, masking, loss, Lorentz, MAE, and data-parallel model
 modules. It also records literal checkpoint container keys and namespace prefixes
 used by loader functions so compatibility-sensitive mappings are reviewable.
-This is a structural regression baseline only. Phase 2 remains open
-until construction, forward-pass, and checkpoint round-trip tests run with the
-declared ML dependencies and representative configurations.
+The structural snapshot remains the review baseline. Phase 2 is complete: the
+repository operator reported all seven construction, forward-pass, and
+checkpoint round-trip tests passing with the declared ML dependencies and
+representative CIIP configuration on HPC. These tests must be rerun after any
+model-facing Phase 3 change.
 Dependency-backed baseline tests now live in `tools/test_phase2_runtime.py` and
 cover a small CLIP forward pass, state-dict and `build_model` compatibility,
 masking invariants, a Lorentz exp/log round trip, and a representative transformer

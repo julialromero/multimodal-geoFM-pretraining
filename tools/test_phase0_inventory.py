@@ -1,11 +1,13 @@
 import ast
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tools.phase0_inventory import (
     GENERATED_PATHS,
     literal_references,
     python_inventory,
+    refs,
     render_runtime_audit,
     resolve_from_import,
     runtime_signals,
@@ -13,6 +15,15 @@ from tools.phase0_inventory import (
 
 
 class ResolveFromImportTests(unittest.TestCase):
+    def test_current_upstream_ref_is_stably_normalized(self) -> None:
+        row = "\0".join(("origin/work", "abc123", "2026-08-23T00:00:00+00:00", "subject"))
+        with mock.patch("tools.phase0_inventory.git", return_value=row):
+            remote_refs = refs("refs/remotes", normalized_ref="origin/work")
+        current = remote_refs[0]
+        self.assertEqual(current["commit"], "CURRENT_CHECKOUT")
+        self.assertEqual(current["date"], "CURRENT_CHECKOUT")
+        self.assertEqual(current["subject"], "CURRENT_CHECKOUT")
+
     def test_runtime_audit_is_a_non_removal_worklist(self) -> None:
         report = render_runtime_audit(
             {

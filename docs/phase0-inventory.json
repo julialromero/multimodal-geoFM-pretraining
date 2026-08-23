@@ -1,6 +1,6 @@
 {
-  "schema_version": 2,
-  "source_fingerprint": "sha256:b6997113c9fa2c45966e30b59f39f00d0352d3534129798ba6df8da1a77f7a9d",
+  "schema_version": 3,
+  "source_fingerprint": "sha256:c2b04746430ef7b73d4c9ebf6f00b0a9652bd07fad468ba5741eda05ee5a499b",
   "remote_branches": [
     {
       "name": "origin/codex/add-alternate-model-training-implementation",
@@ -471,6 +471,12 @@
       "subject": "Remove diagnostics config"
     },
     {
+      "name": "origin/codex/resume-multimodal-geofm-pretraining-cleanup",
+      "commit": "6d4de7657b1bc300fc7887aa4d78d8322a16bd30",
+      "date": "2026-08-22T12:00:19-06:00",
+      "subject": "Add representative CIIP runtime baselines"
+    },
+    {
       "name": "origin/codex/review-boolean-indexing-in-masking-code",
       "commit": "41eebfdb26332865aea679d755fd02d1553123a9",
       "date": "2026-02-05T16:17:12-07:00",
@@ -574,9 +580,15 @@
     },
     {
       "name": "origin/distributed",
-      "commit": "4355d34a753f35f1f8551fca984b04b7bf24de5b",
-      "date": "2026-03-19T11:08:17-06:00",
-      "subject": "Merge pull request #113 from julialromero/codex/check-hyperparameter-sweep-functionality"
+      "commit": "a388f21742916cc1f3fa78aa2375e81fba8bbf86",
+      "date": "2026-08-22T12:00:54-06:00",
+      "subject": "Merge pull request, cleanup code base"
+    },
+    {
+      "name": "origin/phase3-organization",
+      "commit": "CURRENT_CHECKOUT",
+      "date": "CURRENT_CHECKOUT",
+      "subject": "CURRENT_CHECKOUT"
     },
     {
       "name": "origin/slurm-hpc",
@@ -592,23 +604,23 @@
     },
     {
       "name": "origin/work",
-      "commit": "6223e2a424b651d36662d453a5ca8d66e0edb339",
-      "date": "2026-08-22T17:48:54+00:00",
-      "subject": "Record successful Phase 2 HPC baselines"
+      "commit": "90c8b8be4c9180eaf236d53545ec00f0842e55fe",
+      "date": "2026-08-22T17:53:40+00:00",
+      "subject": "Add representative CIIP runtime baselines"
     }
   ],
   "tags": [],
   "tracked_files": {
-    "count": 257,
-    "bytes": 16287107,
+    "count": 266,
+    "bytes": 16293737,
     "by_extension": {
       ".gz": 1,
       ".ini": 1,
       ".ipynb": 3,
       ".json": 23,
-      ".md": 11,
+      ".md": 21,
       ".png": 1,
-      ".py": 87,
+      ".py": 86,
       ".tif": 120,
       ".yaml": 5,
       ".yml": 2,
@@ -623,7 +635,7 @@
     ]
   },
   "python": {
-    "file_count": 87,
+    "file_count": 86,
     "parse_errors": [],
     "files": [
       {
@@ -700,6 +712,52 @@
             "path": "ciip/readMe.md",
             "matched": [
               "ciip"
+            ]
+          },
+          {
+            "path": "docs/README.md",
+            "matched": [
+              "ciip"
+            ]
+          },
+          {
+            "path": "docs/phase3-runtime-config-assessment.md",
+            "matched": [
+              "ciip"
+            ]
+          },
+          {
+            "path": "docs/phase4-candidate-ciip-dataset.md",
+            "matched": [
+              "ciip",
+              "ciip/__init__",
+              "ciip/__init__.py"
+            ]
+          },
+          {
+            "path": "docs/phase4-candidate-clip-dataset.md",
+            "matched": [
+              "ciip"
+            ]
+          },
+          {
+            "path": "docs/phase4-candidate-package-markers.md",
+            "matched": [
+              "ciip"
+            ]
+          },
+          {
+            "path": "docs/phase4-candidate-transforms.md",
+            "matched": [
+              "ciip"
+            ]
+          },
+          {
+            "path": "docs/phase4-removal-gate.md",
+            "matched": [
+              "ciip",
+              "ciip/__init__",
+              "ciip/__init__.py"
             ]
           },
           {
@@ -784,7 +842,30 @@
         "imported_by": [
           "ciip/__init__.py"
         ],
-        "literal_references": [],
+        "literal_references": [
+          {
+            "path": "docs/phase4-candidate-ciip-dataset.md",
+            "matched": [
+              "ciip.dataset",
+              "ciip/dataset",
+              "ciip/dataset.py"
+            ]
+          },
+          {
+            "path": "docs/phase4-candidate-clip-dataset.md",
+            "matched": [
+              "ciip/dataset",
+              "ciip/dataset.py"
+            ]
+          },
+          {
+            "path": "docs/phase4-removal-gate.md",
+            "matched": [
+              "ciip/dataset",
+              "ciip/dataset.py"
+            ]
+          }
+        ],
         "runtime_signals": {
           "main_guard": false,
           "argument_parser": false,
@@ -1814,6 +1895,24 @@
             "matched": [
               "ciip.open_clip_train"
             ]
+          },
+          {
+            "path": "docs/phase4-candidate-clip-dataset.md",
+            "matched": [
+              "ciip.open_clip_train"
+            ]
+          },
+          {
+            "path": "docs/phase4-candidate-package-markers.md",
+            "matched": [
+              "ciip.open_clip_train"
+            ]
+          },
+          {
+            "path": "docs/phase4-candidate-transforms.md",
+            "matched": [
+              "ciip.open_clip_train"
+            ]
           }
         ],
         "runtime_signals": {
@@ -1872,7 +1971,33 @@
           "visualizations/ssl4eo/hyperbolic_visualization.py",
           "visualizations/ssl4eo/initialization_evaluation.py"
         ],
-        "literal_references": [],
+        "literal_references": [
+          {
+            "path": "docs/phase3-runtime-config-assessment.md",
+            "matched": [
+              "ciip/open_clip_train/data"
+            ]
+          },
+          {
+            "path": "docs/phase4-candidate-clip-dataset.md",
+            "matched": [
+              "ciip.open_clip_train.data"
+            ]
+          },
+          {
+            "path": "docs/phase4-candidate-package-markers.md",
+            "matched": [
+              "ciip.open_clip_train.data",
+              "ciip/open_clip_train/data"
+            ]
+          },
+          {
+            "path": "docs/phase4-removal-gate.md",
+            "matched": [
+              "ciip/open_clip_train/data"
+            ]
+          }
+        ],
         "runtime_signals": {
           "main_guard": true,
           "argument_parser": true,
@@ -1887,7 +2012,23 @@
         "internal_imports": [],
         "external_imports": [],
         "imported_by": [],
-        "literal_references": [],
+        "literal_references": [
+          {
+            "path": "docs/phase4-candidate-package-markers.md",
+            "matched": [
+              "ciip.open_clip_train.dataparallel",
+              "ciip/open_clip_train/dataparallel/__init__",
+              "ciip/open_clip_train/dataparallel/__init__.py"
+            ]
+          },
+          {
+            "path": "docs/phase4-removal-gate.md",
+            "matched": [
+              "ciip/open_clip_train/dataparallel/__init__",
+              "ciip/open_clip_train/dataparallel/__init__.py"
+            ]
+          }
+        ],
         "runtime_signals": {
           "main_guard": false,
           "argument_parser": false,
@@ -1914,7 +2055,14 @@
         "imported_by": [
           "ciip/open_clip_train/dataparallel/run_train_val_dataparallel.py"
         ],
-        "literal_references": [],
+        "literal_references": [
+          {
+            "path": "docs/phase4-candidate-package-markers.md",
+            "matched": [
+              "ciip.open_clip_train.dataparallel.factory"
+            ]
+          }
+        ],
         "runtime_signals": {
           "main_guard": false,
           "argument_parser": false,
@@ -1986,7 +2134,15 @@
           "typing"
         ],
         "imported_by": [],
-        "literal_references": [],
+        "literal_references": [
+          {
+            "path": "docs/phase3-runtime-config-assessment.md",
+            "matched": [
+              "ciip/open_clip_train/dataparallel/run_train_val_dataparallel",
+              "ciip/open_clip_train/dataparallel/run_train_val_dataparallel.py"
+            ]
+          }
+        ],
         "runtime_signals": {
           "main_guard": true,
           "argument_parser": false,
@@ -2269,7 +2425,15 @@
           "torchvision.transforms"
         ],
         "imported_by": [],
-        "literal_references": [],
+        "literal_references": [
+          {
+            "path": "docs/phase3-runtime-config-assessment.md",
+            "matched": [
+              "ciip/open_clip_train/run_train_val",
+              "ciip/open_clip_train/run_train_val.py"
+            ]
+          }
+        ],
         "runtime_signals": {
           "main_guard": true,
           "argument_parser": false,
@@ -2319,7 +2483,15 @@
           "wandb"
         ],
         "imported_by": [],
-        "literal_references": [],
+        "literal_references": [
+          {
+            "path": "docs/phase3-runtime-config-assessment.md",
+            "matched": [
+              "ciip/open_clip_train/run_train_val_distributed",
+              "ciip/open_clip_train/run_train_val_distributed.py"
+            ]
+          }
+        ],
         "runtime_signals": {
           "main_guard": true,
           "argument_parser": false,
@@ -2521,7 +2693,22 @@
           "typing"
         ],
         "imported_by": [],
-        "literal_references": [],
+        "literal_references": [
+          {
+            "path": "docs/phase4-candidate-transforms.md",
+            "matched": [
+              "ciip/open_clip_train/transforms",
+              "ciip/open_clip_train/transforms.py"
+            ]
+          },
+          {
+            "path": "docs/phase4-removal-gate.md",
+            "matched": [
+              "ciip/open_clip_train/transforms",
+              "ciip/open_clip_train/transforms.py"
+            ]
+          }
+        ],
         "runtime_signals": {
           "main_guard": false,
           "argument_parser": false,
@@ -2660,6 +2847,56 @@
             ]
           },
           {
+            "path": "docs/README.md",
+            "matched": [
+              "clip"
+            ]
+          },
+          {
+            "path": "docs/cleanup-progress.md",
+            "matched": [
+              "clip"
+            ]
+          },
+          {
+            "path": "docs/phase3-runtime-config-assessment.md",
+            "matched": [
+              "clip"
+            ]
+          },
+          {
+            "path": "docs/phase4-candidate-ciip-dataset.md",
+            "matched": [
+              "clip"
+            ]
+          },
+          {
+            "path": "docs/phase4-candidate-clip-dataset.md",
+            "matched": [
+              "clip",
+              "clip/__init__",
+              "clip/__init__.py"
+            ]
+          },
+          {
+            "path": "docs/phase4-candidate-package-markers.md",
+            "matched": [
+              "clip"
+            ]
+          },
+          {
+            "path": "docs/phase4-candidate-transforms.md",
+            "matched": [
+              "clip"
+            ]
+          },
+          {
+            "path": "docs/phase4-removal-gate.md",
+            "matched": [
+              "clip"
+            ]
+          },
+          {
             "path": "environment.yml",
             "matched": [
               "clip"
@@ -2719,44 +2956,6 @@
           "checkpoint_save_calls": [
             "model.state_dict"
           ]
-        }
-      },
-      {
-        "path": "clip/dataset.py",
-        "module": "clip.dataset",
-        "internal_imports": [],
-        "external_imports": [
-          "PIL",
-          "ast",
-          "braceexpand",
-          "dataclasses",
-          "horovod.torch",
-          "imagenetv2_pytorch",
-          "json",
-          "logging",
-          "math",
-          "multiprocessing",
-          "numpy",
-          "os",
-          "pandas",
-          "random",
-          "sys",
-          "torch",
-          "torch.utils.data",
-          "torch.utils.data.distributed",
-          "torchvision.datasets",
-          "webdataset",
-          "webdataset.filters",
-          "webdataset.tariterators"
-        ],
-        "imported_by": [],
-        "literal_references": [],
-        "runtime_signals": {
-          "main_guard": false,
-          "argument_parser": false,
-          "dynamic_import_calls": [],
-          "checkpoint_load_calls": [],
-          "checkpoint_save_calls": []
         }
       },
       {
@@ -2850,7 +3049,22 @@
           "torch.nn.functional"
         ],
         "imported_by": [],
-        "literal_references": [],
+        "literal_references": [
+          {
+            "path": "docs/phase4-candidate-croma-pretrain.md",
+            "matched": [
+              "comparison/CROMA-main/pretrain_croma",
+              "comparison/CROMA-main/pretrain_croma.py"
+            ]
+          },
+          {
+            "path": "docs/phase4-removal-gate.md",
+            "matched": [
+              "comparison/CROMA-main/pretrain_croma",
+              "comparison/CROMA-main/pretrain_croma.py"
+            ]
+          }
+        ],
         "runtime_signals": {
           "main_guard": false,
           "argument_parser": false,
@@ -2872,7 +3086,15 @@
           "warnings"
         ],
         "imported_by": [],
-        "literal_references": [],
+        "literal_references": [
+          {
+            "path": "docs/phase4-candidate-croma-pretrain.md",
+            "matched": [
+              "comparison/CROMA-main/use_croma",
+              "comparison/CROMA-main/use_croma.py"
+            ]
+          }
+        ],
         "runtime_signals": {
           "main_guard": false,
           "argument_parser": false,
@@ -3131,6 +3353,13 @@
             ]
           },
           {
+            "path": "docs/phase4-candidate-package-markers.md",
+            "matched": [
+              "setup",
+              "setup.py"
+            ]
+          },
+          {
             "path": "environment.yml",
             "matched": [
               "setup"
@@ -3170,7 +3399,21 @@
         ],
         "literal_references": [
           {
+            "path": "docs/README.md",
+            "matched": [
+              "tools/phase0_inventory",
+              "tools/phase0_inventory.py"
+            ]
+          },
+          {
             "path": "docs/phase0-cleanup.md",
+            "matched": [
+              "tools/phase0_inventory",
+              "tools/phase0_inventory.py"
+            ]
+          },
+          {
+            "path": "tools/README.md",
             "matched": [
               "tools/phase0_inventory",
               "tools/phase0_inventory.py"
@@ -3200,7 +3443,22 @@
         "imported_by": [
           "tools/test_phase1_config_contracts.py"
         ],
-        "literal_references": [],
+        "literal_references": [
+          {
+            "path": "docs/README.md",
+            "matched": [
+              "tools/phase1_config_contracts",
+              "tools/phase1_config_contracts.py"
+            ]
+          },
+          {
+            "path": "tools/README.md",
+            "matched": [
+              "tools/phase1_config_contracts",
+              "tools/phase1_config_contracts.py"
+            ]
+          }
+        ],
         "runtime_signals": {
           "main_guard": true,
           "argument_parser": true,
@@ -3226,7 +3484,22 @@
         "imported_by": [
           "tools/test_phase1_external_audit.py"
         ],
-        "literal_references": [],
+        "literal_references": [
+          {
+            "path": "docs/README.md",
+            "matched": [
+              "tools/phase1_external_audit",
+              "tools/phase1_external_audit.py"
+            ]
+          },
+          {
+            "path": "tools/README.md",
+            "matched": [
+              "tools/phase1_external_audit",
+              "tools/phase1_external_audit.py"
+            ]
+          }
+        ],
         "runtime_signals": {
           "main_guard": true,
           "argument_parser": true,
@@ -3250,7 +3523,22 @@
         "imported_by": [
           "tools/test_phase2_model_contracts.py"
         ],
-        "literal_references": [],
+        "literal_references": [
+          {
+            "path": "docs/README.md",
+            "matched": [
+              "tools/phase2_model_contracts",
+              "tools/phase2_model_contracts.py"
+            ]
+          },
+          {
+            "path": "tools/README.md",
+            "matched": [
+              "tools/phase2_model_contracts",
+              "tools/phase2_model_contracts.py"
+            ]
+          }
+        ],
         "runtime_signals": {
           "main_guard": true,
           "argument_parser": true,
@@ -3390,6 +3678,18 @@
             "matched": [
               "visualizations"
             ]
+          },
+          {
+            "path": "docs/phase4-candidate-package-markers.md",
+            "matched": [
+              "visualizations"
+            ]
+          },
+          {
+            "path": "docs/phase4-removal-gate.md",
+            "matched": [
+              "visualizations"
+            ]
           }
         ],
         "runtime_signals": {
@@ -3406,7 +3706,23 @@
         "internal_imports": [],
         "external_imports": [],
         "imported_by": [],
-        "literal_references": [],
+        "literal_references": [
+          {
+            "path": "docs/phase4-candidate-package-markers.md",
+            "matched": [
+              "visualizations.ssl4eo",
+              "visualizations/ssl4eo/__init__",
+              "visualizations/ssl4eo/__init__.py"
+            ]
+          },
+          {
+            "path": "docs/phase4-removal-gate.md",
+            "matched": [
+              "visualizations/ssl4eo/__init__",
+              "visualizations/ssl4eo/__init__.py"
+            ]
+          }
+        ],
         "runtime_signals": {
           "main_guard": false,
           "argument_parser": false,

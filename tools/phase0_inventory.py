@@ -47,13 +47,27 @@ def source_fingerprint(paths: list[Path]) -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
-def refs(prefix: str) -> list[dict[str, str]]:
+def refs(prefix: str, normalized_ref: str | None = None) -> list[dict[str, str]]:
+    """Return refs, normalizing the current branch's moving remote ref."""
     fields = "%(refname:short)%00%(objectname)%00%(creatordate:iso-strict)%00%(subject)"
     rows = []
     for line in git("for-each-ref", f"--format={fields}", prefix).splitlines():
         name, commit, date, subject = line.split("\0", 3)
+        if name == normalized_ref:
+            commit = date = subject = "CURRENT_CHECKOUT"
         rows.append({"name": name, "commit": commit, "date": date, "subject": subject})
     return rows
+
+
+def upstream_ref() -> str | None:
+    """Return the current branch's short upstream ref, if one is configured."""
+    result = subprocess.run(
+        ("git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"),
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
 
 
 def module_name(path: Path) -> str:
@@ -184,9 +198,9 @@ def build_inventory() -> dict[str, object]:
     python_files, parse_errors = python_inventory(python_paths, reference_sources)
     extensions = Counter(path.suffix or "[no extension]" for path in tracked)
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "source_fingerprint": source_fingerprint(tracked),
-        "remote_branches": refs("refs/remotes"),
+        "remote_branches": refs("refs/remotes", normalized_ref=upstream_ref()),
         "tags": refs("refs/tags"),
         "tracked_files": {
             "count": len(tracked),
