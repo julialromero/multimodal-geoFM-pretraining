@@ -56,6 +56,7 @@ requires `BLOCKED` or `RETAIN`, never approval.
 | Candidate | Status | Reason |
 | --- | --- | --- |
 | [`ciip/open_clip_train/transforms.py`](phase4-candidate-transforms.md) | **RETAIN** | A fetched development branch actively imports it, and deleting it would remove the public `PairGeom`/`PairAugmented` paths. |
+| [`clip/dataset.py`](phase4-candidate-clip-dataset.md) | **BLOCKED** | No Git-visible caller was found, but deletion of the public `clip.dataset` API requires explicit repository-owner approval. |
 
 ## Implementation rules
 
