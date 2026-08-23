@@ -29,12 +29,12 @@ The supplied environment targets Python 3.12, PyTorch 2.4, and CUDA 12.1:
 ```bash
 conda env create -f environment.yml
 conda activate ciip
-pip install -e .
 ```
 
 CPU-only or newer CUDA installations can use the same package list with a
-matching PyTorch build. Large datasets, model checkpoints, and experiment
-outputs are intentionally not stored in Git.
+matching PyTorch build. Run the commands below from the repository root so the
+local `ciip` package is importable. Large datasets, model checkpoints, and
+experiment outputs are intentionally not stored in Git.
 
 ## Pretraining data
 
@@ -50,17 +50,18 @@ Hydra config.
 ```
 
 Set `dataset.root`, `dataset.s2_tier`, model bands, batch size, and training
-options in `ciip/open_clip_train/configs/local_default.yaml` (small runs) or
-`prod_default.yaml` (experiments). Then launch from the repository root:
+options in `ciip/open_clip_train/configs/local_default.yaml` for small runs.
+Select that config explicitly when launching from the repository root:
 
 ```bash
-python -m ciip.open_clip_train.run_train_val \
+python -m ciip.open_clip_train.run_train_val --config-name local_default \
   dataset.root=/path/to/ssl4eo \
-  dataset.s2_tier=s2a
+  dataset.s2_tier=s2l2a
 ```
 
 Hydra overrides can configure a run without editing YAML, for example
 `train.epochs=100 datamodule.batch_size=128 loss.batch_uniformity_weight=0.05`.
+Omit `--config-name local_default` to use the runner's `prod_default.yaml`.
 Use `run_train_val_distributed` or the runner under
 `ciip/open_clip_train/dataparallel/` for the corresponding multi-GPU workflow.
 
