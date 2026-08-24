@@ -1,258 +1,142 @@
-# CLIP
+# CIIP
 
-[[Blog]](https://openai.com/blog/clip/) [[Paper]](https://arxiv.org/abs/2103.00020) [[Model Card]](model-card.md) [[Colab]](https://colab.research.google.com/github/openai/clip/blob/master/notebooks/Interacting_with_CLIP.ipynb)
+CIIP is a multimodal geospatial foundation-model research codebase. It learns a
+shared embedding space from aligned Sentinel-1 SAR and Sentinel-2 optical
+observations, with Euclidean and Lorentz/hyperbolic model variants. The
+repository includes pretraining, checkpoint and embedding utilities, downstream
+evaluation, and representation diagnostics.
 
-CLIP (Contrastive Language-Image Pre-Training) is a neural network trained on a variety of (image, text) pairs. It can be instructed in natural language to predict the most relevant text snippet, given an image, without directly optimizing for the task, similarly to the zero-shot capabilities of GPT-2 and 3. We found CLIP matches the performance of the original ResNet50 on ImageNet “zero-shot” without using any of the original 1.28M labeled examples, overcoming several major challenges in computer vision.
+## What is included
 
+- **Pretraining:** ResNet and vision-transformer encoders, contrastive learning,
+  optional patch masking/reconstruction, batch-uniformity and variance/covariance
+  regularization, plus single-GPU, data-parallel, and distributed runners.
+- **Data:** loaders for aligned SSL4EO-S12 Sentinel-1/Sentinel-2 Zarr data,
+  including seasonal sampling, band selection, normalization, and train/validation
+  splitting. An S2-text encoder pairing is also available in the data-parallel
+  model builder.
+- **Evaluation:** linear probes and few-shot/k-NN evaluation on EuroSAT,
+  BigEarthNet, and NeuCo tasks; cross-modal retrieval; intrinsic-dimension
+  metrics; and comparison with SSL4EO, CROMA, and other supported checkpoints.
+- **Visualization:** downstream result summaries, embedding-collapse and SVD
+  diagnostics, retrieval plots, and hyperbolic radius, cone, aperture, and
+  angular projections.
 
+## Setup
 
-## Approach
-
-![CLIP](CLIP.png)
-
-
-
-## Usage
-
-First, [install PyTorch 1.7.1](https://pytorch.org/get-started/locally/) (or later) and torchvision, as well as small additional dependencies, and then install this repo as a Python package. On a CUDA GPU machine, the following will do the trick:
+The supplied environment targets Python 3.12, PyTorch 2.4, and CUDA 12.1:
 
 ```bash
-$ conda install --yes -c pytorch pytorch=1.7.1 torchvision cudatoolkit=11.0
-$ pip install ftfy regex tqdm
-$ pip install git+https://github.com/openai/CLIP.git
+conda env create -f environment.yml
+conda activate ciip
 ```
 
-Replace `cudatoolkit=11.0` above with the appropriate CUDA version on your machine or `cpuonly` when installing on a machine without a GPU.
+CPU-only or newer CUDA installations can use the same package list with a
+matching PyTorch build. Run the commands below from the repository root so the
+local `ciip` package is importable. Large datasets, model checkpoints, and
+experiment outputs are intentionally not stored in Git.
 
-### AlphaEarth batch-uniformity regularization
+## Pretraining data
 
-We adopt the AlphaEarth batch-uniformity loss to encourage better use of the embedding space. The loss measures the absolute dot product between each feature vector and a cyclically shifted copy of the batch, penalising non-orthogonal pairs. It is added to the InfoNCE objective with a small weight (default `0.05`).
+Arrange SSL4EO-S12 modalities below one root. Current loaders support `S1GRD`
+and `S2L1C`/`S2L2A` Zarr sources; the exact tier and bands are selected in the
+Hydra config.
 
-You can adjust or disable the term via both the CLI and the Hydra configuration files:
-
-* **CLI flags**: pass `--batch-uniformity-weight` to scale the additional term (set to `0` to disable its contribution) and combine it with `--batch-uniformity` / `--no-batch-uniformity` to force-enable or disable the regulariser. The existing VC regularisation controls are still present via `--vc-regularization`, `--no-vc-regularization`, and the associated `--vc-*` knobs.
-
-  ```bash
-  python -m ciip.open_clip_train.main \
-      --contrastive-weight 1.0 \
-      --batch-uniformity \
-      --batch-uniformity-weight 0.05 \
-      --vc-regularization \
-      --vc-weight 0.05
-  ```
-
-* **Hydra config**: when using `run_train_val.py` or the distributed runner, the options live under the `loss` section. For example, `ciip/open_clip_train/configs/local_default.yaml` includes:
-
-  ```yaml
-  loss:
-    local_loss: False
-    gather_with_grad: False
-    cache_labels: True
-    contrastive_weight: 1.0
-    batch_uniformity_enabled: True   # flip to False to skip the AlphaEarth term entirely
-    batch_uniformity_weight: 0.05
-    vc_enabled: False                # enable to activate the VC regulariser
-    vc_weight: 0.0
-    vc_gamma: 1.0
-    vc_covariance_weights: [1.0, 1.0]
-  ```
-
-  Override these keys in your experiment-specific config to tune or disable each auxiliary objective. When `vc_enabled` is `False`, the training loop skips all VC computations, avoiding the extra gather and statistics passes.
-
-```python
-import torch
-import clip
-from PIL import Image
-
-device = "cuda" if torch.cuda.is_available() else "cpu"
-model, preprocess = clip.load("ViT-B/32", device=device)
-
-image = preprocess(Image.open("CLIP.png")).unsqueeze(0).to(device)
-text = clip.tokenize(["a diagram", "a dog", "a cat"]).to(device)
-
-with torch.no_grad():
-    image_features = model.encode_image(image)
-    text_features = model.encode_text(text)
-    
-    logits_per_image, logits_per_text = model(image, text)
-    probs = logits_per_image.softmax(dim=-1).cpu().numpy()
-
-print("Label probs:", probs)  # prints: [[0.9927937  0.00421068 0.00299572]]
+```text
+/path/to/ssl4eo/
+├── S1GRD/
+├── S2L1C/
+└── S2L2A/
 ```
 
+Set `dataset.root`, `dataset.s2_tier`, model bands, batch size, and training
+options in `ciip/open_clip_train/configs/local_default.yaml` for small runs.
+Select that config explicitly when launching from the repository root:
 
-## API
-
-The CLIP module `clip` provides the following methods:
-
-#### `clip.available_models()`
-
-Returns the names of the available CLIP models.
-
-#### `clip.load(name, device=..., jit=False)`
-
-Returns the model and the TorchVision transform needed by the model, specified by the model name returned by `clip.available_models()`. It will download the model as necessary. The `name` argument can also be a path to a local checkpoint.
-
-The device to run the model can be optionally specified, and the default is to use the first CUDA device if there is any, otherwise the CPU. When `jit` is `False`, a non-JIT version of the model will be loaded.
-
-#### `clip.tokenize(text: Union[str, List[str]], context_length=77)`
-
-Returns a LongTensor containing tokenized sequences of given text input(s). This can be used as the input to the model
-
----
-
-The model returned by `clip.load()` supports the following methods:
-
-#### `model.encode_image(image: Tensor)`
-
-Given a batch of images, returns the image features encoded by the vision portion of the CLIP model.
-
-#### `model.encode_text(text: Tensor)`
-
-Given a batch of text tokens, returns the text features encoded by the language portion of the CLIP model.
-
-#### `model(image: Tensor, text: Tensor)`
-
-Given a batch of images and a batch of text tokens, returns two Tensors, containing the logit scores corresponding to each image and text input. The values are cosine similarities between the corresponding image and text features, times 100.
-
-
-
-## More Examples
-
-### Zero-Shot Prediction
-
-The code below performs zero-shot prediction using CLIP, as shown in Appendix B in the paper. This example takes an image from the [CIFAR-100 dataset](https://www.cs.toronto.edu/~kriz/cifar.html), and predicts the most likely labels among the 100 textual labels from the dataset.
-
-```python
-import os
-import clip
-import torch
-from torchvision.datasets import CIFAR100
-
-# Load the model
-device = "cuda" if torch.cuda.is_available() else "cpu"
-model, preprocess = clip.load('ViT-B/32', device)
-
-# Download the dataset
-cifar100 = CIFAR100(root=os.path.expanduser("~/.cache"), download=True, train=False)
-
-# Prepare the inputs
-image, class_id = cifar100[3637]
-image_input = preprocess(image).unsqueeze(0).to(device)
-text_inputs = torch.cat([clip.tokenize(f"a photo of a {c}") for c in cifar100.classes]).to(device)
-
-# Calculate features
-with torch.no_grad():
-    image_features = model.encode_image(image_input)
-    text_features = model.encode_text(text_inputs)
-
-# Pick the top 5 most similar labels for the image
-image_features /= image_features.norm(dim=-1, keepdim=True)
-text_features /= text_features.norm(dim=-1, keepdim=True)
-similarity = (100.0 * image_features @ text_features.T).softmax(dim=-1)
-values, indices = similarity[0].topk(5)
-
-# Print the result
-print("\nTop predictions:\n")
-for value, index in zip(values, indices):
-    print(f"{cifar100.classes[index]:>16s}: {100 * value.item():.2f}%")
-```
-
-The output will look like the following (the exact numbers may be slightly different depending on the compute device):
-
-```
-Top predictions:
-
-           snake: 65.31%
-          turtle: 12.29%
-    sweet_pepper: 3.83%
-          lizard: 1.88%
-       crocodile: 1.75%
-```
-
-Note that this example uses the `encode_image()` and `encode_text()` methods that return the encoded features of given inputs.
-
-
-### Linear-probe evaluation
-
-The example below uses [scikit-learn](https://scikit-learn.org/) to perform logistic regression on image features.
-
-```python
-import os
-import clip
-import torch
-
-import numpy as np
-from sklearn.linear_model import LogisticRegression
-from torch.utils.data import DataLoader
-from torchvision.datasets import CIFAR100
-from tqdm import tqdm
-
-# Load the model
-device = "cuda" if torch.cuda.is_available() else "cpu"
-model, preprocess = clip.load('ViT-B/32', device)
-
-# Load the dataset
-root = os.path.expanduser("~/.cache")
-train = CIFAR100(root, download=True, train=True, transform=preprocess)
-test = CIFAR100(root, download=True, train=False, transform=preprocess)
-
-
-def get_features(dataset):
-    all_features = []
-    all_labels = []
-    
-    with torch.no_grad():
-        for images, labels in tqdm(DataLoader(dataset, batch_size=100)):
-            features = model.encode_image(images.to(device))
-
-            all_features.append(features)
-            all_labels.append(labels)
-
-    return torch.cat(all_features).cpu().numpy(), torch.cat(all_labels).cpu().numpy()
-
-# Calculate the image features
-train_features, train_labels = get_features(train)
-test_features, test_labels = get_features(test)
-
-# Perform logistic regression
-classifier = LogisticRegression(random_state=0, C=0.316, max_iter=1000, verbose=1)
-classifier.fit(train_features, train_labels)
-
-# Evaluate using the logistic regression classifier
-predictions = classifier.predict(test_features)
-accuracy = np.mean((test_labels == predictions).astype(float)) * 100.
-print(f"Accuracy = {accuracy:.3f}")
-```
-
-Note that the `C` value should be determined via a hyperparameter sweep using a validation split.
-
-
-## See Also
-
-* [OpenCLIP](https://github.com/mlfoundations/open_clip): includes larger and independently trained CLIP models up to ViT-G/14
-* [Hugging Face implementation of CLIP](https://huggingface.co/docs/transformers/model_doc/clip): for easier integration with the HF ecosystem
-
-## Debugging
-### General environment install
-Try using the temp.yml file for installation
 ```bash
-$ conda env create -f temp.yml --name <your-name>
+python -m ciip.open_clip_train.run_train_val --config-name local_default \
+  dataset.root=/path/to/ssl4eo \
+  dataset.s2_tier=s2l2a
 ```
 
-### Pyproj/rasterio error
-When installing and setting up your environment, if you see an error like
-```
-CRSError: The EPSG code is unknown. PROJ: proj_create_from_database: ...\proj\proj.db contains ... whereas a number >= 2 is expected. It comes from another PROJ installation.
-```
-you may need to check that your PROJ_DATA and PROJ_LIB variables are pointing to places with a shared parent folder. You can check this by opening up a python interpreter and
-typing:
+Hydra overrides can configure a run without editing YAML, for example
+`train.epochs=100 datamodule.batch_size=128 loss.batch_uniformity_weight=0.05`.
+Omit `--config-name local_default` to use the runner's `prod_default.yaml`.
+Use `run_train_val_distributed` or the runner under
+`ciip/open_clip_train/dataparallel/` for the corresponding multi-GPU workflow.
+
+## Downstream evaluation
+
+The evaluation dispatcher provides a common interface for EuroSAT few-shot,
+NeuCo, and unified evaluations. Inspect task-specific options first, then run a
+JSON-configured experiment:
+
 ```bash
->>> import rasterio
->>> rasterio.show_versions()
+python -m ciip.evaluation.run_downstream --help
+python -m ciip.evaluation.run_downstream \
+  --config /path/to/evaluation.json \
+  --dry-run
+python -m ciip.evaluation.run_downstream \
+  --config /path/to/evaluation.json
 ```
-PROJ DATA and GDAL DATA should be in the same rasterio folder. If they aren't, move one (probably the one that is not in your current conda environment) with
+
+`evaluation.json` contains a `task`, shared `defaults`/`script_args`, and
+optionally a `models` list. Supported task names are shown by `--help`.
+Task scripts can also be called directly for full CLI documentation. TorchGeo
+evaluation datasets may download automatically, but SSL4EO and NeuCo paths must
+point to local data.
+
+## Visualizations
+
+Aggregate completed downstream runs into publication-ready PNG and CSV files:
+
 ```bash
-$ export PROJ_DATA=/home/jema2085/miniconda3/envs/ciip-jen/lib/python3.12/site-packages/rasterio/proj_data
+python -m ciip.evaluation.plot_downstream \
+  --unified-eval-root diagnostics/unified_eval \
+  --output-dir diagnostics/downstream_plots
 ```
-for example.
+
+For a trained Lorentz model, generate angle/aperture, radial, angular-PCA, and
+cone plots with:
+
+```bash
+python -m visualizations.ssl4eo.hyperbolic_visualization \
+  --config /path/to/training-config.yaml \
+  --checkpoint /path/to/checkpoint.pt \
+  --output-dir diagnostics/hyperbolic
+```
+
+Additional scripts live in `visualizations/ssl4eo/`, `diagnostics/`, and
+`intrinsic-dimension/`.
+
+## Example results
+
+Training runs write checkpoints and logs beneath the Hydra output directory.
+Evaluation runs produce machine-readable metrics, while plotting scripts turn
+those records into figures and summary tables. A typical experiment report
+should include:
+
+| Stage | Suggested result |
+| --- | --- |
+| Pretraining | train/validation contrastive loss and retrieval accuracy by epoch |
+| Downstream | EuroSAT/BigEarthNet probe accuracy or F1, and NeuCo task metrics |
+| Retrieval | Sentinel-1-to-Sentinel-2 and Sentinel-2-to-Sentinel-1 recall@K |
+| Geometry | intrinsic dimension, singular-value spectra, radii, and cone/aperture plots |
+
+Results depend on the checkpoint, split, bands, and random seed, so report the
+resolved Hydra config and checkpoint alongside every table or figure. This
+repository does not claim a canonical score in the absence of those artifacts.
+
+## Repository map
+
+```text
+ciip/                    models, losses, data, training, and evaluation
+visualizations/ssl4eo/   embedding and hyperbolic visualizations
+diagnostics/             result aggregation and diagnostic scripts
+intrinsic-dimension/     standalone intrinsic-dimension analyses
+comparison/              supported external-model comparison code
+docs/                    cleanup audits and repository-maintenance notes
+```
+
+See `ciip/open_clip_train/configs/` for the complete training configuration and
+`docs/README.md` for repository audit documentation.
