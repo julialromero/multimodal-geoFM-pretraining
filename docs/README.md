@@ -6,6 +6,11 @@ edited by hand.
 
 ## Cleanup guides
 
+- [`pretraining-settings.md`](pretraining-settings.md) — implemented modality,
+  geometry, objective, regularization, Matryoshka, and reconstruction settings,
+  including inactive legacy options.
+- [`visualizations-and-evaluations.md`](visualizations-and-evaluations.md) —
+  dataset, evaluation, diagnostic, and plot inventory plus reporting guidance.
 - [`cleanup-progress.md`](cleanup-progress.md) — current status and remaining
   gates across all cleanup phases.
 - [`phase0-cleanup.md`](phase0-cleanup.md) — safety policy, audit workflow, and
