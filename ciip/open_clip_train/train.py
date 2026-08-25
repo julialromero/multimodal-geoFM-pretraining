@@ -2,7 +2,6 @@ import json
 import logging
 import math
 import os
-import random
 import time
 from contextlib import nullcontext
 from typing import Dict, Optional
@@ -11,16 +10,28 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from open_clip import get_input_dtype
-from torch.autograd.profiler import record_function
-from torch.nn.parallel.distributed import DistributedDataParallel
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import Dataset
 
 try:
     import wandb
 except ImportError:
     wandb = None
 
+from ciip.loss import gather_features
+from ciip.open_clip_train.accumulation import (
+    build_accumulated_loss_inputs,
+    cache_model_features,
+)
 from ciip.open_clip_train.distributed import is_master
+from ciip.open_clip_train.batches import prepare_training_batch
+from ciip.open_clip_train.objectives import (
+    backward_loss,
+    compose_training_loss,
+    reconstruction_weight,
+    run_training_step,
+    scalar_output,
+)
+from ciip.open_clip_train.optimizer import step_optimizer
 from ciip.open_clip_train.precision import get_autocast
 from ciip.open_clip_train.zero_shot import zero_shot_eval
 
@@ -179,28 +190,8 @@ def unwrap_model(model):
         return model
 
 
-def backward(total_loss, scaler):
-    if scaler is not None:
-        scaler.scale(total_loss).backward()
-    else:
-        total_loss.backward()
-
-
-def _compute_recon_lambda(args, epoch: int, step: int) -> float:
-    recon_cfg = getattr(args, "recon", None)
-    if recon_cfg is None:
-        return 0.0
-    base_lambda = float(getattr(recon_cfg, "lambda", 0.0))
-    warmup_steps = getattr(recon_cfg, "warmup_steps", None)
-    warmup_epochs = getattr(recon_cfg, "warmup_epochs", 0)
-    if warmup_steps is not None and step < warmup_steps:
-        return 0.0
-    if warmup_steps is None and epoch < warmup_epochs:
-        return 0.0
-    return base_lambda
-
 TIME_FORMAT_STR: str = "%b_%d_%H_%M_%S"
-from datetime import datetime, timedelta
+from datetime import datetime
 def trace_handler(prof: torch.profiler.profile):
    # Prefix for file names.
    timestamp = datetime.now().strftime(TIME_FORMAT_STR)
@@ -220,7 +211,6 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
     input_dtype = get_input_dtype(args.model.precision)
     model_cfg = getattr(args, "model", None)
     encoder_pair = getattr(model_cfg, "encoder_pair", "s1s2")
-    use_text = encoder_pair == "s2_text"
 
     model.train()
     
@@ -252,103 +242,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
         )
 
     if args.train.accum_freq > 1:
-        accum_s1, accum_s2, accum_features = [], [], {}
-
-
-    with torch.no_grad():
-        if epoch == 0 and args.train.apply_orthogonal_mapping and not use_text:
-            #log
-            logging.info("Computing optimal orthogonal mapping W for s1 to s2...")
-            base_dataset = dataloader.dataset
-            loader = DataLoader(base_dataset, batch_size=1000, shuffle=False, num_workers=args.model.workers, pin_memory=True)
-            it = iter(loader)
-            batch = next(it)
-            s1, s2 = batch
-            s1 = s1.to(device=device, dtype=input_dtype, non_blocking=True)
-            s2 = s2.to(device=device, dtype=input_dtype, non_blocking=True)
-
-
-            
-            ###### COMPUTE TRAINING ORTHOGONAL MAPPING ######
-            ####### WARMUP FOR ORTHOGONAL MAPPING #######
-            logging.info("Computing orthogonal matrix for **TRAIN**...")
-            NUM_WARMUP_BATCHES = 100
-            model.train()
-            for i, (s1, s2) in enumerate(loader):
-                s1 = s1.to(device)
-                s2 = s2.to(device)
-                if hasattr(model, "module"):
-                    _ = model.module.encode_s1(s1)
-                    _ = model.module.encode_s2(s2)
-                else:
-                    _ = model.encode_s1(s1)
-                    _ = model.encode_s2(s2)
-                if i >= NUM_WARMUP_BATCHES:
-                    print(f"Warmup for orthogonal mapping completed after {i} batches.")
-                    break
-
-            
-            if hasattr(model, "module"):
-                W, stats = model.module.compute_orthogonal_matrix(s1, s2)
-            else:
-                W, stats = model.compute_orthogonal_matrix(s2, s1)
-            logging.info(f"Orthogonal matrix train stats: {stats}")
-
-            # save stats to log directory
-            if args.io.save_logs and is_master(args):
-                with open(os.path.join(args.io.checkpoint_path, "orthogonal_matrix_stats_train.json"), "w") as f:
-                    json.dump(stats, f, indent=4)
-                W_path = os.path.join(args.io.checkpoint_path, "W_train.pt")
-                torch.save(W, W_path)
-                logging.info(f"Saved orthogonal matrix W to {W_path}")
-
-            # apply orthogonal mapping to modeltorch.save(
-            
-
-            if hasattr(model, "module"):
-                del model.module.encoder_s1._buffers["W"]
-                model.module.encoder_s1.register_buffer("W", None)
-                model.module.encoder_s1.apply_orthogonal_matrix = False
-                
-            else:
-                del model.encoder_s1._buffers["W"]
-                model.encoder_s1.register_buffer("W", None)
-                model.encoder_s1.apply_orthogonal_matrix = False
-            print("W is set to None in the model, so that it does not apply orthogonal mapping during training.")
-
-
-            ###### EVAL ORTHOGOANL MATRIX COMPUTATION ######
-            logging.info("Computing orthogonal matrix for **EVAL**...")
-            model.eval()
-            if hasattr(model, "module"):
-                W, stats = model.module.compute_orthogonal_matrix(s1, s2)
-            else:
-                W, stats = model.compute_orthogonal_matrix(s2, s1)
-            logging.info(f"Orthogonal matrix eval stats: {stats}")
-
-            # save stats to log directory
-            if args.io.save_logs and is_master(args):
-                with open(os.path.join(args.io.checkpoint_path, "orthogonal_matrix_stats.json"), "w") as f:
-                    json.dump(stats, f, indent=4)
-                # save W matrix to log directory
-                W_path = os.path.join(args.io.checkpoint_path, "W.pt")
-                torch.save(W, W_path)
-                logging.info(f"Saved orthogonal matrix W to {W_path}")
-
-
-            # delete  dataloader
-            del loader
-
-            # save the model weights after the warm up phase -> random weights with appropriate batch norm stats
-        if epoch == 0:
-            if is_master(args):
-                torch.save(
-                    model.state_dict(),
-                    os.path.join(args.io.checkpoint_path, "epoch_0.pt"),
-                )
-                logging.info(f"Saved initial model weights to {args.io.checkpoint_path}.")
-
-
+        accumulated_batches, accum_features = [], {}
 
     model.train()
     losses_m = {}
@@ -378,15 +272,13 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
         if not args.model.skip_scheduler:
             scheduler(step)
 
-        if use_text:
-            s1 = batch["s2"].to(device=device, dtype=input_dtype, non_blocking=True)
-            s2 = batch["text"].to(device=device, non_blocking=True)
-        else:
-            s1, s2 = batch['s1'], batch['s2']
-            s1 = s1.to(device=device, dtype=input_dtype, non_blocking=True)
-            s2 = s2.to(device=device, dtype=input_dtype, non_blocking=True)
-
-        
+        prepared = prepare_training_batch(
+            batch,
+            encoder_pair=encoder_pair,
+            device=device,
+            input_dtype=input_dtype,
+        )
+        s1 = prepared.s1
 
         data_time_m.update(time.time() - end)
         optimizer.zero_grad()
@@ -394,59 +286,38 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
         curv_scalar: Optional[float] = None
 
         if args.train.accum_freq == 1:
-            with autocast():
-                if rank0 and i == 0:
-                    logging.debug("Rank0: forward start batch 0")
-                model_out = model(s1, s2)
-                if rank0 and i == 0:
-                    logging.debug("Rank0: forward done batch 0, computing loss")
-
-                logit_scale = model_out["logit_scale"]
-                if args.distill:
-                    with torch.no_grad():
-                        dist_model_out = dist_model(s1, s2)
-                    model_out.update({f'dist_{k}': v for k, v in dist_model_out.items()})
-                losses = loss(**model_out, output_dict=True)
-
-                recon_loss = model_out.get("recon_loss")
-                recon_lambda = _compute_recon_lambda(args, epoch, step)
-                recon_scaled = recon_loss * recon_lambda if recon_loss is not None else 0.0
-                total_loss = sum(losses.values()) + recon_scaled
-                if recon_loss is not None:
-                    losses["recon_loss"] = recon_scaled
-                    losses["recon_loss_raw"] = recon_loss
-                losses["loss"] = total_loss
-
+            if rank0 and i == 0:
+                logging.debug("Rank0: forward start batch 0")
+            model_out, losses, total_loss = run_training_step(
+                model,
+                prepared.model_inputs,
+                loss,
+                autocast=autocast,
+                reconstruction_config=getattr(args, "recon", None),
+                epoch=epoch,
+                step=step,
+                scaler=scaler,
+                distillation_model=dist_model if args.distill else None,
+            )
+            if rank0 and i == 0:
+                logging.debug("Rank0: forward and backward done for batch 0")
             if "curv" in model_out:
                 curv_scalar = float(model_out["curv"].detach().item())
-
             _accumulate_vc_metrics(loss, model_out, vc_metrics_m, s1.shape[0])
-            backward(total_loss, scaler)
         else:
             # First, cache the features without any gradient tracking.
             with torch.no_grad():
                 with autocast():
                     if rank0 and i == 0:
                         logging.debug("Rank0: forward(no_grad) start batch 0")
-                    model_out = model(s1, s2)
+                    model_out = model(*prepared.model_inputs)
                     if rank0 and i == 0:
                         logging.debug("Rank0: forward(no_grad) done batch 0")
 
-                    for f in ("logit_scale", "logit_bias"):
-                        model_out.pop(f, None)
-
                     _accumulate_vc_metrics(loss, model_out, vc_metrics_m, s1.shape[0])
+                    cache_model_features(accum_features, model_out)
 
-                    for key, val in model_out.items():
-                        if val.ndim == 0:
-                            continue
-                        if key in accum_features:
-                            accum_features[key].append(val)
-                        else:
-                            accum_features[key] = [val]
-
-                accum_s1.append(s1)
-                accum_s2.append(s2)
+                accumulated_batches.append(prepared)
 
             # If (i + 1) % accum_freq is not zero, move on to the next batch.
             if ((i + 1) % args.train.accum_freq) > 0:
@@ -463,44 +334,27 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
             accum_features_current_loop = {key: list(val) for key, val in accum_features.items()} # Ensure a copy
 
             for j in range(args.train.accum_freq):
-                s1 = accum_s1[j]
-                s2 = accum_s2[j]
+                accumulated = accumulated_batches[j]
+                s1 = accumulated.s1
 
-                is_last_backward_pass = (j == args.train.accum_freq - 1)
-                sync_context = model.no_sync() if not is_last_backward_pass else nullcontext()
+                is_last_backward_pass = j == args.train.accum_freq - 1
+                sync_context = (
+                    model.no_sync()
+                    if not is_last_backward_pass and hasattr(model, "no_sync")
+                    else nullcontext()
+                )
                 with sync_context:
                     with autocast():
                         if rank0 and not logged_first_backward and j == 0:
                             logging.debug("Rank0: forward(backward) start at accum boundary")
                         
-                        model_out = model(s1, s2)
+                        model_out = model(*accumulated.model_inputs)
                         if rank0 and not logged_first_backward and j == 0:
                             logging.debug("Rank0: forward(backward) done, computing loss")
 
-                        inputs_no_accum = {}
-                        inputs_no_accum["logit_scale"] = logit_scale = model_out.pop("logit_scale")
-                        if "logit_bias" in model_out:
-                            inputs_no_accum["logit_bias"] = model_out.pop("logit_bias")
-                        
-
-                        # inputs = {}
-                        # for key, val in accum_features.items():
-                        #     accumulated = accum_features[key]
-                        #     inputs[key] = torch.cat(accumulated[:j] + [model_out[key]] + accumulated[j + 1:])
-                        inputs = {}
-                        for key in accum_features_current_loop.keys(): # Iterate over keys
-                            # Use the copied list for concatenation, and replace the j-th element
-                            temp_accumulated = list(accum_features_current_loop[key]) # Create a copy for modification
-                            temp_accumulated[j] = model_out[key] # Replace with the current grad-tracked feature
-                            inputs[key] = torch.cat(temp_accumulated)
-
-                        # Add scalar metadata (e.g. curvature) directly from the current
-                        # model output. These values should not be concatenated across
-                        # micro-batches because the loss expects scalars.
-                        for key, val in model_out.items():
-                            if key in inputs or key in inputs_no_accum:
-                                continue
-                            inputs[key] = val
+                        loss_inputs = build_accumulated_loss_inputs(
+                            accum_features_current_loop, model_out, j
+                        )
 
                         if "curv" in model_out:
                             curv_scalar = float(model_out["curv"].detach().item())
@@ -515,44 +369,31 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                                     "step": step,
                                 }
                             )
-                        losses = loss(**inputs, **inputs_no_accum, output_dict=True)
-                        recon_loss = model_out.get("recon_loss")
-                        recon_lambda = _compute_recon_lambda(args, epoch, step)
-                        recon_scaled = recon_loss * recon_lambda if recon_loss is not None else 0.0
-                        raw_total_loss = sum(losses.values()) + recon_scaled
-                        if recon_loss is not None:
-                            losses["recon_loss"] = recon_scaled
-                            losses["recon_loss_raw"] = recon_loss
-                        losses["loss"] = raw_total_loss
+                        losses, raw_total_loss = compose_training_loss(
+                            loss,
+                            loss_inputs,
+                            reconstruction=model_out.get("recon_loss"),
+                            reconstruction_config=getattr(args, "recon", None),
+                            epoch=epoch,
+                            step=step,
+                        )
 
                     scaled_loss = raw_total_loss / args.train.accum_freq
-                    backward(scaled_loss, scaler)
+                    backward_loss(scaled_loss, scaler)
 
-                del inputs
-                del inputs_no_accum
+        logit_scale = scalar_output(model_out["logit_scale"])
 
-        if scaler is not None:
-            if args.datamodule.horovod:
-                optimizer.synchronize()
-                scaler.unscale_(optimizer)
-                if args.model.grad_clip_norm is not None:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.model.grad_clip_norm, norm_type=2.0)
-                with optimizer.skip_synchronize():
-                    scaler.step(optimizer)
-            else:
-                if args.model.grad_clip_norm is not None:
-                    scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.model.grad_clip_norm, norm_type=2.0)
-                scaler.step(optimizer)
-            scaler.update()
-        else:
-            if args.model.grad_clip_norm is not None:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args.model.grad_clip_norm, norm_type=2.0)
-            optimizer.step()
+        step_optimizer(
+            model,
+            optimizer,
+            scaler=scaler,
+            grad_clip_norm=args.model.grad_clip_norm,
+            horovod=args.datamodule.horovod,
+        )
 
         # reset gradient accum, if enabled
         if args.train.accum_freq > 1:
-            accum_s1, accum_s2, accum_features = [], [], {}
+            accumulated_batches, accum_features = [], {}
 
         # Note: we clamp to 4.6052 = ln(100), as in the original paper.
         with torch.no_grad():
@@ -619,7 +460,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 "scale": logit_scale_scalar,
                 "lr": optimizer.param_groups[0]["lr"]
             }
-            recon_lambda = _compute_recon_lambda(args, epoch, step)
+            recon_lambda = reconstruction_weight(getattr(args, "recon", None), epoch=epoch, step=step)
             if recon_lambda:
                 log_data["recon_lambda"] = recon_lambda
             log_data.update({name:val.val for name,val in losses_m.items()})
@@ -789,51 +630,3 @@ def maybe_compute_generative_loss(model_out):
         token_logits = model_out["logits"]
         token_labels = model_out["labels"]
         return F.cross_entropy(token_logits.permute(0, 2, 1), token_labels)
-
-def main(args):
-    start_epoch = 0
-    model = CLIP(**vars(args))
-    original_model = model
-
-    for epoch in range(start_epoch, args.train.epochs):
-        if is_master(args):
-            logging.info(f'Start epoch {epoch}')
-
-        train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist_model, args, tb_writer=writer)
-        completed_epoch = epoch + 1
-
-        if any(v in data for v in ('val', 'imagenet-val', 'imagenet-v2')):
-            evaluate(model, data, completed_epoch, args, tb_writer=writer, tokenizer=tokenizer)
-
-        # Saving checkpoints.
-        if args.io.save_logs:
-            checkpoint_dict = {
-                "epoch": completed_epoch,
-                "name": args.name,
-                "state_dict": original_model.state_dict(),
-                "optimizer": optimizer.state_dict(),
-            }
-            if scaler is not None:
-                checkpoint_dict["scaler"] = scaler.state_dict()
-
-            if completed_epoch == args.train.epochs or (
-                args.save_frequency > 0 and (completed_epoch % args.save_frequency) == 0
-            ):
-                torch.save(
-                    checkpoint_dict,
-                    os.path.join(args.io.checkpoint_path, f"epoch_{completed_epoch}.pt"),
-                )
-            # if args.delete_previous_checkpoint:
-            #     previous_checkpoint = os.path.join(args.io.checkpoint_path, f"epoch_{completed_epoch - 1}.pt")
-            #     if os.path.exists(previous_checkpoint):
-            #         os.remove(previous_checkpoint)
-
-            # if args.save_most_recent:
-            #     # try not to corrupt the latest checkpoint if save fails
-            #     tmp_save_path = os.path.join(args.io.checkpoint_path, "tmp.pt")
-            #     latest_save_path = os.path.join(args.io.checkpoint_path, LATEST_CHECKPOINT_NAME)
-            #     torch.save(checkpoint_dict, tmp_save_path)
-            #     os.replace(tmp_save_path, latest_save_path)
-
-if __name__ == "__main__":
-    main(sys.argv[1:])    

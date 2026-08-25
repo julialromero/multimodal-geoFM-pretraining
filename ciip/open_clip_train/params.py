@@ -401,18 +401,6 @@ def parse_args(args):
         help="Log every n steps to tensorboard/console/wandb.",
     )
     parser.add_argument(
-        "--coca-caption-loss-weight",
-        type=float,
-        default=2.0,
-        help="Weight assigned to caption loss in CoCa."
-    )
-    parser.add_argument(
-        "--coca-contrastive-loss-weight",
-        type=float,
-        default=1.0,
-        help="Weight assigned to contrastive loss when training CoCa."
-    )
-    parser.add_argument(
         "--remote-sync",
         type=str,
         default=None,
@@ -510,17 +498,17 @@ def parse_args(args):
     )
     parser.add_argument(
         "--vc-regularization",
-        dest="vc_enabled",
+        dest="vc_reg_enabled",
         action="store_true",
         help="Enable the variance-covariance (VC) regularizer during contrastive training.",
     )
     parser.add_argument(
         "--no-vc-regularization",
-        dest="vc_enabled",
+        dest="vc_reg_enabled",
         action="store_false",
         help="Disable the variance-covariance (VC) regularizer during contrastive training.",
     )
-    parser.set_defaults(vc_enabled=None)
+    parser.set_defaults(vc_reg_enabled=None)
     parser.add_argument(
         "--vc-weight",
         type=float,

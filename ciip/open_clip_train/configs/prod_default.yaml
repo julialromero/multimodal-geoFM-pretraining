@@ -159,7 +159,6 @@ train:
   save_most_recent: False
   debug: False # for logger
   seed: 56
-  apply_orthogonal_mapping: False
 
 #other placeholders
 remote_sync:

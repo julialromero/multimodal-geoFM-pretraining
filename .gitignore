@@ -1,5 +1,4 @@
 __pycache__/
-.github/workflows/
 *.py[cod]
 *$py.class
 *.egg-info
@@ -28,7 +27,6 @@ local/*
 **/notebooks/
 !ciip/visualizations/ssl4eo/notebooks/
 !ciip/visualizations/ssl4eo/notebooks/**
-**/tests/
 
 # **/open_clip_train/outputs/
 **/ciip/lightning_logs/

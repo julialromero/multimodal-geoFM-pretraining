@@ -19,46 +19,6 @@ from . import lorentz as L
 ############ START CIIP MODEL IMPLEMENTATION #################
 ##############################################################
 
-def compute_optimal_orthogonal_mapping(X: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
-    """
-    Compute the orthogonal matrix W that best aligns Y to X (i.e., X ≈ YW).
-    Args:
-        X: [N, D] tensor of image embeddings
-        Y: [N, D] tensor of text embeddings
-    Returns:
-        W: [D, D] orthogonal matrix
-    """
-
-    # Ensure inputs are float tensors and on same device
-    X = X.to(dtype=torch.float32)
-    Y = Y.to(dtype=torch.float32)
-
-    X = X.T
-    Y = Y.T
-
-    # Note, these are already be normalized when input, but maybe it doesnt hurt to keep tihs code?
-    # #  normalize to unit norm
-    # X = X / X.norm(dim=0, keepdim=True).clamp(min=1e-8)
-    # Y = Y / Y.norm(dim=0, keepdim=True).clamp(min=1e-8)
-
-    # Compute cross-covariance matrix
-    A = Y @ X.T  # shape: [dim, dim]
-
-    # SVD decomposition
-    U, _, Vt = torch.linalg.svd(A)
-
-    # Compute the orthogonal matrix R
-    R = U @ Vt
-
-    # Optional: ensure det(R) == 1 to prevent reflection
-    if torch.linalg.det(R) < 0:
-        Vt[-1, :] *= -1
-        R = U @ Vt
-
-    print(f"Orthogonal matrix R shape: {R.shape}, det(R): {torch.linalg.det(R)}")
-
-    return R
-
 class CIIP(nn.Module):
     def __init__(self,
                  embed_dim: int,
@@ -568,87 +528,6 @@ class CIIP(nn.Module):
     #     s2_logits = s1_logits.T
     #     return s1_logits, s2_logits
     
-
-    # def compute_embeddings(self, s1, s2):
-    #     s1_features = self.encode_s1(s1, normalize=False)
-    #     s2_features = self.encode_s2(s2, normalize=False)
-
-    #     # these should be normalized already
-    #     # # # normalized features
-    #     # s1_features  = s1_features  / s1_features.norm(dim=1, keepdim=True)
-    #     # s2_features = s2_features / s2_features.norm(dim=1, keepdim=True)
-
-    #     out_dict = {
-    #         "s1_features": s1_features,
-    #         "s2_features": s2_features,
-    #         }
-    
-    #     return out_dict
-
-    # def compute_orthogonal_matrix(self, s1, s2):
-    #     self.encoder_s1.compute_orthogonal_matrix = True
-    #     self.encoder_s2.compute_orthogonal_matrix = True
-
-        
-    #     s1_layer1_features = self.encode_s1(s1, normalize=True)
-    #     s2_layer1_features = self.encode_s2(s2, normalize=True)
-
-
-    #     # Compute centroids BEFORE alignment (mean over batch and spatial dims)
-    #     centroid_s1 = s1_layer1_features.mean(dim=0) # shape (num_samples, num_feats) ## #.mean(dim=[0, 2, 3])  # shape: (feat_dim,)
-    #     centroid_s2 = s2_layer1_features.mean(dim=0) #.mean(dim=[0, 2, 3])
-
-    #     # normalize the centroids as well (to compare directions)
-    #     centroid_s1 = centroid_s1 / centroid_s1.norm()
-    #     centroid_s2 = centroid_s2 / centroid_s2.norm()
-  
-    #     l2_before = torch.norm(centroid_s1 - centroid_s2, p=2).item()
-    #     cos_before = F.cosine_similarity(centroid_s1.unsqueeze(0), centroid_s2.unsqueeze(0)).item()
-    #     logging.info(f"--- Before Orthogonal Transformation ---")
-    #     logging.info(f"L2 norm between centroids: {l2_before:.6f}")
-    #     logging.info(f"Cosine similarity between centroids: {cos_before:.6f}")
-
-
-    #     W = compute_optimal_orthogonal_mapping(s2_layer1_features, s1_layer1_features)
-    #     W = W.to(device=s1.device, dtype=torch.float32, non_blocking=True)
-
-    #     s1_layer1_features = s1_layer1_features.to(dtype=torch.float32)
-    #     s1_aligned = s1_layer1_features @ W
-    
-
-    #     # Normalize the aligned features
-    #     s1_aligned = s1_aligned / s1_aligned.norm(dim=1, keepdim=True)
-
-    #     # Compute centroids AFTER alignment
-    #     centroid_s1_aligned = s1_aligned.mean(dim=0) #.mean(dim=[0, 2, 3])
-
-    #     l2_after = torch.norm(centroid_s1_aligned - centroid_s2, p=2).item()
-    #     cos_after = F.cosine_similarity(centroid_s1_aligned.unsqueeze(0), centroid_s2.unsqueeze(0)).item()
-
-    #     logging.info(f"--- After Orthogonal Transformation ---")
-    #     logging.info(f"L2 norm between centroids: {l2_after:.6f}")
-    #     logging.info(f"Cosine similarity between centroids: {cos_after:.6f}")
-
-
-    #     self.encoder_s1.compute_orthogonal_matrix = False
-    #     self.encoder_s2.compute_orthogonal_matrix = False
-    #     self.encoder_s1.apply_orthogonal_matrix = True
-    #     # self.encoder_s1.W = W
-    #     self.encoder_s1.register_buffer("W", W)
-        
-
-
-    #     # create dictionary to return
-    #     out_dict = {
-    #     "l2_before": float(l2_before),
-    #     "cos_before": float(cos_before),
-    #     "l2_after": float(l2_after),
-    #     "cos_after": float(cos_after)
-    #     }
-
-    #     return W.detach().cpu(), out_dict
-
-
 
     # write definition to print number of parameters in encoder1 
     def count_parameters_encoder1(self):
