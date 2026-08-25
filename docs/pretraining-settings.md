@@ -86,18 +86,18 @@ is batch-dependent, so batch/effective-batch size is part of the experiment.
 `loss.vc_weight`: a variance floor (`loss.vc_gamma`) discourages inactive
 coordinates, while the covariance penalty discourages redundant off-diagonal
 dimensions. `loss.vc_covariance_weights: [s1, s2]` weights the covariance
-penalty per tower. Use the key `vc_reg_enabled`; `local_default.yaml` still
-contains the older `vc_enabled` spelling, which is not consumed by the current
-loss factory and should not be copied into new experiments.
+penalty per tower. Use the key `vc_reg_enabled`; both supplied Hydra
+configurations and the CLI map to this spelling.
 
 ### SigLIP objective
 
 `datamodule.siglip: true` (or the equivalent resolved `siglip` value) selects
 the pairwise sigmoid loss instead of `CiipLoss`. This is an objective
 alternative, not a regularizer, and its distributed neighbor exchange has
-different behavior from the baseline global softmax. Do not expect the CIIP
-regularizer flags above to carry over: the factory returns `SigLipLoss`
-directly.
+different behavior from the baseline global softmax. Distributed SigLIP uses a
+single ring-exchange path rather than separate directional implementations. Do
+not expect the CIIP regularizer flags above to carry over: the factory returns
+`SigLipLoss` directly.
 
 ### Patch masking and reconstruction
 
@@ -122,15 +122,13 @@ its logs before relying on warm-up behavior.
   local versus global loss, `gather_with_grad`, and gradient accumulation alter
   the effective negatives and optimization even when the named objective is
   unchanged.
-- **Orthogonal mapping:** helper/prototype code exists, but the model path that
-  computes/applies it is commented out. `train.apply_orthogonal_mapping` should
-  not be advertised as an active pretraining setting without a new runtime
-  test.
-- **Centroid regularization:** parameters are still accepted by the loss
-  factory, but their assignments/use are commented out. It is not currently an
-  active method.
-- **Distillation/CoCa:** placeholders and commented legacy loss code exist, but
-  no maintained end-to-end pretraining setting is implemented here.
+- **Orthogonal mapping:** this experimental, incomplete training branch was
+  removed. It is not a supported pretraining setting.
+- **Centroid regularization:** inactive constructor placeholders were removed.
+  It is not a supported pretraining setting.
+- **Distillation/CoCa:** no maintained end-to-end pretraining setting is
+  implemented. Maintained Hydra runners reject distillation requests before
+  model setup; inactive loss placeholders have been removed.
 
 ## Recommended experiment record
 

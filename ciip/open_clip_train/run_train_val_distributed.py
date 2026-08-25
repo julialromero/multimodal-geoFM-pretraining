@@ -6,16 +6,12 @@ import random
 import re
 import subprocess
 from datetime import datetime
-from functools import partial
 
 import hydra
 import numpy as np
 import torch
 import torch.distributed as dist
-from comet_ml import Experiment
-from comet_ml.integration.pytorch import log_model
 from omegaconf import DictConfig, OmegaConf
-from torch import optim
 from torch.cuda.amp import GradScaler
 
 try:
@@ -34,28 +30,32 @@ except ImportError:
     hvd = None
 
 # from ciip.open_clip_train import transforms
+from ciip.open_clip_train.checkpointing import (
+    build_training_checkpoint,
+    remove_checkpoint,
+    restore_training_checkpoint,
+    save_checkpoint,
+)
 from ciip.open_clip_train.data import get_data
+from ciip.open_clip_train.config_validation import validate_training_config
 from ciip.open_clip_train.distributed import (
     broadcast_object,
     init_distributed_device,
     is_master,
 )
 from ciip.open_clip_train.file_utils import (
-    check_exists,
     pt_load,
     remote_sync,
     start_sync_process,
 )
 from ciip.open_clip_train.logger import setup_logging
+from ciip.open_clip_train.optimizer import create_optimizer
 from ciip.open_clip_train.scheduler import (
-    const_lr,
-    const_lr_cooldown,
     cosine_lr,
     resolve_warmup_steps,
 )
-from ciip.open_clip_train.train import evaluate, train_one_epoch
+from ciip.open_clip_train.train import train_one_epoch
 from ciip.open_clip_train.utils import create_loss, create_model
-from torchvision.transforms import v2
 
 
 LATEST_CHECKPOINT_NAME = "epoch_latest.pt"
@@ -90,6 +90,7 @@ def get_latest_checkpoint(path: str, remote : bool):
 @hydra.main(config_path="configs", config_name=CONF, version_base=None)
 # def main(args):
 def main(args: DictConfig, start_epoch=0):
+    validate_training_config(args, runner="distributed")
     
     if torch.cuda.is_available():
         # This enables tf32 on Ampere GPUs which is only 8% slower than
@@ -142,15 +143,6 @@ def main(args: DictConfig, start_epoch=0):
                 "Error. Experiment already exists. Use --name {} to specify a new experiment."
             )
             return -1
-
-        #setup comet_ml logging
-        if(args.io.comet_ml):
-            experiment = Experiment(
-                api_key=args.comet.api_key,
-                project_name=args.comet.project_name,
-                workspace=args.comet.workspace
-            )
-        
 
       
     # Setup text logger
@@ -209,9 +201,6 @@ def main(args: DictConfig, start_epoch=0):
             # sync found checkpoint path to all ranks
             resume_from = broadcast_object(args.datamodule, resume_from)
         args.io.resume = resume_from
-
-    if args.copy_codebase:
-        copy_codebase(args)
 
     # start the sync proces if remote-sync is not None
     remote_sync_process = None
@@ -356,61 +345,10 @@ def main(args: DictConfig, start_epoch=0):
     if args.dataset.train_data or args.dataset.dataset_type == "synthetic":
         assert not args.trace, 'Cannot train with traced model'
 
-        exclude = lambda n, p: p.ndim < 2 or "bn" in n or "ln" in n or "bias" in n or 'logit_scale' in n
-        include = lambda n, p: not exclude(n, p)
-
-        named_parameters = list(model.named_parameters())
-        gain_or_bias_params = []
-        rest_params = []
-        curvature_params = []
-
-        for name, param in named_parameters:
-            if not param.requires_grad:
-                continue
-            if name.endswith("curv"):
-                curvature_params.append(param)
-                continue
-            if exclude(name, param):
-                gain_or_bias_params.append(param)
-            else:
-                rest_params.append(param)
-
-        loss_params = [p for p in loss.parameters() if p.requires_grad]
-
-        param_groups = [
-            {"params": gain_or_bias_params, "weight_decay": 0.},
-            {"params": rest_params, "weight_decay": args.train.wd},
-        ]
-        if loss_params:
-            param_groups.append({"params": loss_params, "weight_decay": 0.})
-
-        if curvature_params:
-            loss_cfg = getattr(args, "loss", None)
-            curvature_init = getattr(loss_cfg, "curvature_init", None) if loss_cfg is not None else None
-            if curvature_init is None and loss_cfg is not None:
-                curvature_init = getattr(loss_cfg, "hyperbolic_curvature_init", None)
-            if curvature_init is None:
-                curvature_init = 1.0
-            curvature_init = max(float(curvature_init), 1e-6)
-            curvature_lr = getattr(args.train, "curvature_lr", None)
-            if curvature_lr is None and loss_cfg is not None:
-                curvature_lr = getattr(loss_cfg, "curvature_lr", None)
-            if curvature_lr is None:
-                # Mirror the single-node setup by boosting curvature updates.
-                curvature_lr = args.train.lr * (1.0 / curvature_init)
-            curvature_lr = max(float(curvature_lr), 0.0)
-            param_groups.append({
-                "params": curvature_params,
-                "weight_decay": 0.,
-                "lr": curvature_lr,
-            })
-
-        optimizer = optim.AdamW(
-            param_groups,
-            lr=args.train.lr,
-            betas=(args.train.beta1, args.train.beta2),
-            eps=args.train.eps,
+        optimizer = create_optimizer(
+            model, loss, args.train, getattr(args, "loss", None)
         )
+        loss_params = [parameter for parameter in loss.parameters() if parameter.requires_grad]
 
         if args.datamodule.horovod:
             optimizer_named_parameters = list(model.named_parameters())
@@ -428,29 +366,18 @@ def main(args: DictConfig, start_epoch=0):
 
         scaler = GradScaler() if args.model.precision == "amp" else None
 
-    # optionally resume from a checkpoint
     start_epoch = 0
     if args.io.resume is not None:
-        # raise NotImplementedError('Resume not yet supported.')
-        checkpoint = pt_load(args.io.resume, map_location='cpu')
-        if 'epoch' in checkpoint:
-            # resuming a train checkpoint w/ epoch and optimizer state
-            start_epoch = checkpoint["epoch"]
-            sd = checkpoint["state_dict"]
-            if not args.datamodule.distributed and next(iter(sd.items()))[0].startswith('module'):
-                sd = {k[len('module.'):]: v for k, v in sd.items()}
-            model.load_state_dict(sd)
-            if optimizer is not None:
-                optimizer.load_state_dict(checkpoint["optimizer"])
-            if 'loss_state_dict' in checkpoint:
-                loss.load_state_dict(checkpoint['loss_state_dict'])
-            if scaler is not None and 'scaler' in checkpoint:
-                scaler.load_state_dict(checkpoint['scaler'])
-            logging.info(f"=> resuming checkpoint '{args.io.resume}' (epoch {start_epoch})")
-        else:
-            # loading a bare (model only) checkpoint for fine-tune or evaluation
-            model.load_state_dict(checkpoint)
-            logging.info(f"=> loaded checkpoint '{args.io.resume}' (epoch {start_epoch})")
+        checkpoint = pt_load(args.io.resume, map_location="cpu")
+        start_epoch = restore_training_checkpoint(
+            checkpoint,
+            model,
+            optimizer=optimizer,
+            loss=loss,
+            scaler=scaler,
+            strict=True,
+        )
+        logging.info("Resumed checkpoint %s at epoch %s", args.io.resume, start_epoch)
     else:
         logging.info(f"=> no checkpoint found at '{args.io.resume}', starting from scratch.")
         # save the omegaconf config to a yaml file
@@ -603,16 +530,15 @@ def main(args: DictConfig, start_epoch=0):
         # Saving checkpoints.
         checkpoint_dict = None
         if args.io.save_logs or args.train.save_most_recent:
-            checkpoint_dict = {
-                "epoch": completed_epoch,
-                "step": min(completed_epoch * steps_per_epoch, total_steps),
-                "name": args.train.name,
-                "state_dict": original_model.state_dict(),
-                "optimizer": optimizer.state_dict(),
-                "loss_state_dict": loss.state_dict(),
-            }
-            if scaler is not None:
-                checkpoint_dict["scaler"] = scaler.state_dict()
+            checkpoint_dict = build_training_checkpoint(
+                model,
+                optimizer,
+                loss,
+                epoch=completed_epoch,
+                step=min(completed_epoch * steps_per_epoch, total_steps),
+                name=args.train.name,
+                scaler=scaler,
+            )
 
         if args.io.save_logs and is_master(args):
             should_save_epoch = (
@@ -623,7 +549,7 @@ def main(args: DictConfig, start_epoch=0):
             )
             if should_save_epoch and checkpoint_dict is not None:
                 logging.info("Rank0: saving checkpoint for epoch %s", completed_epoch)
-                torch.save(
+                save_checkpoint(
                     checkpoint_dict,
                     os.path.join(args.io.checkpoint_path, f"epoch_{completed_epoch}.pt"),
                 )
@@ -636,16 +562,15 @@ def main(args: DictConfig, start_epoch=0):
                 #     log_model(experiment, model=original_model, model_name="CIIP!")
 
         if args.train.delete_previous_checkpoint and args.io.save_logs and is_master(args):
-            previous_checkpoint = os.path.join(args.io.checkpoint_path, f"epoch_{completed_epoch - 1}.pt")
-            if os.path.exists(previous_checkpoint):
-                os.remove(previous_checkpoint)
+            remove_checkpoint(
+                os.path.join(args.io.checkpoint_path, f"epoch_{completed_epoch - 1}.pt")
+            )
 
         if args.train.save_most_recent and checkpoint_dict is not None and is_master(args):
-            # try not to corrupt the latest checkpoint if save fails
-            tmp_save_path = os.path.join(args.io.checkpoint_path, "tmp.pt")
-            latest_save_path = os.path.join(args.io.checkpoint_path, LATEST_CHECKPOINT_NAME)
-            torch.save(checkpoint_dict, tmp_save_path)
-            os.replace(tmp_save_path, latest_save_path)
+            save_checkpoint(
+                checkpoint_dict,
+                os.path.join(args.io.checkpoint_path, LATEST_CHECKPOINT_NAME),
+            )
 
         # Ensure all ranks wait for checkpointing before next epoch.
         if args.datamodule.distributed:

@@ -31,6 +31,13 @@ conda env create -f environment.yml
 conda activate ciip
 ```
 
+For a smaller editable installation, install the core package and only the
+optional dependency groups needed for the workflow:
+
+```bash
+python -m pip install -e '.[train,eval]'
+```
+
 CPU-only or newer CUDA installations can use the same package list with a
 matching PyTorch build. Run the commands below from the repository root so the
 local `ciip` package is importable. Large datasets, model checkpoints, and
@@ -109,6 +116,20 @@ python -m visualizations.ssl4eo.hyperbolic_visualization \
 Additional scripts live in `visualizations/ssl4eo/`, `diagnostics/`, and
 `intrinsic-dimension/`.
 
+## Documentation
+
+- [Pretraining settings](docs/pretraining-settings.md) describes the supported
+  modality pairings, Euclidean and Lorentz geometry, Matryoshka learning,
+  objective variants, regularizers, patch reconstruction, and the settings to
+  record for reproducible experiments.
+- [Visualizations and evaluations](docs/visualizations-and-evaluations.md)
+  inventories the downstream datasets and entry points, retrieval and
+  representation diagnostics, plotting tools, and the context that should be
+  reported with each result.
+- [Codebase simplification plan](docs/codebase-simplification-plan.md) defines a
+  staged, deletion-first approach to packaging, tests, configuration, shared
+  training code, evaluation decomposition, and package organization.
+
 ## Example results
 
 Training runs write checkpoints and logs beneath the Hydra output directory.
@@ -135,8 +156,9 @@ visualizations/ssl4eo/   embedding and hyperbolic visualizations
 diagnostics/             result aggregation and diagnostic scripts
 intrinsic-dimension/     standalone intrinsic-dimension analyses
 comparison/              supported external-model comparison code
-docs/                    cleanup audits and repository-maintenance notes
+docs/                    pretraining, evaluation, and visualization guides
 ```
 
 See `ciip/open_clip_train/configs/` for the complete training configuration and
-`docs/README.md` for repository audit documentation.
+the documentation links above for guidance on selecting settings and reporting
+results.

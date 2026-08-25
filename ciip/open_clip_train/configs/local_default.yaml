@@ -52,7 +52,7 @@ loss:
   contrastive_weight: 1.0
   batch_uniformity_enabled: True
   batch_uniformity_weight: 0.05
-  vc_enabled: False
+  vc_reg_enabled: False
   vc_weight: 0.0
   vc_gamma: 1.0
   vc_covariance_weights: [1.0, 1.0]  # [S1, S2] covariance penalties when VC is enabled
