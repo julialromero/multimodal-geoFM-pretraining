@@ -40,8 +40,8 @@ from tqdm import tqdm
 from zarr.storage import ZipStore
 import xarray as xr
 
-from ciip.eval_utils import create_ciip_model
-from ciip.evaluation.normalization_utils import (
+from ciip.evaluation.model_loading import create_ciip_model
+from ciip.evaluation.normalization import (
     CromaNormalize,
     Divideby10000Normalize,
     SSL4EONormalize,

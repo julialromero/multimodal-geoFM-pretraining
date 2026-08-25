@@ -13,7 +13,7 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 
-from ciip.evaluation.output_utils import build_model_tag
+from ciip.evaluation.result_records import build_model_tag, discover_evaluation_results
 
 
 plt.rcParams.update(
@@ -121,7 +121,24 @@ def _has_run_manifest(path: Path, root: Path) -> bool:
 def _iter_eurosat_fewshot_results(root: Path, *, knn_k: Optional[int]) -> Iterable[Tuple[str, float, float]]:
     if not root.exists():
         return
+    versioned = discover_evaluation_results(root)
+    for _, record in versioned:
+        if record.dataset.lower() != "eurosat":
+            continue
+        record_knn_k = record.arguments.get("knn_k")
+        if knn_k is not None and record_knn_k != knn_k:
+            continue
+        k_shot = _safe_float(record.arguments.get("k_shot"))
+        score = _safe_float(record.metrics.get("accuracy_mean"))
+        if k_shot is None or score is None:
+            continue
+        yield _format_model_label(record.arguments), k_shot, score
+
+    # Legacy result files remain readable until runs have been regenerated.
+    versioned_dirs = {path.parent for path, _ in versioned}
     for path in root.rglob("results.json"):
+        if path.parent in versioned_dirs:
+            continue
         if not _has_run_manifest(path.parent, root):
             continue
         if "eurosat_fewshot" not in path.parts:

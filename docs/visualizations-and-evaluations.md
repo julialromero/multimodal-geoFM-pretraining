@@ -13,10 +13,10 @@ current argument contract.
 | EuroSAT | k-NN/few-shot classification and trainable linear probes at multiple label fractions | accuracy/F1 JSON or CSV, per-epoch curves and comparison plots | `ciip.evaluation.eurosat_fewshot_1nn`, `ciip.evaluation.linearprobe_comparison`, or `ciip.evaluation.unified_evaluation` |
 | NeuCo-Bench / SSL4EO-S12 downstream | Embedding export followed by benchmark tasks; fixed-fraction few-shot, episodic few-shot, and layerwise probes | NeuCo-format embedding CSV, per-task metrics/manifests, summaries | `export_neuco_embeddings`, `neuco_fewshot_benchmark`, `neuco_fewshot_episodic`, `neuco_layerwise_probes` |
 | BigEarthNet | Linear-probe evaluation through the unified pipeline | classification metrics and run manifest | `ciip.evaluation.unified_evaluation` |
-| PANGAEA | Batch downstream benchmark, including limited-label/few-shot runs | benchmark result index, mIoU tables/boxplots | `ciip.evaluation.pangaea-results.run_pangaea_batch_eval*` and `diagnostics.pangaea_limited_label_results` |
-| SSL4EO validation | Paired S1/S2 representation diagnostics, retrieval, and intrinsic dimension | JSON/text metrics, caches, spectra and geometry plots | `compute_intrinsic_dimension_ssl4eo_val`, collapse and hyperbolic modules |
+| PANGAEA | Batch downstream benchmark, including limited-label/few-shot runs | benchmark result index, mIoU tables/boxplots | `ciip.evaluation.pangaea_results.run_pangaea_batch_eval*` and `diagnostics.pangaea_limited_label_results` |
+| SSL4EO validation | Paired S1/S2 representation diagnostics, retrieval, and intrinsic dimension | JSON/text metrics, caches, spectra and geometry plots | `scripts.compute_ssl4eo_diagnostics`, collapse and hyperbolic modules |
 | SEN12MS | S1↔S2 cross-modal retrieval and hyperbolic radius analysis | recall/rank metrics, epoch curves, radius distributions and clustering plots | `plot_sen12ms_retrieval`, `sen12ms_hyperbolic_radii` |
-| S2-100K | Global intrinsic-dimension analysis for optical embeddings | ID/effective-rank metrics and manifest | `intrinsic-dimension/compute_id.py` |
+| S2-100K | Global intrinsic-dimension analysis for optical embeddings | ID/effective-rank metrics and manifest | `python -m scripts.compute_intrinsic_dimension` |
 
 Evaluation adapters also support selected TorchGeo pretrained baselines, CROMA,
 random convolutional features, and CIIP checkpoints. Comparisons are meaningful
@@ -26,7 +26,7 @@ label budget.
 ## Cross-modal retrieval
 
 Retrieval tests whether the paired observation is recoverable across modalities
-without fitting a classifier. `visualizations.ssl4eo.hyperbolic_retrieval`
+without fitting a classifier. `ciip.visualization.ssl4eo.hyperbolic_retrieval`
 computes chunked S1→S2 and S2→S1 metrics in projected or backbone space,
 including recall@K and rank statistics. The SEN12MS plotter aggregates saved
 metrics over epochs or Matryoshka dimensions. Report both directions, sample
@@ -39,7 +39,7 @@ The ID utilities remove duplicate/degenerate embeddings and compute FisherS,
 MLE, method-of-moments (MoM), and tight-local-estimator (TLE) intrinsic
 dimensions. The SSL4EO validation script can compute these globally, by
 modality, for downstream/EuroSAT embeddings, and at Matryoshka prefixes. It also
-derives SVD-based effective rank. `diagnostics/global_id_table1/` merges these
+derives SVD-based effective rank. `ciip.visualization.global_id_results` merges these
 outputs with downstream performance and generates model/task scatterplots,
 including Matryoshka-specific grids.
 
@@ -50,7 +50,7 @@ the same measurement.
 
 ## Embedding-collapse diagnostics
 
-`visualizations.ssl4eo.embedding_collapse_diagnostics` extracts backbone and
+`ciip.visualization.ssl4eo.embedding_collapse_diagnostics` extracts backbone and
 projected features for both modalities and provides:
 
 - singular-value spectra, cumulative explained variance, stable/effective rank,
@@ -64,12 +64,12 @@ These diagnostics distinguish total collapse, dimensional collapse, redundant
 coordinates, norm pathologies, and poor cross-modal alignment. Run them before
 interpreting a downstream score, and compare backbone with projected space to
 locate where degeneration occurs. The notebooks under
-`visualizations/ssl4eo/notebooks/` are exploratory front ends, not the canonical
+`ciip/visualization/ssl4eo/notebooks/` are exploratory front ends, not the canonical
 reproducible entry points.
 
 ## Hyperbolic geometry diagnostics
 
-For Lorentz checkpoints, `visualizations.ssl4eo.hyperbolic_visualization`
+For Lorentz checkpoints, `ciip.visualization.ssl4eo.hyperbolic_visualization`
 generates angle/aperture plots, radial distributions, angular PCA projections,
 and cone visualizations. `sen12ms_hyperbolic_radii` adds paired modality radius
 distributions and hierarchical clustering views. These reveal whether radius
@@ -98,7 +98,7 @@ Matryoshka variants.
 
 ## Initialization and representation-space exploration
 
-`visualizations.ssl4eo.initialization_evaluation` contains exploratory analyses
+`ciip.visualization.ssl4eo.initialization_evaluation` contains exploratory analyses
 for pairwise and centroid L2/cosine distances, linear separability, relative
 Mahalanobis-style geometry, PCA, t-SNE, and UMAP. It is useful for checkpoint
 inspection but currently uses script-level output names and research
@@ -118,9 +118,13 @@ python -m ciip.evaluation.run_downstream --config evaluation.json
 It dispatches single- or multi-model EuroSAT few-shot, NeuCo few-shot/episodic,
 and unified tasks. Example JSON contracts live in
 `ciip/evaluation/examples/`. Direct module invocation remains useful when a
-specialized script exposes more controls. Every maintained evaluation writes a
-run manifest or machine-readable result where supported; preserve it beside
-the plot.
+specialized script exposes more controls. The unified pipeline CLI is available
+as `python -m ciip.evaluation.unified_cli`; it requires dataset and output paths
+instead of embedding machine-specific defaults. EuroSAT few-shot runs write a
+versioned `evaluation_result.json` containing the checkpoint, data contract,
+arguments, and metrics. Plotting discovers these records directly while still
+accepting older `results.json` runs; preserve result records beside generated
+plots.
 
 ## Additional evaluations worth reporting
 

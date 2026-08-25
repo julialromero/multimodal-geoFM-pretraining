@@ -11,8 +11,8 @@ from sklearn.metrics import f1_score
 from collections import OrderedDict
 from datetime import datetime
 import warnings 
-from .eval_utils import (
-    CustomTransform,
+from .evaluation.transforms import ImageSampleTransform
+from .evaluation.model_loading import (
     create_ciip_model,
     load_ciip_model_checkpoint,
     modify_ciip_for_eurosat,
@@ -180,7 +180,7 @@ if __name__ =="__main__":
         transforms.Normalize(mean=[1353.439, 1117.253, 1042.253, 947.128, 1199.404, 2002.936, 2373.488, 2300.642, 732.159, 12.113, 1820.932, 1119.173, 2598.82], 
                               std=[65.571, 154.376, 188.262, 278.926, 228.244, 355.633, 454.901, 530.549, 98.718, 1.187, 378.496, 304.439, 501.747])
     ])
-    custom_tx = CustomTransform(tx)
+    custom_tx = ImageSampleTransform(tx)
     download_data(data_path)
     dataloader_train, dataloader_val, dataloader_test = load_data(
         data_path, 

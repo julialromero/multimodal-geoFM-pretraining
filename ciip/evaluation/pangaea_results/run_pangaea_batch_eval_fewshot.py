@@ -17,7 +17,7 @@ from typing import Dict, List, Optional
 import matplotlib.pyplot as plt
 import numpy as np
 
-from ciip.evaluation.output_utils import (
+from ciip.evaluation.result_records import (
     build_model_tag,
     ensure_dir,
     write_json,
@@ -61,11 +61,11 @@ DATASETS: List[DatasetSpec] = [
         preprocessing="seg_default",
         criterion="cross_entropy",
     ),
-    # DatasetSpec(
-    #     name="spacenet7",
-    #     preprocessing="seg_default",
-    #     criterion="dice",
-    # ),
+    DatasetSpec(
+        name="spacenet7",
+        preprocessing="seg_default",
+        criterion="dice",
+    ),
     DatasetSpec(
         name="sen1floods11",
         preprocessing="seg_default",
@@ -79,13 +79,13 @@ DATASETS: List[DatasetSpec] = [
 ]
 
 MODELS: List[ModelSpec] = [
-    ModelSpec(
-        encoder="ciip_s2_vit",
-        model_type="ciip_checkpoint",
-        model_path="2026_01_29_matryoshka_vit",
-        ciip_epoch=300,
-        encoder_weights="/local/ms-data/SSL4EO/model/2026_01_29_matryoshka_vit/checkpoints/epoch_300.pt",
-    ),
+    # ModelSpec(
+    #     encoder="ciip_s2_vit",
+    #     model_type="ciip_checkpoint",
+    #     model_path="2026_01_29_matryoshka_vit",
+    #     ciip_epoch=300,
+    #     encoder_weights="/local/ms-data/SSL4EO/model/2026_01_29_matryoshka_vit/checkpoints/epoch_300.pt",
+    # ),
     # ModelSpec(
     #     name="ciip_s2_epoch50_bandnorm_8k",
     #     encoder="ciip_s2",
@@ -103,18 +103,62 @@ MODELS: List[ModelSpec] = [
     #     encoder="ciip_s2_vit",
     #     encoder_weights="/local/ms-data/SSL4EO/model/1_8_2026/checkpoints/epoch_120.pt",
     # ),
-    ModelSpec(
-        encoder="ciip_s2_vit",
-        model_type="ciip_checkpoint",
-        model_path="1_28-ViT-DAI",
-        ciip_epoch=300,
-        encoder_weights="/local/ms-data/SSL4EO/model/1_28-ViT-DAI/checkpoints/epoch_300.pt",
-    ),
+    # ModelSpec(
+    #     encoder="ciip_s2_vit",
+    #     model_type="ciip_checkpoint",
+    #     model_path="1_28-ViT-DAI",
+    #     ciip_epoch=300,
+    #     encoder_weights="/local/ms-data/SSL4EO/model/1_28-ViT-DAI/checkpoints/epoch_300.pt",
+    # ),
     
     # ModelSpec(
-    #     name="remoteclip",
     #     encoder="remoteclip",
+    #     model_type="backbone_only",
+    #     model_weights="remoteclip",
     # ),
+    # # # @ codex add llama-ms-clip
+    # ModelSpec(
+    #     name="llama_ms_clip",
+    #     encoder="llama_ms_clip",
+    # ),
+    ModelSpec(
+        name="resnet50_ssl4eo_moco",
+        encoder="resnet50_ssl4eo_moco",
+    ),
+    # add vit small moco
+    ModelSpec(
+        name="vit_small_ssl4eo_moco",
+        encoder="vit_small_ssl4eo_moco",
+    ),
+
+
+    ModelSpec(
+        name="scalemae",
+        encoder="scalemae",
+    ),
+    ModelSpec(
+        name="croma_optical",
+        encoder="croma_optical",
+    ),
+    # ModelSpec(
+    #     name="dofa",
+    #     encoder="dofa",
+    # ),
+
+
+    ModelSpec(
+        encoder="ssl4eo_moco",
+        model_type="torchgeo_resnet50",
+        model_weights="moco",
+    ),
+    # ModelSpec(
+    #     name="terramind_large",
+    #     encoder="terramind_large",
+    # ),
+    # ModelSpec(
+    #     name='ssl4eo_mae',
+    #     encoder="ssl4eo_mae_optical"
+    # )
     # ModelSpec(
     #     name="ciip_s2_epoch50_scaled_8k",
     #     encoder="ciip_s2",
@@ -126,97 +170,15 @@ MODELS: List[ModelSpec] = [
     #     encoder_weights="/local/ms-data/SSL4EO/model/1_8_2026/checkpoints/epoch_70.pt",
     # ),
 
-    # ModelSpec(
-    #     name="ciip_s2_matryoshka_epoch100_scaled_12k",
-    #     encoder="ciip_s2_matryoshka",
-    #     encoder_weights="/local/ms-data/SSL4EO/model/2025_12_28-20_16_37-model_resnet50-lr_0.001-b_2-j_6-p_amp_bfloat16/checkpoints/epoch_100.pt",
-    # ),
-    # ModelSpec(
-    #     name="ciip_s2_vit_epoch300_bandwise_12k_dai",
-    #     encoder="ciip_s2_vit",
-    #     encoder_weights="/local/ms-data/SSL4EO/model/2026_02_01_vit_ciip_dai_bandwise/checkpoints/epoch_300.pt",
-    # ),
-
-    # ModelSpec(
-    #     name="scalemae",
-    #     encoder="scalemae",
-    # ),
-    # ModelSpec(
-    #     name="croma_optical",
-    #     encoder="croma_optical",
-    # ),
-    # ModelSpec(
-    #     name="dofa",
-    #     encoder="dofa",
-    # ),
-    # ModelSpec(
-    #     name="ssl4eo_moco",
-    #     encoder="ssl4eo_moco",
-    # ),
-    # ModelSpec(
-    #     name="terramind_large",
-    #     encoder="terramind_large",
-    # ),
-    # ModelSpec(
-    #     name='ssl4eo_mae',
-    #     encoder="ssl4eo_mae_optical"
-    # )
+    ModelSpec(
+        encoder="ciip_s2_vit",
+        model_type="ciip_checkpoint",
+        model_path="2026_02_01_vit_ciip_dai_bandwise",
+        ciip_epoch=300,
+        encoder_weights="/local/ms-data/SSL4EO/model/2026_02_01_vit_ciip_dai_bandwise/checkpoints/epoch_300.pt",
+    ),
     
 ]
-
-def _model_tag(model: ModelSpec) -> str:
-    return build_model_tag(
-        model_type=model.model_type,
-        model_weights=model.model_weights,
-        model_path=model.model_path,
-        ciip_epoch=model.ciip_epoch,
-    )
-
-
-def _sanitize_path_component(value: str) -> str:
-    return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in value.strip()).strip("_")
-
-
-def validate_models(models: List[ModelSpec]) -> None:
-    for model in models:
-        tag = _model_tag(model)
-        if not tag:
-            raise ValueError(f"Model {model} produced an empty tag.")
-        if model.model_type == "ciip_checkpoint":
-            if not model.model_path or model.ciip_epoch is None:
-                raise ValueError(f"CIIP checkpoints must define model_path and ciip_epoch: {model}")
-        if model.model_type == "backbone_only" and not model.model_weights:
-            raise ValueError(f"Backbone-only models must define model_weights: {model}")
-
-
-
-def _read_limited_label_train(path: Path) -> float | None:
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                stripped = line.strip()
-                if not stripped or stripped.startswith("#"):
-                    continue
-                if not stripped.startswith("limited_label_train:"):
-                    continue
-                value = stripped.split(":", 1)[1].split("#", 1)[0].strip()
-                if not value:
-                    return None
-                try:
-                    return float(value)
-                except ValueError:
-                    return None
-    except FileNotFoundError:
-        return None
-    return None
-
-
-def _metrics_output_dir(results_root: Path, exp_dir: Path) -> Path:
-    config_path = exp_dir / "configs" / "config.yaml"
-    value = _read_limited_label_train(config_path)
-    if value is not None and abs(value - 0.1) < 1e-6:
-        return results_root / "fewshot10"
-    return results_root
 
 
 def pick_preprocessing(base_name: str, norm_key: str) -> str:
@@ -284,60 +246,6 @@ def write_experiment_csv(exp_dir: Path, row: Dict[str, object]) -> Path:
     return out_path
 
 
-def write_results_output(
-    output_root: Path,
-    *,
-    dataset: DatasetSpec,
-    model: ModelSpec,
-    normalization: str,
-    preprocessing: str,
-    metrics: Dict[str, float],
-    exp_dir: Path,
-    log_path: Path,
-    label_split: str,
-) -> Path:
-    model_tag = _model_tag(model)
-    output_dir = ensure_dir(
-        output_root
-        / "pangaea_segmentation"
-        / label_split
-        / model_tag
-        / _sanitize_path_component(dataset.name)
-        / _sanitize_path_component(normalization)
-        / _sanitize_path_component(preprocessing)
-    )
-    config = {
-        "dataset": dataset.name,
-        "encoder": model.encoder,
-        "encoder_weights": model.encoder_weights,
-        "decoder": dataset.decoder,
-        "preprocessing": preprocessing,
-        "criterion": dataset.criterion,
-        "task": dataset.task,
-        "normalization": normalization,
-        "model_type": model.model_type,
-        "model_weights": model.model_weights,
-        "model_path": model.model_path,
-        "ciip_epoch": model.ciip_epoch,
-        "label_split": label_split,
-    }
-    write_run_manifest(
-        output_dir,
-        task_name="pangaea_segmentation",
-        config=config,
-        extra={"exp_dir": str(exp_dir), "log_path": str(log_path)},
-    )
-    results = {
-        **config,
-        "exp_dir": str(exp_dir),
-        "log_path": str(log_path),
-        "mIoU": metrics["mIoU"],
-        "mF1": metrics["mF1"],
-        "mAcc": metrics["mAcc"],
-    }
-    return write_json(output_dir / "results.json", results)
-
-
 def load_experiment_rows(result_root: Path) -> List[Dict[str, object]]:
     rows: List[Dict[str, object]] = []
     for csv_path in result_root.rglob("metrics.csv"):
@@ -398,6 +306,31 @@ def plot_metrics(rows: List[Dict[str, object]], output_dir: Path) -> None:
         plt.close(fig)
 
 
+def _model_tag(model: ModelSpec) -> str:
+    return build_model_tag(
+        model_type=model.model_type,
+        model_weights=model.model_weights,
+        model_path=model.model_path,
+        ciip_epoch=model.ciip_epoch,
+    )
+
+
+def _sanitize_path_component(value: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in value.strip()).strip("_")
+
+
+def validate_models(models: List[ModelSpec]) -> None:
+    for model in models:
+        tag = _model_tag(model)
+        if not tag:
+            raise ValueError(f"Model {model} produced an empty tag.")
+        if model.model_type == "ciip_checkpoint":
+            if not model.model_path or model.ciip_epoch is None:
+                raise ValueError(f"CIIP checkpoints must define model_path and ciip_epoch: {model}")
+        if model.model_type == "backbone_only" and not model.model_weights:
+            raise ValueError(f"Backbone-only models must define model_weights: {model}")
+
+
 def load_existing_results(path: Path) -> set[tuple[str, str, str, str]]:
     if not path.exists():
         return set()
@@ -406,7 +339,7 @@ def load_existing_results(path: Path) -> set[tuple[str, str, str, str]]:
         reader = csv.DictReader(handle)
         for row in reader:
             label_split = (row.get("label_split") or "").strip().lower()
-            if label_split != "full":
+            if label_split != "10%":
                 continue
             dataset = row.get("dataset")
             model = row.get("model")
@@ -418,12 +351,66 @@ def load_existing_results(path: Path) -> set[tuple[str, str, str, str]]:
     return existing
 
 
+def write_results_output(
+    output_root: Path,
+    *,
+    dataset: DatasetSpec,
+    model: ModelSpec,
+    normalization: str,
+    preprocessing: str,
+    metrics: Dict[str, float],
+    exp_dir: Path,
+    log_path: Path,
+    label_split: str,
+) -> Path:
+    model_tag = _model_tag(model)
+    output_dir = ensure_dir(
+        output_root
+        / "pangaea_segmentation"
+        / label_split
+        / model_tag
+        / _sanitize_path_component(dataset.name)
+        / _sanitize_path_component(normalization)
+        / _sanitize_path_component(preprocessing)
+    )
+    config = {
+        "dataset": dataset.name,
+        "encoder": model.encoder,
+        "encoder_weights": model.encoder_weights,
+        "decoder": dataset.decoder,
+        "preprocessing": preprocessing,
+        "criterion": dataset.criterion,
+        "task": dataset.task,
+        "normalization": normalization,
+        "model_type": model.model_type,
+        "model_weights": model.model_weights,
+        "model_path": model.model_path,
+        "ciip_epoch": model.ciip_epoch,
+        "label_split": label_split,
+    }
+    write_run_manifest(
+        output_dir,
+        task_name="pangaea_segmentation",
+        config=config,
+        extra={"exp_dir": str(exp_dir), "log_path": str(log_path)},
+    )
+    results = {
+        **config,
+        "exp_dir": str(exp_dir),
+        "log_path": str(log_path),
+        "mIoU": metrics["mIoU"],
+        "mF1": metrics["mF1"],
+        "mAcc": metrics["mAcc"],
+    }
+    return write_json(output_dir / "results.json", results)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run Pangaea segmentation evaluations.")
     parser.add_argument(
         "--work-dir",
         type=Path,
-        default=Path("./batch_runs"),
+        default=Path("/local/ms-data/pangaea-bench/batch_runs/fewshot10"),
         help="Directory to store experiment outputs.",
     )
     parser.add_argument(
@@ -464,9 +451,9 @@ def main() -> None:
     work_dir.mkdir(parents=True, exist_ok=True)
     output_root = (args.output_dir or work_dir / "evaluation_outputs").resolve()
 
-    results_root = work_dir / "metrics"
+    results_root = work_dir / "metrics" / "fewshot10"
     results_root.mkdir(parents=True, exist_ok=True)
-    combined_metrics_path = Path("/local/ms-data/pangaea-bench/batch_runs/metrics_summary/combined_metrics.csv")
+    combined_metrics_path = Path("/local/ms-data/pangaea-bench/batch_runs/metrics_summary/10pct/combined_metrics.csv")
     existing_results = load_existing_results(combined_metrics_path)
 
     rows: List[Dict[str, object]] = []
@@ -495,7 +482,7 @@ def main() -> None:
                     "--nproc_per_node=1",
                     f"--master_port={master_port}",
                     "pangaea/run.py",
-                    "--config-name=train",
+                    "--config-name=train_fewshot10",
                     f"dataset={dataset.name}",
                     f"encoder={model.encoder}",
                     f"decoder={dataset.decoder}",
@@ -503,14 +490,18 @@ def main() -> None:
                     f"criterion={dataset.criterion}",
                     f"task={dataset.task}",
                     f"work_dir={work_dir}",
+                    "task.trainer.eval_interval=5",
+                    "task.trainer.early_stopping_patience_evals=1000",
                 ]
                 if dataset.name == "ai4smallfarms":
                     cmd.extend(
                         [
                             "data_replicate=2",
                             "task.trainer.best_metric_key=IoU",
+                            "batch_size=2",
                         ]
                     )
+              
                 if model.encoder_weights:
                     cmd.append(f"encoder.encoder_weights={model.encoder_weights}")
 
@@ -523,16 +514,12 @@ def main() -> None:
                     continue
 
                 before_dirs = {p for p in work_dir.iterdir() if p.is_dir()}
-                print(
-                    f"\n\n------\n\nStarting experiment for model={model_tag}, "
-                    f"dataset={dataset.name}, normalization={norm_key}"
-                )
                 subprocess.run(cmd, check=True, cwd=repo_root, env=env)
                 exp_dir = find_new_experiment_dir(work_dir, before_dirs)
 
                 log_path = find_log_file(exp_dir)
                 metrics = parse_segmentation_metrics(log_path, split="test")
-                label_split = "full"
+                label_split = "10%"
 
                 row = {
                     "experiment": exp_dir.name,
@@ -561,8 +548,7 @@ def main() -> None:
                 rows.append(row)
                 existing_results.add(result_key)
 
-                output_dir = _metrics_output_dir(results_root, exp_dir)
-                summary_path = output_dir / f"{exp_dir.name}_metrics.csv"
+                summary_path = results_root / f"{exp_dir.name}_metrics.csv"
                 summary_path.write_text(metrics_csv.read_text())
 
                 time.sleep(1)

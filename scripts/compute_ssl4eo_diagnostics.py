@@ -27,9 +27,9 @@ import torchvision.transforms as T
 import skdim.id as id
 import json
 from ciip.open_clip_train.data import SSL4EODataset
-from ciip.evaluation.model_utils import build_model_from_checkpoint
-from ciip.evaluation.normalization_utils import IMAGENET_MEAN, IMAGENET_STD, MODALITY_STATS
-from visualizations.ssl4eo.embedding_collapse_diagnostics import compute_singular_values
+from ciip.models.evaluation_adapters import build_model_from_checkpoint
+from ciip.evaluation.normalization import IMAGENET_MEAN, IMAGENET_STD, MODALITY_STATS
+from ciip.visualization.ssl4eo.embedding_collapse_diagnostics import compute_singular_values
 import neuco_downstream_loader as neuco_loader
 
 

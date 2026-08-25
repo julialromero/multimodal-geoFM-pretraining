@@ -32,7 +32,7 @@ jobs:
           ciip/open_clip_train/config_validation.py
           ciip/open_clip_train/objectives.py
           ciip/open_clip_train/optimizer.py
-          ciip/open_clip_train/utils.py
+          ciip/open_clip_train/factories.py
           tests
       - name: Run fast tests
         run: python -m pytest -q

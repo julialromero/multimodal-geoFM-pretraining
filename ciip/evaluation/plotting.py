@@ -21,7 +21,7 @@ from torchgeo.models import (
 )
 
 from ciip.model_ciip import CIIP
-from ciip.eval_utils import create_ciip_model
+from ciip.evaluation.model_loading import create_ciip_model
 
 def sample_episode(dataset, n_way, k_shot, query_per_class=15):
     """

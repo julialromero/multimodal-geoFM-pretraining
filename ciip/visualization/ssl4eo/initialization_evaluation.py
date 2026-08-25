@@ -29,7 +29,7 @@ from sklearn.preprocessing import StandardScaler
 
 from ciip.open_clip_train.distributed import init_distributed_device, is_master
 from ciip.open_clip_train.precision import get_autocast
-from ciip.open_clip_train.utils import create_model
+from ciip.open_clip_train.factories import create_model
 
 
 def compare_keys(model, state_dict):

@@ -17,7 +17,8 @@ from sklearn.metrics import accuracy_score, f1_score
 from tqdm import tqdm
 import torch.nn as nn
 import torch.optim as optim
-from .eval_utils import create_ciip_model, load_ciip_model_checkpoint, CustomTransform
+from .evaluation.model_loading import create_ciip_model, load_ciip_model_checkpoint
+from .evaluation.transforms import ImageSampleTransform
 
 from .model import ResNet50
 import json
@@ -124,8 +125,8 @@ other_transform_pipeline = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.Normalize(mean=mean_list, std=std_list),
 ])
-custom_transform = CustomTransform(other_transform_pipeline)
-custom_transform_ciip = CustomTransform(ciip_transform_pipeline)
+custom_transform = ImageSampleTransform(other_transform_pipeline)
+custom_transform_ciip = ImageSampleTransform(ciip_transform_pipeline)
 
 def drop_last_linear_layer(model):
     """

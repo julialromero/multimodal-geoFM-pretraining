@@ -43,7 +43,7 @@ from ciip.open_clip_train.distributed import (
     init_distributed_device,
     is_master,
 )
-from ciip.open_clip_train.file_utils import (
+from ciip.open_clip_train.artifact_io import (
     pt_load,
     remote_sync,
     start_sync_process,
@@ -55,7 +55,7 @@ from ciip.open_clip_train.scheduler import (
     resolve_warmup_steps,
 )
 from ciip.open_clip_train.train import train_one_epoch
-from ciip.open_clip_train.utils import create_loss, create_model
+from ciip.open_clip_train.factories import create_loss, create_model
 
 
 LATEST_CHECKPOINT_NAME = "epoch_latest.pt"

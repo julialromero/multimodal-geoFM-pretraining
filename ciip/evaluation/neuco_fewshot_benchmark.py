@@ -20,13 +20,13 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import numpy as np
 import torch
 
-from ciip.evaluation.model_utils import build_evaluation_adapter
-from ciip.evaluation.normalization_utils import (
+from ciip.models.evaluation_adapters import build_evaluation_adapter
+from ciip.evaluation.normalization import (
     DEFAULT_NORMALIZATION_METHOD,
     NORMALIZATION_METHODS,
     resolve_normalization_method,
 )
-from ciip.evaluation.output_utils import (
+from ciip.evaluation.result_records import (
     build_model_tag,
     ensure_dir,
     write_json,

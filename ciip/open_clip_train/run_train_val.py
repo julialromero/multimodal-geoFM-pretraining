@@ -16,7 +16,7 @@ from ciip.open_clip_train.config_validation import validate_training_config
 from ciip.open_clip_train.train import train_one_epoch
 from ciip.open_clip_train.optimizer import create_optimizer
 from ciip.open_clip_train.scheduler import cosine_lr
-from ciip.open_clip_train.utils import create_loss, create_model
+from ciip.open_clip_train.factories import create_loss, create_model
 
 from torchvision.transforms import v2
 # from torchvision.transforms import *

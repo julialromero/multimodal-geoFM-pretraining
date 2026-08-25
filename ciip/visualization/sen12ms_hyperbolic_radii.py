@@ -28,12 +28,12 @@ from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 
 from ciip import lorentz as L
-from ciip.evaluation.model_utils import build_evaluation_adapter
+from ciip.models.evaluation_adapters import build_evaluation_adapter
 from ciip.evaluation.sen12ms_retrieval import Sen12MSRetrievalDataset
 from ciip.evaluation.unified_evaluation import _infer_model_in_channels
 from ciip.model_ciip import LorentzCIIP
-from visualizations.ssl4eo.embedding_collapse_diagnostics import extract_embeddings_for_dataset
-from visualizations.ssl4eo.hyperbolic_visualization import compute_hyperbolic_context
+from ciip.visualization.ssl4eo.embedding_collapse_diagnostics import extract_embeddings_for_dataset
+from ciip.visualization.ssl4eo.hyperbolic_visualization import compute_hyperbolic_context
 
 _LOG = logging.getLogger("sen12ms_hyperbolic_radii")
 

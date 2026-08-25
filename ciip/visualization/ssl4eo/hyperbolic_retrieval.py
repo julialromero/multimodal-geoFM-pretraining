@@ -7,7 +7,7 @@ from typing import Dict, Iterable, Sequence
 
 import torch
 from ciip import lorentz as L
-from visualizations.ssl4eo.embedding_collapse_diagnostics import ModalityEmbeddings
+from ciip.visualization.ssl4eo.embedding_collapse_diagnostics import ModalityEmbeddings
 
 
 @dataclass(frozen=True)

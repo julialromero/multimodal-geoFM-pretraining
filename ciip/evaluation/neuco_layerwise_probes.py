@@ -39,8 +39,8 @@ from ciip.evaluation.export_neuco_embeddings import (
     E2SChallengeDataset,
     InputResizer,
 )
-from ciip.evaluation.normalization_utils import Divideby10000Normalize
-from ciip.evaluation.model_utils import (
+from ciip.evaluation.normalization import Divideby10000Normalize
+from ciip.models.evaluation_adapters import (
     S2_WAVELENGTHS_UM,
     build_model_from_checkpoint,
     build_evaluation_adapter,

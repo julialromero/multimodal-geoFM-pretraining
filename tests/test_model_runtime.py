@@ -345,7 +345,7 @@ class CIIPRuntimeBaselineTests(unittest.TestCase):
         torch.testing.assert_close(output["s2_features"].norm(dim=-1), torch.ones(2))
 
     def test_shared_model_factory_builds_euclidean_model(self) -> None:
-        from ciip.open_clip_train.utils import create_model
+        from ciip.open_clip_train.factories import create_model
 
         model_config = SimpleNamespace(
             embed_dim=8,

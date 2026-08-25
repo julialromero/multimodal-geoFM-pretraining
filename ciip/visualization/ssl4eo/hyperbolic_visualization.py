@@ -25,7 +25,7 @@ from omegaconf import DictConfig, OmegaConf
 from ciip import lorentz as L
 from ciip.model_ciip import LorentzCIIP
 from ciip.open_clip_train.data import SSL4EODataset
-from visualizations.ssl4eo.embedding_collapse_diagnostics import (
+from ciip.visualization.ssl4eo.embedding_collapse_diagnostics import (
     ensure_hydra_original_cwd,
     # load_model_from_checkpoint,
     resolve_input_dtype,
