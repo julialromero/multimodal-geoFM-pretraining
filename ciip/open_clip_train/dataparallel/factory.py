@@ -11,8 +11,9 @@ from ciip.open_clip_train.dataparallel.model_arch import (
     maybe_data_parallel,
     unwrap_dataparallel,
 )
-from ciip.open_clip_train.file_utils import pt_load
-from ciip.open_clip_train.utils import create_loss
+from ciip.open_clip_train.checkpointing import restore_training_checkpoint
+from ciip.open_clip_train.artifact_io import pt_load
+from ciip.open_clip_train.factories import create_loss
 
 
 def _load_checkpoint_if_available(model: torch.nn.Module, resume_path: str, device: torch.device) -> None:
@@ -23,15 +24,7 @@ def _load_checkpoint_if_available(model: torch.nn.Module, resume_path: str, devi
         return
 
     checkpoint = pt_load(resume_path, map_location=device)
-    state_dict = checkpoint.get("state_dict", checkpoint)
-    if any(key.startswith("module.") for key in state_dict):
-        state_dict = {key.replace("module.", "", 1): value for key, value in state_dict.items()}
-
-    missing, unexpected = model.load_state_dict(state_dict, strict=False)
-    if missing:
-        logging.info("Missing keys when loading checkpoint: %s", missing)
-    if unexpected:
-        logging.info("Unexpected keys when loading checkpoint: %s", unexpected)
+    restore_training_checkpoint(checkpoint, model, strict=False)
     logging.info("Loaded checkpoint weights from %s", resume_path)
 
 

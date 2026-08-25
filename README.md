@@ -107,14 +107,14 @@ For a trained Lorentz model, generate angle/aperture, radial, angular-PCA, and
 cone plots with:
 
 ```bash
-python -m visualizations.ssl4eo.hyperbolic_visualization \
+python -m ciip.visualization.ssl4eo.hyperbolic_visualization \
   --config /path/to/training-config.yaml \
   --checkpoint /path/to/checkpoint.pt \
   --output-dir diagnostics/hyperbolic
 ```
 
-Additional scripts live in `visualizations/ssl4eo/`, `diagnostics/`, and
-`intrinsic-dimension/`.
+Additional scripts live in `ciip/visualization/ssl4eo/`, `diagnostics/`, and
+`scripts/`.
 
 ## Documentation
 
@@ -126,9 +126,6 @@ Additional scripts live in `visualizations/ssl4eo/`, `diagnostics/`, and
   inventories the downstream datasets and entry points, retrieval and
   representation diagnostics, plotting tools, and the context that should be
   reported with each result.
-- [Codebase simplification plan](docs/codebase-simplification-plan.md) defines a
-  staged, deletion-first approach to packaging, tests, configuration, shared
-  training code, evaluation decomposition, and package organization.
 
 ## Example results
 
@@ -152,9 +149,9 @@ repository does not claim a canonical score in the absence of those artifacts.
 
 ```text
 ciip/                    models, losses, data, training, and evaluation
-visualizations/ssl4eo/   embedding and hyperbolic visualizations
+ciip/visualization/ssl4eo/   embedding and hyperbolic visualizations
 diagnostics/             result aggregation and diagnostic scripts
-intrinsic-dimension/     standalone intrinsic-dimension analyses
+scripts/                 standalone research analyses
 comparison/              supported external-model comparison code
 docs/                    pretraining, evaluation, and visualization guides
 ```

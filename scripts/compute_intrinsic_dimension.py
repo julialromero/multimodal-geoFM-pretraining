@@ -13,22 +13,22 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from visualizations.ssl4eo.embedding_collapse_diagnostics import compute_singular_values
+from ciip.visualization.ssl4eo.embedding_collapse_diagnostics import compute_singular_values
 
 import skdim.id as id
 import torchvision
 from torchvision import transforms as T
 from s2geo_dataset import S2Geo
 S2_100K_ROOT = Path("/local/ms-data/S2_100K")
-from ciip.evaluation.model_utils import build_model_from_checkpoint
-from ciip.evaluation.normalization_utils import (
+from ciip.models.evaluation_adapters import build_model_from_checkpoint
+from ciip.evaluation.normalization import (
     IMAGENET_MEAN,
     IMAGENET_STD,
     MODALITY_STATS,
     S2ScaleTransform,
     SelectS2Channels10,
 )
-from ciip.evaluation.output_utils import write_run_manifest
+from ciip.evaluation.result_records import write_run_manifest
 
 ssl4eo_s2a_norm_transform = T.Normalize(
     mean=MODALITY_STATS["s2l2a"][0], std=MODALITY_STATS["s2l2a"][1]

@@ -13,7 +13,7 @@ except ImportError:  # pragma: no cover - optional dependency
 
 from ciip.model_ciip import CIIP, LorentzCIIP
 from ciip.model import LayerNorm, Transformer
-from ciip.open_clip_train.utils import convert_weights_to_lp, get_cast_dtype
+from ciip.open_clip_train.factories import convert_weights_to_lp, get_cast_dtype
 from torchgeo.models import ResNet50_Weights, resnet50
 
 

@@ -39,3 +39,20 @@ def test_dataparallel_training_has_no_second_epoch_loop() -> None:
     source = path.read_text()
     assert "def train_one_epoch" not in source
     assert "from ciip.open_clip_train.train import train_one_epoch" in source
+
+
+def test_maintained_evaluation_modules_stay_reviewable() -> None:
+    evaluation_dir = Path(__file__).resolve().parents[1] / "ciip/evaluation"
+    oversized = {
+        path.name: len(path.read_text().splitlines())
+        for path in evaluation_dir.glob("*.py")
+        if len(path.read_text().splitlines()) > 1000
+    }
+    assert oversized == {}
+
+
+def test_first_party_package_paths_are_importable() -> None:
+    root = Path(__file__).resolve().parents[1]
+    assert not (root / "visualizations").exists()
+    assert not (root / "intrinsic-dimension").exists()
+    assert not (root / "ciip/evaluation/pangaea-results").exists()

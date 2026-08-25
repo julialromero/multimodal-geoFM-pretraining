@@ -1088,7 +1088,7 @@ class Clamp_S1:
 class SentinelNormalize:
     """
     Normalization for Sentinel imagery (2-sigma clipping -> uint8).
-    Mirrors ciip.evaluation.normalization_utils.SentinelNormalize.
+    Mirrors ciip.evaluation.normalization.SentinelNormalize.
     """
 
     def __init__(self, mean, std):

@@ -35,7 +35,7 @@ from .logger import setup_logging
 from .params import parse_args
 from .scheduler import cosine_lr, const_lr, const_lr_cooldown
 from .train import train_one_epoch, evaluate
-from .file_utils import pt_load, check_exists, start_sync_process, remote_sync
+from .artifact_io import pt_load, check_exists, start_sync_process, remote_sync
 
 
 LATEST_CHECKPOINT_NAME = "epoch_latest.pt"

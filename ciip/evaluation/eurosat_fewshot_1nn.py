@@ -17,8 +17,8 @@ from torch.utils.data import DataLoader
 from torchgeo.datasets import EuroSAT
 from torchvision import transforms
 
-from ciip.eval_utils import CustomTransform
-from ciip.evaluation.normalization_utils import (
+from ciip.evaluation.transforms import ImageSampleTransform
+from ciip.evaluation.normalization import (
     DEFAULT_NORMALIZATION_METHOD,
     NORMALIZATION_METHODS,
     NORMALIZATION_METHOD_SSL4EO,
@@ -27,10 +27,12 @@ from ciip.evaluation.normalization_utils import (
     resolve_normalization_method_for_weights,
     select_ssl4eo_transform,
 )
-from ciip.evaluation.model_utils import build_evaluation_adapter
-from ciip.evaluation.output_utils import (
+from ciip.models.evaluation_adapters import build_evaluation_adapter
+from ciip.evaluation.result_records import (
+    EvaluationResult,
     build_model_tag,
     ensure_dir,
+    write_evaluation_result,
     write_json,
     write_run_manifest,
 )
@@ -253,8 +255,8 @@ def _build_eurosat_loaders(
         ),
     }
 
-    train_transform = CustomTransform(data_transforms["train"])
-    eval_transform = CustomTransform(data_transforms["eval"])
+    train_transform = ImageSampleTransform(data_transforms["train"])
+    eval_transform = ImageSampleTransform(data_transforms["eval"])
 
     datasets = {
         split: EuroSAT(
@@ -447,6 +449,31 @@ def run_from_args(args: argparse.Namespace) -> Path:
         },
     )
     out_path = write_json(out_dir / "results.json", results)
+    write_evaluation_result(
+        out_dir / "evaluation_result.json",
+        EvaluationResult(
+            checkpoint=str(cfg.checkpoint) if cfg.checkpoint else None,
+            dataset="EuroSAT",
+            split="test",
+            modality="s2",
+            bands=tuple(eurosat_bands),
+            feature_space=args.feature,
+            seed=args.seed,
+            arguments={
+                "model_type": args.model_type,
+                "model_weights": args.model_weights,
+                "model_path": args.model_path,
+                "ciip_epoch": args.ciip_epoch,
+                "normalization_method": norm_label,
+                "n_way": args.n_way,
+                "k_shot": args.k_shot,
+                "knn_k": args.knn_k,
+                "queries_per_class": args.queries_per_class,
+                "episodes": args.episodes,
+            },
+            metrics=metrics,
+        ),
+    )
 
     print(f"{args.knn_k}-NN {args.n_way}-way {args.k_shot}-shot accuracy: {metrics['accuracy_mean']:.4f}")
     print(f"95% CI: ±{metrics['accuracy_ci95']:.4f} (std={metrics['accuracy_std']:.4f})")

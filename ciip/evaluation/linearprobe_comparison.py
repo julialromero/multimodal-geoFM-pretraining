@@ -22,10 +22,10 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 
-from ciip.eval_utils import CustomTransform
-from ciip.evaluation.model_utils import build_model_from_checkpoint
-from ciip.evaluation.output_utils import write_run_manifest
-from ciip.evaluation.utils import plot_primary_over_epochs
+from ciip.evaluation.transforms import ImageSampleTransform
+from ciip.models.evaluation_adapters import build_model_from_checkpoint
+from ciip.evaluation.result_records import write_run_manifest
+from ciip.evaluation.plotting import plot_primary_over_epochs
 
 
 MEAN = {
@@ -81,8 +81,8 @@ data_transforms = {
     ]),
 }
 
-train_transform = CustomTransform(data_transforms["train"])
-val_transform = CustomTransform(data_transforms["val"])
+train_transform = ImageSampleTransform(data_transforms["train"])
+val_transform = ImageSampleTransform(data_transforms["val"])
 
 # def drop_last_linear_layer(model):
 #     """Replace the model's final linear layer with an identity function."""

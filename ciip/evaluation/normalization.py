@@ -21,17 +21,14 @@ from ciip.open_clip_train.data import (
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
 
-NORMALIZATION_METHOD_DIVIDE = "divideby10000"
-NORMALIZATION_METHOD_BANDWISE = "bandwisenorm"
-NORMALIZATION_METHOD_SSL4EO = "ssl4eonorm"
-NORMALIZATION_METHOD_IMAGENET = "imagenet"
-NORMALIZATION_METHODS = (
-    NORMALIZATION_METHOD_DIVIDE,
+from ciip.evaluation.normalization_contract import (
+    DEFAULT_NORMALIZATION_METHOD,
     NORMALIZATION_METHOD_BANDWISE,
-    NORMALIZATION_METHOD_SSL4EO,
+    NORMALIZATION_METHOD_DIVIDE,
     NORMALIZATION_METHOD_IMAGENET,
+    NORMALIZATION_METHOD_SSL4EO,
+    NORMALIZATION_METHODS,
 )
-DEFAULT_NORMALIZATION_METHOD = NORMALIZATION_METHOD_DIVIDE
 
 _SSL4EO_ALIAS = "ssl4eobandwisenorm"
 
@@ -191,7 +188,7 @@ def resolve_normalization_method(
     normalization_method: Optional[str],
 ) -> str:
     if model_in_channels == 3:
-        return NORMALIZATION_METHOD_IMAGENET #NORMALIZATION_METHOD_BANDWISE
+        return NORMALIZATION_METHOD_IMAGENET  # NORMALIZATION_METHOD_BANDWISE
     normalized = (normalization_method or "").strip().lower()
     if normalized == _SSL4EO_ALIAS:
         return NORMALIZATION_METHOD_SSL4EO
@@ -224,7 +221,9 @@ def build_normalization_transform(
     if normalized == NORMALIZATION_METHOD_IMAGENET:
         return build_imagenet_normalization()
     if normalized == NORMALIZATION_METHOD_BANDWISE:
-        raise ValueError("Bandwise normalization requires mean/std stats, which are not provided by default.")
+        raise ValueError(
+            "Bandwise normalization requires mean/std stats, which are not provided by default."
+        )
         if bandwise_stats is None:
             raise ValueError("bandwise normalization requires mean/std stats")
         mean, std = bandwise_stats
@@ -347,7 +346,9 @@ SSL4EO_MODEL_TRANSFORMS: Dict[str, Callable[[torch.Tensor], torch.Tensor]] = {
 }
 
 
-def select_ssl4eo_transform(model_weights: Optional[str]) -> Optional[Callable[[torch.Tensor], torch.Tensor]]:
+def select_ssl4eo_transform(
+    model_weights: Optional[str],
+) -> Optional[Callable[[torch.Tensor], torch.Tensor]]:
     """Return the SSL4EO transform matching the provided weight key, if any."""
 
     weight_key = (model_weights or "").lower()
