@@ -1,33 +1,59 @@
+# Python caches, coverage, and packaging
 __pycache__/
 *.py[cod]
 *$py.class
-*.egg-info
-.pytest_cache
-.ipynb_checkpoints
-
-thumbs.db
-.DS_Store
-.idea
-
-
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 build/
 dist/
 
-# don't save the model checkpoints
-checkpoints/ 
-log/
+# Local environments and editor state
+.venv/
+venv/
+.env
+.env.*
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+.ipynb_checkpoints/
 
+# Local datasets and machine-specific configuration
+/data/**
+!/data/*.md
+/local/
+**/local/
 
-**/configs/prod_default.yaml
-# **
-*.in
-data/**
-local/*
-**/local/*
-**/notebooks/
-!ciip/visualizations/ssl4eo/notebooks/
-!ciip/visualizations/ssl4eo/notebooks/**
+# Hydra and experiment tracking outputs
+/outputs/
+**/outputs/
+/multirun/
+**/multirun/
+/.hydra/
+**/.hydra/
+/lightning_logs/
+**/lightning_logs/
+/log/
+**/wandb/
+**/mlruns/
 
-# **/open_clip_train/outputs/
-**/ciip/lightning_logs/
-# **/metadata.json
+# Checkpoints and generated evaluation artifacts
+/checkpoints/
+**/checkpoints/
+*.ckpt
+*.pt
+*.pth
+/diagnostics/unified_eval/
+/diagnostics/downstream_plots/
+/diagnostics/hyperbolic/
+
+# Generated figures and tables (curated assets can be force-added explicitly)
+*.pdf
+*.svg
+*.png
+*.jpg
+*.jpeg
+*.csv
