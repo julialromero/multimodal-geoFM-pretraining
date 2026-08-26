@@ -46,7 +46,6 @@ Thumbs.db
 *.ckpt
 *.pt
 *.pth
-/diagnostics/unified_eval/
 /diagnostics/downstream_plots/
 /diagnostics/hyperbolic/
 
