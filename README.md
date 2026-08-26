@@ -127,6 +127,30 @@ Additional scripts live in `ciip/visualization/ssl4eo/`, `diagnostics/`, and
   representation diagnostics, plotting tools, and the context that should be
   reported with each result.
 
+## Contributing
+
+Install the development dependencies and run the same fast checks used by CI:
+
+```bash
+python -m pip install -e '.[dev]'
+python -m ruff check ciip/__init__.py \
+  ciip/open_clip_train/{accumulation,batches,checkpointing,config_validation,objectives,optimizer,factories}.py \
+  tests
+python -m pytest -q
+```
+
+Tests that need optional ML libraries skip when those libraries are unavailable.
+Install the appropriate workflow extras (for example `.[train,eval,dev]`) or use
+`environment.yml` before running those tests locally. Tests requiring external
+datasets, checkpoints, GPUs, or distributed infrastructure should be marked as
+integration tests and must not be added to the fast CI path.
+
+Keep source, tests, and maintained documentation in `ciip/`, `tests/`, and
+`docs/`. Put thin standalone analyses in `scripts/`. Datasets, Hydra output
+directories, checkpoints, experiment logs, generated evaluation records, plots,
+and tables are local artifacts and should not be committed unless they are
+deliberately curated examples.
+
 ## Example results
 
 Training runs write checkpoints and logs beneath the Hydra output directory.
@@ -150,9 +174,12 @@ repository does not claim a canonical score in the absence of those artifacts.
 ```text
 ciip/                    models, losses, data, training, and evaluation
 ciip/visualization/ssl4eo/   embedding and hyperbolic visualizations
+clip/                    bundled CLIP model and tokenizer implementation
 diagnostics/             result aggregation and diagnostic scripts
 scripts/                 standalone research analyses
 comparison/              supported external-model comparison code
+data/                    dataset notes; local dataset contents are ignored
+tests/                   fast contract and runtime tests
 docs/                    pretraining, evaluation, and visualization guides
 ```
 
